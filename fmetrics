@@ -96,6 +96,21 @@ json_get() {
   echo "$line" | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p'
 }
 
+ensure_column() {
+  local table="$1" column="$2" ddl="$3"
+  local exists
+  exists=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM pragma_table_info('$table') WHERE name='$column';" 2>/dev/null) || exists=0
+  [[ "$exists" =~ ^[0-9]+$ ]] || exists=0
+  if (( exists == 0 )); then
+    local alter_err=""
+    alter_err=$(sqlite3 "$DB_FILE" "$ddl" 2>&1) || {
+      echo "fmetrics: warning: failed to backfill column '$column' in $DB_FILE: $alter_err" >&2
+      return 1
+    }
+  fi
+  return 0
+}
+
 ensure_db() {
   has sqlite3 || die 3 "sqlite3 is required. Run: fmetrics --install-hints"
   mkdir -p "$FSUITE_DIR" 2>/dev/null || die "Cannot create $FSUITE_DIR"
@@ -179,14 +194,14 @@ COMMIT;
 SQL
   else
     # Schema backfill for existing DBs that predate newer telemetry columns.
-    sqlite3 "$DB_FILE" "ALTER TABLE telemetry ADD COLUMN cpu_temp_mc INTEGER DEFAULT -1;" 2>/dev/null || true
-    sqlite3 "$DB_FILE" "ALTER TABLE telemetry ADD COLUMN disk_temp_mc INTEGER DEFAULT -1;" 2>/dev/null || true
-    sqlite3 "$DB_FILE" "ALTER TABLE telemetry ADD COLUMN ram_total_kb INTEGER DEFAULT -1;" 2>/dev/null || true
-    sqlite3 "$DB_FILE" "ALTER TABLE telemetry ADD COLUMN ram_available_kb INTEGER DEFAULT -1;" 2>/dev/null || true
-    sqlite3 "$DB_FILE" "ALTER TABLE telemetry ADD COLUMN load_avg_1m TEXT DEFAULT '-1';" 2>/dev/null || true
-    sqlite3 "$DB_FILE" "ALTER TABLE telemetry ADD COLUMN filesystem_type TEXT DEFAULT 'unknown';" 2>/dev/null || true
-    sqlite3 "$DB_FILE" "ALTER TABLE telemetry ADD COLUMN storage_type TEXT DEFAULT 'unknown';" 2>/dev/null || true
-    sqlite3 "$DB_FILE" "ALTER TABLE telemetry ADD COLUMN run_id TEXT DEFAULT '';" 2>/dev/null || true
+    ensure_column telemetry cpu_temp_mc "ALTER TABLE telemetry ADD COLUMN cpu_temp_mc INTEGER DEFAULT -1;" || true
+    ensure_column telemetry disk_temp_mc "ALTER TABLE telemetry ADD COLUMN disk_temp_mc INTEGER DEFAULT -1;" || true
+    ensure_column telemetry ram_total_kb "ALTER TABLE telemetry ADD COLUMN ram_total_kb INTEGER DEFAULT -1;" || true
+    ensure_column telemetry ram_available_kb "ALTER TABLE telemetry ADD COLUMN ram_available_kb INTEGER DEFAULT -1;" || true
+    ensure_column telemetry load_avg_1m "ALTER TABLE telemetry ADD COLUMN load_avg_1m TEXT DEFAULT '-1';" || true
+    ensure_column telemetry filesystem_type "ALTER TABLE telemetry ADD COLUMN filesystem_type TEXT DEFAULT 'unknown';" || true
+    ensure_column telemetry storage_type "ALTER TABLE telemetry ADD COLUMN storage_type TEXT DEFAULT 'unknown';" || true
+    ensure_column telemetry run_id "ALTER TABLE telemetry ADD COLUMN run_id TEXT DEFAULT '';" || true
   fi
 }
 

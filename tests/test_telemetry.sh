@@ -458,7 +458,12 @@ test_graceful_without_common_lib() {
 
     FSUITE_TELEMETRY=1 "${FTREE}" "${TEST_DIR}" >/dev/null 2>&1 || true
 
-    [[ -f "${lib}.bak" ]] && mv "${lib}.bak" "$lib"
+    if [[ -f "${lib}.bak" ]]; then
+      if ! mv "${lib}.bak" "$lib"; then
+        echo "Failed to restore ${lib} from ${lib}.bak" >&2
+        rm -f "${lib}.bak"
+      fi
+    fi
 
     if [[ -f "$HOME/.fsuite/telemetry.jsonl" ]]; then
       local bytes

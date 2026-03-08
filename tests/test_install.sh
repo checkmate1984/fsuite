@@ -96,7 +96,12 @@ test_prefix_install_versions_work() {
     FSUITE_TELEMETRY=0 "${prefix}/bin/fmetrics" --version
   )
 
-  if [[ "$output" == *"ftree 1.8.0"* ]] && [[ "$output" == *"fmetrics 1.8.0"* ]]; then
+  if [[ "$output" =~ ftree\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
+     [[ "$output" =~ fsearch\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
+     [[ "$output" =~ fcontent\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
+     [[ "$output" =~ fmap\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
+     [[ "$output" =~ fread\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
+     [[ "$output" =~ fmetrics\ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
     pass "Installed tools report versions from the prefix"
   else
     fail "Installed tools should be executable from the prefix" "Got: $output"
