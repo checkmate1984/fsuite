@@ -617,7 +617,6 @@ process_stdin_unified_diff() {
       local new_start new_count start end
       new_start="${BASH_REMATCH[2]}"
       new_count="${BASH_REMATCH[4]:-1}"
-      [[ -z "$new_count" ]] && new_count=1
 
       start=$((new_start - before))
       end=$((new_start + new_count - 1 + after))
