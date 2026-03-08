@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FEDIT="${SCRIPT_DIR}/../fedit"
+FMAP="${SCRIPT_DIR}/../fmap"
 FMETRICS="${SCRIPT_DIR}/../fmetrics"
 TEST_DIR=""
 TESTS_RUN=0
@@ -46,6 +47,23 @@ def authenticate(user):
     return True
 EOF
 
+  cat > "${TEST_DIR}/repeated_anchor.py" <<'EOF'
+def alpha(user):
+    return True
+
+def beta(user):
+    return True
+EOF
+
+  cat > "${TEST_DIR}/multiline_anchor.py" <<'EOF'
+def authenticate(
+    user,
+):
+    return True
+EOF
+
+  printf 'def authenticate(user):\r\n    return True\r\n' > "${TEST_DIR}/crlf_target.py"
+
   cat > "${TEST_DIR}/payload.txt" <<'EOF'
     audit_log(user)
 EOF
@@ -56,6 +74,9 @@ EOF
   cp "${TEST_DIR}/auth.py" "${TEST_DIR}/auth.py.orig"
   cp "${TEST_DIR}/single.py" "${TEST_DIR}/single.py.orig"
   cp "${TEST_DIR}/insert_target.py" "${TEST_DIR}/insert_target.py.orig"
+  cp "${TEST_DIR}/repeated_anchor.py" "${TEST_DIR}/repeated_anchor.py.orig"
+  cp "${TEST_DIR}/multiline_anchor.py" "${TEST_DIR}/multiline_anchor.py.orig"
+  cp "${TEST_DIR}/crlf_target.py" "${TEST_DIR}/crlf_target.py.orig"
   cp "${TEST_DIR}/replace_me.txt" "${TEST_DIR}/replace_me.txt.orig"
   cp "${TEST_DIR}/file with spaces.txt" "${TEST_DIR}/file with spaces.txt.orig"
 }
@@ -75,10 +96,35 @@ fail() {
   [[ -n "${2:-}" ]] && echo "  Details: $2"
 }
 
+reset_fixture() {
+  local name="$1"
+  cp "${TEST_DIR}/${name}.orig" "${TEST_DIR}/${name}"
+}
+
+sha256_of() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  else
+    shasum -a 256 "$path" | awk '{print $1}'
+  fi
+}
+
 run_test() {
+  local label="$1"
   TESTS_RUN=$((TESTS_RUN + 1))
   shift
-  "$@" || true
+  local before_passed="$TESTS_PASSED"
+  local before_failed="$TESTS_FAILED"
+  local rc=0
+  "$@" || rc=$?
+  if (( TESTS_PASSED == before_passed && TESTS_FAILED == before_failed )); then
+    fail "${label} crashed or made no assertion" "exit=${rc}"
+    return 0
+  fi
+  if (( rc != 0 )) && (( TESTS_FAILED == before_failed )); then
+    fail "${label} exited non-zero without recording failure" "exit=${rc}"
+  fi
 }
 
 test_version() {
@@ -123,7 +169,7 @@ test_install_hints() {
 
 test_dry_run_default() {
   local before output
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   before=$(cat "${TEST_DIR}/single.py")
   output=$(FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/single.py" --replace 'return False' --with 'return deny()' 2>/dev/null)
   if [[ "$output" == *"status: dry-run"* ]] && [[ "$(cat "${TEST_DIR}/single.py")" == "$before" ]]; then
@@ -134,7 +180,7 @@ test_dry_run_default() {
 }
 
 test_apply_replace() {
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/single.py" --replace 'return False' --with 'return deny()' --apply >/dev/null 2>&1 || {
     fail "Apply replace should succeed"
     return
@@ -167,7 +213,7 @@ test_ambiguous_replace_fails() {
 }
 
 test_allow_multiple_replace() {
-  cp "${TEST_DIR}/auth.py.orig" "${TEST_DIR}/auth.py"
+  reset_fixture "auth.py"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/auth.py" --replace 'return False' --with 'return deny()' --allow-multiple --apply >/dev/null 2>&1 || {
     fail "allow-multiple replace should succeed"
     return
@@ -182,7 +228,7 @@ test_allow_multiple_replace() {
 }
 
 test_after_anchor_insert() {
-  cp "${TEST_DIR}/insert_target.py.orig" "${TEST_DIR}/insert_target.py"
+  reset_fixture "insert_target.py"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/insert_target.py" --after 'def authenticate(user):' --content-file "${TEST_DIR}/payload.txt" --apply >/dev/null 2>&1 || {
     fail "After-anchor insertion should succeed"
     return
@@ -195,7 +241,7 @@ test_after_anchor_insert() {
 }
 
 test_before_anchor_insert() {
-  cp "${TEST_DIR}/insert_target.py.orig" "${TEST_DIR}/insert_target.py"
+  reset_fixture "insert_target.py"
   local output
   output=$(FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/insert_target.py" --before 'return True' --with $'    prepare(user)\n' 2>/dev/null)
   if [[ "$output" == *"+    prepare(user)"* ]]; then
@@ -205,9 +251,73 @@ test_before_anchor_insert() {
   fi
 }
 
+test_after_anchor_ambiguity_fails() {
+  local rc=0
+  reset_fixture "repeated_anchor.py"
+  FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/repeated_anchor.py" --after 'return True' --with $'    audit_log(user)\n' >/dev/null 2>&1 || rc=$?
+  if (( rc != 0 )) && cmp -s "${TEST_DIR}/repeated_anchor.py" "${TEST_DIR}/repeated_anchor.py.orig"; then
+    pass "Repeated --after anchor fails closed without allow-multiple"
+  else
+    fail "Repeated --after anchor should fail without mutating file" "rc=$rc"
+  fi
+}
+
+test_before_anchor_ambiguity_fails() {
+  local rc=0
+  reset_fixture "repeated_anchor.py"
+  FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/repeated_anchor.py" --before 'return True' --with $'    audit_log(user)\n' >/dev/null 2>&1 || rc=$?
+  if (( rc != 0 )) && cmp -s "${TEST_DIR}/repeated_anchor.py" "${TEST_DIR}/repeated_anchor.py.orig"; then
+    pass "Repeated --before anchor fails closed without allow-multiple"
+  else
+    fail "Repeated --before anchor should fail without mutating file" "rc=$rc"
+  fi
+}
+
+test_multiline_after_anchor() {
+  reset_fixture "multiline_anchor.py"
+  FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/multiline_anchor.py" \
+    --after $'def authenticate(\n    user,\n):\n' \
+    --with $'    audit_log(user)\n' \
+    --apply >/dev/null 2>&1 || {
+      fail "Multi-line --after anchor should succeed"
+      return
+    }
+  if grep -q 'audit_log(user)' "${TEST_DIR}/multiline_anchor.py"; then
+    pass "Multi-line anchor text is applied as one block"
+  else
+    fail "Multi-line --after anchor should insert payload"
+  fi
+}
+
+test_before_anchor_apply() {
+  reset_fixture "insert_target.py"
+  FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/insert_target.py" --before 'return True' --with $'    prepare(user)\n' --apply >/dev/null 2>&1 || {
+    fail "Before-anchor apply should succeed"
+    return
+  }
+  if grep -q 'prepare(user)' "${TEST_DIR}/insert_target.py"; then
+    pass "Before-anchor apply writes the payload"
+  else
+    fail "Before-anchor apply should mutate the target file"
+  fi
+}
+
+test_stdin_payload() {
+  reset_fixture "insert_target.py"
+  printf '    prepare(user)\n' | FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/insert_target.py" --before 'return True' --stdin --apply >/dev/null 2>&1 || {
+    fail "STDIN payload apply should succeed"
+    return
+  }
+  if grep -q 'prepare(user)' "${TEST_DIR}/insert_target.py"; then
+    pass "STDIN payloads are accepted"
+  else
+    fail "STDIN payload should be written into target file"
+  fi
+}
+
 test_expect_text_success() {
   local rc=0
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/single.py" --expect 'def authenticate' --replace 'return False' --with 'return deny()' >/dev/null 2>&1 || rc=$?
   if (( rc == 0 )); then
     pass "Expected text precondition passes when present"
@@ -218,7 +328,7 @@ test_expect_text_success() {
 
 test_expect_text_failure() {
   local rc=0
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/single.py" --expect 'missing marker' --replace 'return False' --with 'return deny()' >/dev/null 2>&1 || rc=$?
   if (( rc != 0 )); then
     pass "Expected text precondition fails when absent"
@@ -229,12 +339,27 @@ test_expect_text_failure() {
 
 test_expect_sha_failure() {
   local rc=0
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/single.py" --expect-sha256 deadbeef --replace 'return False' --with 'return deny()' >/dev/null 2>&1 || rc=$?
   if (( rc != 0 )); then
     pass "SHA precondition fails on mismatch"
   else
     fail "SHA mismatch should fail"
+  fi
+}
+
+test_expect_sha_success() {
+  local hash
+  reset_fixture "single.py"
+  hash=$(sha256_of "${TEST_DIR}/single.py")
+  FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/single.py" --expect-sha256 "$hash" --replace 'return False' --with 'return deny()' --apply >/dev/null 2>&1 || {
+    fail "SHA precondition happy path should succeed"
+    return
+  }
+  if grep -q 'return deny()' "${TEST_DIR}/single.py"; then
+    pass "SHA precondition succeeds when hash matches"
+  else
+    fail "Expected replacement after matching SHA precondition"
   fi
 }
 
@@ -283,7 +408,7 @@ test_json_output_parseable() {
     return 0
   fi
   local output
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   output=$(FSUITE_TELEMETRY=0 "${FEDIT}" -o json "${TEST_DIR}/single.py" --replace 'return False' --with 'return deny()' 2>/dev/null)
   if printf '%s' "$output" | python3 -m json.tool >/dev/null 2>&1; then
     pass "JSON output is parseable"
@@ -298,7 +423,7 @@ test_json_error_output() {
     return 0
   fi
   local output rc=0
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   output=$(FSUITE_TELEMETRY=0 "${FEDIT}" -o json "${TEST_DIR}/single.py" --replace 'missing target' --with 'x' 2>/dev/null) || rc=$?
   if (( rc != 0 )) && printf '%s' "$output" | python3 -m json.tool >/dev/null 2>&1 && [[ "$output" == *'"error_code":"replace_missing"'* ]]; then
     pass "JSON mode still renders structured output on failure"
@@ -307,8 +432,38 @@ test_json_error_output() {
   fi
 }
 
+test_json_anchor_ambiguous_error() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    pass "JSON anchor-ambiguous test skipped (python3 not available)"
+    return 0
+  fi
+  local output rc=0
+  reset_fixture "repeated_anchor.py"
+  output=$(FSUITE_TELEMETRY=0 "${FEDIT}" -o json "${TEST_DIR}/repeated_anchor.py" --after 'return True' --with $'    x()\n' 2>/dev/null) || rc=$?
+  if (( rc != 0 )) && printf '%s' "$output" | python3 -m json.tool >/dev/null 2>&1 && [[ "$output" == *'"error_code":"anchor_ambiguous"'* ]]; then
+    pass "JSON mode reports anchor_ambiguous errors"
+  else
+    fail "JSON mode should expose anchor_ambiguous" "rc=$rc output=$output"
+  fi
+}
+
+test_json_precondition_error() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    pass "JSON precondition-error test skipped (python3 not available)"
+    return 0
+  fi
+  local output rc=0
+  reset_fixture "single.py"
+  output=$(FSUITE_TELEMETRY=0 "${FEDIT}" -o json "${TEST_DIR}/single.py" --expect 'missing marker' --replace 'return False' --with 'return deny()' 2>/dev/null) || rc=$?
+  if (( rc != 0 )) && printf '%s' "$output" | python3 -m json.tool >/dev/null 2>&1 && [[ "$output" == *'"error_code":"precondition_failed"'* ]]; then
+    pass "JSON mode reports precondition failures"
+  else
+    fail "JSON mode should expose precondition_failed" "rc=$rc output=$output"
+  fi
+}
+
 test_dollar_payload_preserved() {
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/single.py" --replace 'return False' --with 'return "$1 \\U \\L ${value}"' --apply >/dev/null 2>&1 || {
     fail "Dollar-heavy payload replace should succeed"
     return
@@ -326,7 +481,7 @@ test_binary_payload_rejected() {
   local payload="${TEST_DIR}/binary_payload.bin"
   printf 'abc\000def' > "$payload"
   local rc=0
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/single.py" --replace 'return False' --content-file "$payload" >/dev/null 2>&1 || rc=$?
   if (( rc != 0 )); then
     pass "Binary payloads are rejected"
@@ -337,9 +492,9 @@ test_binary_payload_rejected() {
 
 test_paths_output_only_when_applied() {
   local dry_output apply_output
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   dry_output=$(FSUITE_TELEMETRY=0 "${FEDIT}" -o paths "${TEST_DIR}/single.py" --replace 'return False' --with 'return deny()' 2>/dev/null)
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   apply_output=$(FSUITE_TELEMETRY=0 "${FEDIT}" -o paths "${TEST_DIR}/single.py" --replace 'return False' --with 'return deny()' --apply 2>/dev/null)
   if [[ -z "$dry_output" ]] && [[ "$apply_output" == "${TEST_DIR}/single.py" ]]; then
     pass "Paths output only emits applied files"
@@ -349,7 +504,7 @@ test_paths_output_only_when_applied() {
 }
 
 test_symbol_scoping() {
-  cp "${TEST_DIR}/auth.py.orig" "${TEST_DIR}/auth.py"
+  reset_fixture "auth.py"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/auth.py" --symbol authenticate --symbol-type function --replace 'return False' --with 'return deny()' --apply >/dev/null 2>&1 || {
     fail "Symbol-scoped replace should succeed"
     return
@@ -364,8 +519,49 @@ test_symbol_scoping() {
   fi
 }
 
+test_fmap_json_scoping() {
+  local fmap_json="${TEST_DIR}/auth-map.json"
+  reset_fixture "auth.py"
+  FSUITE_TELEMETRY=0 "${FMAP}" -o json "${TEST_DIR}/auth.py" > "$fmap_json" 2>/dev/null || {
+    fail "fmap JSON generation should succeed"
+    return
+  }
+  FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/auth.py" --symbol authenticate --symbol-type function --fmap-json "$fmap_json" --replace 'return False' --with 'return deny()' --apply >/dev/null 2>&1 || {
+    fail "fedit should accept --fmap-json input"
+    return
+  }
+  local first second
+  first=$(sed -n '1,4p' "${TEST_DIR}/auth.py")
+  second=$(sed -n '6,9p' "${TEST_DIR}/auth.py")
+  if [[ "$first" == *'return deny()'* ]] && [[ "$second" == *'return False'* ]]; then
+    pass "--fmap-json path reuse scopes edits correctly"
+  else
+    fail "--fmap-json scoping should edit only the requested symbol"
+  fi
+}
+
+test_crlf_payload_normalization() {
+  reset_fixture "crlf_target.py"
+  FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/crlf_target.py" --after 'def authenticate(user):' --with $'    audit_log(user)\n    notify(user)\n' --apply >/dev/null 2>&1 || {
+    fail "CRLF apply should succeed"
+    return
+  }
+  if perl -e '
+    use strict;
+    use warnings;
+    open my $fh, "<:raw", $ARGV[0] or exit 2;
+    local $/;
+    my $c = <$fh>;
+    exit(($c =~ /\r\n/ && $c !~ /(?<!\r)\n/) ? 0 : 1);
+  ' "${TEST_DIR}/crlf_target.py"; then
+    pass "Payload is normalized to CRLF when target file uses CRLF"
+  else
+    fail "CRLF normalization should not leave bare LF line endings"
+  fi
+}
+
 test_spaces_in_filename() {
-  cp "${TEST_DIR}/file with spaces.txt.orig" "${TEST_DIR}/file with spaces.txt"
+  reset_fixture "file with spaces.txt"
   FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/file with spaces.txt" --replace 'special content' --with 'updated content' --apply >/dev/null 2>&1 || {
     fail "Files with spaces should be editable"
     return
@@ -382,7 +578,7 @@ test_tier3_telemetry() {
     pass "Tier 3 telemetry test skipped (sqlite3 not available)"
     return 0
   fi
-  cp "${TEST_DIR}/single.py.orig" "${TEST_DIR}/single.py"
+  reset_fixture "single.py"
   rm -f "$HOME/.fsuite/telemetry.jsonl" "$HOME/.fsuite/telemetry.db"
   FSUITE_TELEMETRY=3 "${FEDIT}" "${TEST_DIR}/single.py" --replace 'return False' --with 'return deny()' >/dev/null 2>&1 || {
     fail "Tier 3 telemetry dry-run should succeed"
@@ -425,18 +621,28 @@ main() {
   run_test "Allow multiple" test_allow_multiple_replace
   run_test "After anchor insert" test_after_anchor_insert
   run_test "Before anchor insert" test_before_anchor_insert
+  run_test "After anchor ambiguity" test_after_anchor_ambiguity_fails
+  run_test "Before anchor ambiguity" test_before_anchor_ambiguity_fails
+  run_test "Multi-line after anchor" test_multiline_after_anchor
+  run_test "Before anchor apply" test_before_anchor_apply
+  run_test "STDIN payload" test_stdin_payload
   run_test "Expect text success" test_expect_text_success
   run_test "Expect text failure" test_expect_text_failure
   run_test "Expect sha failure" test_expect_sha_failure
+  run_test "Expect sha success" test_expect_sha_success
   run_test "Create dry-run" test_create_dry_run
   run_test "Create apply" test_create_apply
   run_test "Replace-file apply" test_replace_file_apply
   run_test "JSON parseability" test_json_output_parseable
   run_test "JSON error output" test_json_error_output
+  run_test "JSON anchor ambiguous" test_json_anchor_ambiguous_error
+  run_test "JSON precondition error" test_json_precondition_error
   run_test "Dollar payload preservation" test_dollar_payload_preserved
   run_test "Binary payload rejection" test_binary_payload_rejected
   run_test "Paths output" test_paths_output_only_when_applied
   run_test "Symbol scoping" test_symbol_scoping
+  run_test "fmap JSON scoping" test_fmap_json_scoping
+  run_test "CRLF normalization" test_crlf_payload_normalization
   run_test "Spaces in filename" test_spaces_in_filename
   run_test "Tier 3 telemetry" test_tier3_telemetry
 
@@ -446,9 +652,14 @@ main() {
   echo "======================================"
   echo "Total:  ${TESTS_RUN}"
   echo -e "${GREEN}Passed: ${TESTS_PASSED}${NC}"
+  echo -e "${RED}Failed: ${TESTS_FAILED}${NC}"
+
+  if (( TESTS_PASSED + TESTS_FAILED != TESTS_RUN )); then
+    echo "Counter mismatch: run=${TESTS_RUN} passed=${TESTS_PASSED} failed=${TESTS_FAILED}" >&2
+    exit 1
+  fi
 
   if (( TESTS_FAILED > 0 )); then
-    echo -e "${RED}Failed: ${TESTS_FAILED}${NC}"
     exit 1
   fi
 

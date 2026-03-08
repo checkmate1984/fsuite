@@ -206,6 +206,14 @@ make_temp() {
   printf '%s' "$tmp"
 }
 
+make_temp_in() {
+  local dir="$1"
+  local tmp
+  tmp=$(mktemp "${dir%/}/.fedit.XXXXXX")
+  TEMP_FILES+=("$tmp")
+  printf '%s' "$tmp"
+}
+
 byte_len() {
   local s="$1"
   local old_lc_all="__FSUITE_UNSET__"
@@ -253,11 +261,11 @@ normalized_payload_file() {
       use strict;
       use warnings;
       my ($src, $dst) = @ARGV;
-      open my $sf, "<", $src or die;
+      open my $sf, "<:raw", $src or die;
       local $/;
       my $payload = <$sf>;
-      $payload =~ s/\n/\r\n/g unless $payload =~ /\r\n/;
-      open my $df, ">", $dst or die;
+      $payload =~ s/(?<!\r)\n/\r\n/g;
+      open my $df, ">:raw", $dst or die;
       print {$df} $payload;
     ' "$PAYLOAD_FILE" "$payload_path"
   else
@@ -337,7 +345,7 @@ EOF
 self_check() {
   local ok=1
   echo "fedit dependency check:"
-  for cmd in perl diff mktemp; do
+  for cmd in perl diff mktemp flock; do
     if has "$cmd"; then
       echo "  $cmd: $(command -v "$cmd")"
     else
@@ -363,10 +371,10 @@ self_check() {
 
 install_hints() {
   cat <<'EOF'
-fedit requires: perl, diffutils, coreutils
+fedit requires: perl, diffutils, coreutils, util-linux
 
-  Debian/Ubuntu: sudo apt install perl diffutils coreutils
-  Fedora/RHEL:   sudo dnf install perl diffutils coreutils
+  Debian/Ubuntu: sudo apt install perl diffutils coreutils util-linux
+  Fedora/RHEL:   sudo dnf install perl diffutils coreutils util-linux
   macOS:         brew install perl diffutils coreutils
 EOF
   exit 0
@@ -654,7 +662,7 @@ splice_line_range() {
 apply_patch_operation() {
   local source_file="$1" candidate_file="$2"
   local original_content target_count target_text=""
-  local target_file payload_file
+  local target_file payload_file multiline_anchor=0
 
   original_content=$(cat "$source_file")
   payload_file=$(normalized_payload_file "$original_content")
@@ -669,23 +677,25 @@ apply_patch_operation() {
 
   target_file=$(make_temp)
   printf '%s' "$target_text" > "$target_file"
-  if [[ -n "$REPLACE_TEXT" ]]; then
+  [[ "$target_text" == *$'\n'* ]] && multiline_anchor=1
+  if [[ -n "$REPLACE_TEXT" || "$multiline_anchor" == "1" ]]; then
     target_count=$(match_count "$source_file" "$target_file") || target_count="0"
   else
     target_count=$(perl -e '
       use strict;
       use warnings;
       my ($source_path, $target_path) = @ARGV;
-      open my $tf, "<", $target_path or die;
-      open my $sf, "<", $source_path or die;
+      open my $tf, "<:raw", $target_path or die;
+      open my $sf, "<:raw", $source_path or die;
       local $/;
       my $target = <$tf>;
+      $/ = "\n";
       my $count = 0;
       while (my $line = <$sf>) {
         $count++ if index($line, $target) != -1;
       }
       print $count;
-    ' "$source_file" "$target_file" 2>/dev/null) || target_count="0"
+    ' "$source_file" "$target_file") || target_count="0"
   fi
   ANCHORS_MATCHED="$target_count"
 
@@ -733,6 +743,37 @@ apply_patch_operation() {
       open my $out_fh, ">:raw", $out_path or die;
       print {$out_fh} $out;
     ' "$ALLOW_MULTIPLE" "$target_file" "$payload_file" "$source_file" "$candidate_file"
+  elif (( multiline_anchor == 1 )); then
+    perl -e '
+      use strict;
+      use warnings;
+      use bytes;
+      my ($mode, $allow_multiple, $target_path, $payload_path, $original_path, $out_path) = @ARGV;
+      open my $tf, "<:raw", $target_path or die;
+      open my $pf, "<:raw", $payload_path or die;
+      open my $of, "<:raw", $original_path or die;
+      local $/;
+      my $target = <$tf>;
+      my $payload = <$pf>;
+      my $content = <$of>;
+      my $out = q{};
+      my $pos = 0;
+      while ((my $match = index($content, $target, $pos)) != -1) {
+        $out .= substr($content, $pos, $match - $pos);
+        if ($mode eq q{after}) {
+          $out .= $target;
+          $out .= $payload;
+        } else {
+          $out .= $payload;
+          $out .= $target;
+        }
+        $pos = $match + length($target);
+        last if $allow_multiple ne q{1};
+      }
+      $out .= substr($content, $pos);
+      open my $out_fh, ">:raw", $out_path or die;
+      print {$out_fh} $out;
+    ' "$( [[ -n "$AFTER_TEXT" ]] && printf after || printf before )" "$ALLOW_MULTIPLE" "$target_file" "$payload_file" "$source_file" "$candidate_file"
   elif [[ -n "$AFTER_TEXT" ]]; then
     perl -e '
       use strict;
@@ -741,8 +782,8 @@ apply_patch_operation() {
       open my $tf, "<:raw", $target_path or die;
       open my $pf, "<:raw", $payload_path or die;
       open my $of, "<:raw", $original_path or die;
-      my $target = <$tf>;
       local $/;
+      my $target = <$tf>;
       my $payload = <$pf>;
       local $/ = "\n";
       my @lines = <$of>;
@@ -772,8 +813,8 @@ apply_patch_operation() {
       open my $tf, "<:raw", $target_path or die;
       open my $pf, "<:raw", $payload_path or die;
       open my $of, "<:raw", $original_path or die;
-      my $target = <$tf>;
       local $/;
+      my $target = <$tf>;
       my $payload = <$pf>;
       local $/ = "\n";
       my @lines = <$of>;
@@ -805,14 +846,19 @@ apply_candidate() {
     return 0
   fi
 
-  local target_dir target_tmp
+  local target_dir target_tmp current_hash lock_fd=""
   target_dir=$(dirname "$TARGET_PATH")
-  target_tmp=$(mktemp "${target_dir}/.fedit.XXXXXX")
-  TEMP_FILES+=("$target_tmp")
+  target_tmp=$(make_temp_in "$target_dir")
+
+  if [[ -f "$TARGET_PATH" ]]; then
+    exec {lock_fd}<"$TARGET_PATH" || { ERROR_CODE="permission"; die 1 "Failed to open target for locking"; }
+    flock -x "$lock_fd" || { ERROR_CODE="permission"; die 1 "Failed to lock target for writing"; }
+  fi
+
   if [[ -n "$EXPECTED_WRITE_SHA" && -f "$TARGET_PATH" ]]; then
-    local current_hash
     current_hash=$(compute_sha256 "$TARGET_PATH" 2>/dev/null || true)
     if [[ -z "$current_hash" || "$current_hash" != "$EXPECTED_WRITE_SHA" ]]; then
+      [[ -n "$lock_fd" ]] && exec {lock_fd}<&-
       ERROR_CODE="precondition_failed"
       die 1 "Target changed after precondition check; refusing to overwrite"
     fi
@@ -821,7 +867,12 @@ apply_candidate() {
   if [[ -f "$TARGET_PATH" ]]; then
     preserve_mode "$TARGET_PATH" "$target_tmp"
   fi
-  mv "$target_tmp" "$TARGET_PATH"
+  mv "$target_tmp" "$TARGET_PATH" || {
+    [[ -n "$lock_fd" ]] && exec {lock_fd}<&-
+    ERROR_CODE="permission"
+    die 1 "Failed to replace target file"
+  }
+  [[ -n "$lock_fd" ]] && exec {lock_fd}<&-
   APPLIED=true
 }
 
@@ -839,15 +890,20 @@ check_preconditions() {
     fi
   fi
 
-  if [[ -n "$EXPECT_SHA256" ]]; then
+  if [[ -f "$TARGET_PATH" ]]; then
     local actual_hash
     actual_hash=$(compute_sha256 "$original_file" 2>/dev/null || true)
-    if [[ -z "$actual_hash" || "$actual_hash" != "$EXPECT_SHA256" ]]; then
+    if [[ -z "$actual_hash" ]]; then
+      PRECONDITIONS_OK=false
+      ERROR_CODE="precondition_failed"
+      die 1 "Failed to compute target hash for write-time safety"
+    fi
+    EXPECTED_WRITE_SHA="$actual_hash"
+    if [[ -n "$EXPECT_SHA256" && "$actual_hash" != "$EXPECT_SHA256" ]]; then
       PRECONDITIONS_OK=false
       ERROR_CODE="precondition_failed"
       die 1 "--expect-sha256 does not match target file"
     fi
-    EXPECTED_WRITE_SHA="$actual_hash"
   fi
 }
 
@@ -868,7 +924,19 @@ build_patch_candidate() {
     scoped_candidate=$(make_temp)
     extract_line_range "$original_file" "$scope_start" "$scope_end" "$scoped_original" || { ERROR_CODE="symbol_missing"; die 1 "Failed to extract symbol-scoped lines"; }
     apply_patch_operation "$scoped_original" "$scoped_candidate"
-    splice_line_range "$original_file" "$scope_start" "$scope_end" "$scoped_candidate" "$candidate_file" || { ERROR_CODE="symbol_missing"; die 1 "Symbol scope drifted; refusing to append stale replacement"; }
+    local splice_rc=0
+    splice_line_range "$original_file" "$scope_start" "$scope_end" "$scoped_candidate" "$candidate_file" || splice_rc=$?
+    case "$splice_rc" in
+      0) ;;
+      12)
+        ERROR_CODE="symbol_missing"
+        die 1 "Symbol scope drifted; refusing to append stale replacement"
+        ;;
+      *)
+        ERROR_CODE="invalid_args"
+        die 1 "Failed to rebuild target file from symbol-scoped replacement"
+        ;;
+    esac
     return 0
   fi
 
