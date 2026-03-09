@@ -1164,7 +1164,7 @@ if not files:
     sys.exit(0)
 matches = [s for s in files[0].get("symbols", []) if needle in (s.get("text") or "")]
 if not matches:
-    print("OK")
+    print("NOT_FOUND")
     sys.exit(0)
 actual = matches[0].get("type")
 if actual != expected:
