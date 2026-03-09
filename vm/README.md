@@ -7,7 +7,7 @@ in a clean Ubuntu guest.
 
 - downloads the Ubuntu Noble cloud image on first run
 - boots a disposable VM with cloud-init
-- installs the local `fsuite_2.0.0-1_all.deb`
+- installs the local `fsuite_2.1.0-1_all.deb`
 - runs one of two scenarios:
   - `smoke`: noisy TypeScript fixture, source-first discovery, and a targeted `fedit` patch
   - `adversarial`: stale batch targets, unreadable files, and fail-closed behavior

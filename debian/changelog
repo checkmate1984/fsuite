@@ -1,3 +1,14 @@
+fsuite (2.1.0-1) unstable; urgency=medium
+
+  * feat(fmap): add Kotlin symbol mapping for .kt and .kts files
+  * feat(fmap): add Android-lite mapping for AndroidManifest.xml and
+    res/layout XML
+  * fix(fmap): tighten Kotlin/manifest matching and expand edge-case
+    coverage
+  * release: unify all tool versions at 2.1.0
+
+ -- Chess Williams <chess.w.williams@gmail.com>  Mon, 09 Mar 2026 04:50:17 -0500
+
 fsuite (2.0.0-1) unstable; urgency=medium
 
   * feat(fedit): add symbol-first shortcuts (--function, --class, --method,

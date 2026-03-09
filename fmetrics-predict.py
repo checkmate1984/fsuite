@@ -19,7 +19,7 @@ import sys
 from contextlib import closing
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 DEFAULT_K = 5
 MIN_SAMPLES = 5
 

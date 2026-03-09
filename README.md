@@ -659,7 +659,7 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
 ```json
 {
   "tool": "fsearch",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "pattern": "*token*",
   "name_glob": "*token*",
   "path": "/home/user",
@@ -675,7 +675,7 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
 ```json
 {
   "tool": "fcontent",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "query": "ERROR",
   "mode": "directory",
   "path": "/var/log",
@@ -691,7 +691,7 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
 ```json
 {
   "tool": "ftree",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "mode": "tree",
   "backend": "tree",
   "path": "/project",
@@ -712,7 +712,7 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
 ```json
 {
   "tool": "ftree",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "mode": "recon",
   "backend": "find/du/stat",
   "path": "/project",
@@ -733,7 +733,7 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
 ```json
 {
   "tool": "fmap",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "mode": "single_file",
   "path": "/project/src/auth.py",
   "total_files_scanned": 1,
@@ -761,7 +761,7 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
 ```json
 {
   "tool": "fread",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "mode": "around",
   "truncated": false,
   "truncation_reason": "none",
@@ -803,7 +803,7 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
 ```json
 {
   "tool": "fmetrics",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "subcommand": "stats",
   "total_runs": 24,
   "db_path": "/home/user/.fsuite/telemetry.db",
@@ -1423,6 +1423,20 @@ For harnesses that read repo instructions, point them at [AGENTS.md](AGENTS.md).
 ---
 
 ## Changelog
+
+### v2.1.0
+
+`fmap` expands from language-aware code mapping into a more practical mobile-leaning scout step. This release adds Kotlin coverage for both source files and Gradle Kotlin DSL, plus an Android-lite bridge for manifest and layout XML discovery.
+
+**New language and ecosystem coverage:**
+- **`fmap`**: Kotlin symbol mapping for `.kt` and `.kts`, including classes, objects, interfaces, functions, imports, and SCREAMING_CASE constants
+- **`fmap`**: Android-lite mapping for `AndroidManifest.xml` and `res/layout/*.xml` with narrow symbol extraction for application components and layout elements
+- **Tests**: added Kotlin and Android-lite coverage, including regressions for modifier handling and manifest tag disambiguation
+
+**Release hardening:**
+- **`fmap`**: tightened Kotlin constant matching so bare declarations do not false-positive as mapped constants
+- **`fmap`**: narrowed manifest activity matching so `<activity-alias>` no longer misclassifies as `<activity>`
+- **Packaging**: suite version unified at `2.1.0`, including updated Debian release assets
 
 ### v2.0.0
 
