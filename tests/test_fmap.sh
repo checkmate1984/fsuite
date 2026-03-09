@@ -181,6 +181,18 @@ KTSEOF
 </manifest>
 MANIFESTEOF
 
+  mkdir -p "${TEST_DIR}/src/app/src/main/res/layout"
+  cat > "${TEST_DIR}/src/app/src/main/res/layout/activity_main.xml" <<'LAYOUTEOF'
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <TextView
+        android:text="Hello" />
+    <com.example.widgets.SessionBanner
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+</androidx.constraintlayout.widget.ConstraintLayout>
+LAYOUTEOF
+
   # Rust fixtures
   cat > "${TEST_DIR}/src/main.rs" <<'RSEOF'
 use std::collections::HashMap;
@@ -1429,6 +1441,36 @@ test_android_manifest_is_path_scoped() {
   fi
 }
 
+test_dir_android_layout_symbols() {
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FMAP}" "${TEST_DIR}/src/app/src/main/res/layout/activity_main.xml" 2>&1)
+  if [[ "$output" =~ "(android_layout)" ]] && [[ "$output" =~ "ConstraintLayout" ]] && [[ "$output" =~ "SessionBanner" ]]; then
+    pass "Android layout symbols found"
+  else
+    fail "Android layout symbols missing" "$output"
+  fi
+}
+
+test_parse_android_layout_exact() {
+  local result
+  result=$(_validate_lang_json "${TEST_DIR}/src/app/src/main/res/layout/activity_main.xml" "android_layout" "class" 3)
+  if [[ "$result" == "OK" ]]; then
+    pass "Android layout exact parse: view tags only, no dupes"
+  else
+    fail "Android layout exact parse failed" "$result"
+  fi
+}
+
+test_android_layout_is_path_scoped() {
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FMAP}" -o json "${TEST_DIR}/src/app/src/main/AndroidManifest.xml" 2>&1)
+  if [[ "$output" != *"android_layout"* ]]; then
+    pass "Android layout detection stays path-scoped"
+  else
+    fail "Android layout detection leaked into non-layout files" "$output"
+  fi
+}
+
 test_parse_rust_exact() {
   local result
   result=$(_validate_lang_json "${TEST_DIR}/src/main.rs" "rust" "function,class,import,constant,type" 8)
@@ -1812,6 +1854,7 @@ main() {
     run_test "Swift symbols" test_dir_swift_symbols
     run_test "Kotlin symbols" test_dir_kotlin_symbols
     run_test "Android manifest symbols" test_dir_android_manifest_symbols
+    run_test "Android layout symbols" test_dir_android_layout_symbols
 
   # Single file mode
   run_test "Single file detect" test_single_file_detect
@@ -1907,6 +1950,8 @@ main() {
     run_test "Gradle Kotlin DSL detection" test_gradle_kts_detects_as_kotlin
     run_test "Android manifest exact parse" test_parse_android_manifest_exact
     run_test "Android manifest path scoping" test_android_manifest_is_path_scoped
+    run_test "Android layout exact parse" test_parse_android_layout_exact
+    run_test "Android layout path scoping" test_android_layout_is_path_scoped
 
     # New language validation
     run_test "Invalid --lang lists new langs" test_bad_lang_lists_new_languages

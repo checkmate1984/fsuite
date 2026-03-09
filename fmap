@@ -496,6 +496,11 @@ detect_language() {
     Makefile|makefile|GNUmakefile) echo "makefile"; return ;;
   esac
 
+  if [[ "$file" == */res/layout/*.xml ]]; then
+    echo "android_layout"
+    return
+  fi
+
   case "$ext" in
     py|pyw|pyi) echo "python"; return ;;
     js|mjs|cjs|jsx) echo "javascript"; return ;;
@@ -613,6 +618,11 @@ extract_symbols() {
           "class:^[[:space:]]*<service\\b"
           "class:^[[:space:]]*<receiver\\b"
           "class:^[[:space:]]*<provider\\b"
+        )
+        ;;
+      android_layout)
+        patterns=(
+          "class:^[[:space:]]*<[A-Za-z_][A-Za-z0-9_.]*\\b"
         )
         ;;
       swift)
