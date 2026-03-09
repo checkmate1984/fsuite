@@ -6,6 +6,8 @@ fsuite (2.0.0-1) unstable; urgency=medium
     with paths and fmap-json formats, four-phase atomic apply engine
   * feat(fedit): batch JSON envelope with per-target results, combined_diff,
     preflighted flag, and granular error reporting
+  * feat(fsuite): add suite-level guide command covering the canonical flow,
+    tool roles, examples, and agent/headless usage guidance
   * feat(fedit): add normalize_path() for tilde expansion and path
     canonicalization in batch target resolution
   * docs: update fedit usage with batch and symbol shortcut examples

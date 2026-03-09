@@ -1374,7 +1374,8 @@ For harnesses that read repo instructions, point them at [AGENTS.md](AGENTS.md).
 **Workflow hardening:**
 - **`fsearch` / `fcontent`**: default-ignore steering for dependency/build trees so agent discovery stays focused on real project files
 - **Docs**: README and AGENTS guidance now frame `fcontent` as a confirmation tool and `fedit` as part of the structural edit loop
-- **Packaging**: suite version unified at `2.0.0`, including helper scripts and Debian release assets
+- **`fsuite`**: new suite-level guide command that prints the conceptual flow, tool roles, and headless usage contract on first contact
+- **Packaging**: suite version unified at `2.0.0`, including the new `fsuite` command, helper scripts, and Debian release assets
 
 ### v1.9.0
 

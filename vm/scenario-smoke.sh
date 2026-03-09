@@ -115,7 +115,7 @@ if ! grep -q 'return authenticate(user);' <<<"$INDEX_READ"; then
 fi
 if grep -q 'return user.length > 5;' <<<"$INDEX_READ"; then
   echo "fedit leaked outside the target file" >&2
-  exit 17
+  exit 18
 fi
 
 {

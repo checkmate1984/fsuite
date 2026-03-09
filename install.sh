@@ -69,8 +69,16 @@ install_from_source() {
     run_privileged install -m 755 "${SCRIPT_DIR}/${tool}" "${bin_dir}/${tool}"
   done
 
-  run_privileged install -m 644 "${SCRIPT_DIR}/_fsuite_common.sh" "${share_dir}/_fsuite_common.sh"
-  run_privileged install -m 644 "${SCRIPT_DIR}/fmetrics-predict.py" "${share_dir}/fmetrics-predict.py"
+  local share_file
+  local mode
+  for share_file in "${SHARE_FILES[@]}"; do
+    [[ -f "${SCRIPT_DIR}/${share_file}" ]] || die "Missing shared file: ${share_file}"
+    case "$share_file" in
+      fmetrics-predict.py) mode=755 ;;
+      *) mode=644 ;;
+    esac
+    run_privileged install -m "$mode" "${SCRIPT_DIR}/${share_file}" "${share_dir}/${share_file}"
+  done
 }
 
 install_from_package() {

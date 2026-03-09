@@ -17,9 +17,10 @@ UBUNTU_IMAGE_URL="${UBUNTU_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/curr
 BASE_IMAGE="${IMAGE_DIR}/ubuntu-noble-amd64.img"
 PRIVATE_KEY="${SSH_DIR}/id_ed25519"
 PUBLIC_KEY="${PRIVATE_KEY}.pub"
-LOCAL_DEB="${LOCAL_DEB:-${REPO_PARENT}/fsuite_2.0.0-1_all.deb}"
+LOCAL_DEB="${LOCAL_DEB:-}"
 SCENARIO_NAME="${SCENARIO_NAME:-smoke}"
 CLEANUP_ON_EXIT=1
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5)
 
 usage() {
   cat <<USAGE
@@ -86,7 +87,6 @@ SCENARIO_SCRIPT="${SCRIPT_DIR}/scenario-${SCENARIO_NAME}.sh"
 
 mkdir -p "$STATE_DIR" "$IMAGE_DIR" "$SEED_DIR" "$ARTIFACT_DIR" "$SSH_DIR"
 [[ -f "$SCENARIO_SCRIPT" ]] || { echo "Scenario script not found: $SCENARIO_SCRIPT" >&2; exit 1; }
-[[ -f "$LOCAL_DEB" ]] || die "Local package not found: $LOCAL_DEB"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -95,9 +95,26 @@ require_cmd() {
   }
 }
 
-for cmd in qemu-system-x86_64 qemu-img genisoimage ssh scp curl timeout ssh-keygen ss; do
+for cmd in qemu-system-x86_64 qemu-img genisoimage ssh scp curl timeout ssh-keygen ss base64; do
   require_cmd "$cmd"
 done
+
+discover_local_deb() {
+  if [[ -n "$LOCAL_DEB" ]]; then
+    return 0
+  fi
+
+  LOCAL_DEB="$(
+    find "$REPO_PARENT" -maxdepth 1 -type f -name 'fsuite_*_all.deb' -printf '%f\n' 2>/dev/null \
+      | sort -V \
+      | tail -n1
+  )"
+  [[ -n "$LOCAL_DEB" ]] || die "No local fsuite .deb found under ${REPO_PARENT}"
+  LOCAL_DEB="${REPO_PARENT}/${LOCAL_DEB}"
+}
+
+discover_local_deb
+[[ -f "$LOCAL_DEB" ]] || die "Local package not found: $LOCAL_DEB"
 
 stop_vm() {
   if [[ -f "$PID_FILE" ]]; then
@@ -138,6 +155,7 @@ if (( REUSE_OVERLAY == 0 )); then
 fi
 
 PUBKEY_CONTENT=$(cat "$PUBLIC_KEY")
+SCENARIO_B64="$(base64 < "$SCENARIO_SCRIPT" | tr -d '\n')"
 cat > "$SEED_DIR/user-data" <<USERDATA
 #cloud-config
 users:
@@ -158,8 +176,8 @@ packages:
 write_files:
   - path: /usr/local/bin/fsuite-vm-scenario.sh
     permissions: '0755'
-    content: |
-$(sed 's/^/      /' "$SCENARIO_SCRIPT")
+    encoding: b64
+    content: ${SCENARIO_B64}
 runcmd:
   - [ bash, -lc, 'mkdir -p /home/${SSH_USER}/workspace /home/${SSH_USER}/artifacts && chown -R ${SSH_USER}:${SSH_USER} /home/${SSH_USER}/workspace /home/${SSH_USER}/artifacts' ]
 USERDATA
@@ -190,7 +208,7 @@ qemu-system-x86_64 \
 wait_for_ssh() {
   timeout 300 bash -c '
     while true; do
-      if ssh -i "$0" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p "$1" "$2@127.0.0.1" "echo ready" >/dev/null 2>&1; then
+      if ssh -i "$0" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -p "$1" "$2@127.0.0.1" "echo ready" >/dev/null 2>&1; then
         exit 0
       fi
       sleep 2
@@ -199,8 +217,9 @@ wait_for_ssh() {
 }
 
 wait_for_ssh
-ssh -i "$PRIVATE_KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  "${SSH_USER}@127.0.0.1" "sudo cloud-init status --wait >/dev/null 2>&1" || die "cloud-init did not complete successfully"
+ssh -i "$PRIVATE_KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" \
+  "${SSH_USER}@127.0.0.1" "sudo cloud-init status --wait --long" \
+  | tee "$ARTIFACT_DIR/cloud-init-status.txt" || die "cloud-init did not complete successfully"
 
 if (( START_ONLY == 1 )); then
   CLEANUP_ON_EXIT=0
@@ -208,15 +227,15 @@ if (( START_ONLY == 1 )); then
   exit 0
 fi
 
-scp -i "$PRIVATE_KEY" -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+scp -i "$PRIVATE_KEY" -P "$SSH_PORT" "${SSH_OPTS[@]}" \
   "$LOCAL_DEB" "${SSH_USER}@127.0.0.1:/home/${SSH_USER}/fsuite.deb" >/dev/null
 set +e
-timeout "$SCENARIO_TIMEOUT" ssh -i "$PRIVATE_KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+timeout "$SCENARIO_TIMEOUT" ssh -i "$PRIVATE_KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" \
   "${SSH_USER}@127.0.0.1" \
   "export FSUITE_TELEMETRY=0; sudo dpkg -i /home/${SSH_USER}/fsuite.deb && /usr/local/bin/fsuite-vm-scenario.sh" \
   | tee "$ARTIFACT_DIR/scenario-output.txt"
 SCENARIO_RC=${PIPESTATUS[0]}
-scp -i "$PRIVATE_KEY" -P "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r \
+scp -i "$PRIVATE_KEY" -P "$SSH_PORT" "${SSH_OPTS[@]}" -r \
   "${SSH_USER}@127.0.0.1:/home/${SSH_USER}/artifacts/." "$ARTIFACT_DIR/" >/dev/null 2>&1
 set -e
 
