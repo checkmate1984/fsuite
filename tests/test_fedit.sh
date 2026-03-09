@@ -68,6 +68,13 @@ EOF
     audit_log(user)
 EOF
 
+  cat > "${TEST_DIR}/types.ts" <<'EOF'
+import { readFile } from 'fs';
+const MAX_SIZE = 10;
+export type CustomType = { name: string };
+export function x(): CustomType { return { name: 'x' }; }
+EOF
+
   echo 'old content' > "${TEST_DIR}/replace_me.txt"
   echo 'special content' > "${TEST_DIR}/file with spaces.txt"
 
@@ -77,6 +84,7 @@ EOF
   cp "${TEST_DIR}/repeated_anchor.py" "${TEST_DIR}/repeated_anchor.py.orig"
   cp "${TEST_DIR}/multiline_anchor.py" "${TEST_DIR}/multiline_anchor.py.orig"
   cp "${TEST_DIR}/crlf_target.py" "${TEST_DIR}/crlf_target.py.orig"
+  cp "${TEST_DIR}/types.ts" "${TEST_DIR}/types.ts.orig"
   cp "${TEST_DIR}/replace_me.txt" "${TEST_DIR}/replace_me.txt.orig"
   cp "${TEST_DIR}/file with spaces.txt" "${TEST_DIR}/file with spaces.txt.orig"
 }
@@ -683,6 +691,39 @@ test_multiple_shortcuts_conflict() {
   fi
 }
 
+test_import_shortcut() {
+  reset_fixture "types.ts"
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/types.ts" --import readFile --replace "import { readFile } from 'fs';" --with "import { writeFile } from 'fs';" 2>/dev/null)
+  if [[ "$output" == *"+import { writeFile } from 'fs';"* ]]; then
+    pass "--import shortcut scopes correctly"
+  else
+    fail "--import shortcut should target the import symbol" "Got: $output"
+  fi
+}
+
+test_constant_shortcut() {
+  reset_fixture "types.ts"
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/types.ts" --constant MAX_SIZE --replace 'MAX_SIZE = 10' --with 'MAX_SIZE = 20' 2>/dev/null)
+  if [[ "$output" == *'+const MAX_SIZE = 20;'* ]]; then
+    pass "--constant shortcut scopes correctly"
+  else
+    fail "--constant shortcut should target the constant symbol" "Got: $output"
+  fi
+}
+
+test_type_shortcut() {
+  reset_fixture "types.ts"
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FEDIT}" "${TEST_DIR}/types.ts" --type CustomType --replace 'name: string' --with 'name: number' 2>/dev/null)
+  if [[ "$output" == *'+export type CustomType = { name: number };'* ]]; then
+    pass "--type shortcut scopes correctly"
+  else
+    fail "--type shortcut should target the type symbol" "Got: $output"
+  fi
+}
+
 # ==============================
 # Batch Mode Tests
 # ==============================
@@ -731,10 +772,11 @@ test_batch_preflight_failure_writes_nothing() {
   printf '%s\n' "$a" "$b" "$c" | FSUITE_TELEMETRY=0 "${FEDIT}" --targets-file - --targets-format paths --replace 'old_value = 1' --with 'new_value = 2' --apply >/dev/null 2>&1 || rc=$?
   if (( rc != 0 )) && \
      [[ "$(cat "$a")" == 'old_value = 1' ]] && \
-     [[ "$(cat "$b")" == 'old_value = 1' ]]; then
+     [[ "$(cat "$b")" == 'old_value = 1' ]] && \
+     [[ "$(cat "$c")" == 'different_text = 99' ]]; then
     pass "Preflight failure writes nothing"
   else
-    fail "When one target fails planning, no files should be mutated" "rc=$rc a=$(cat "$a")"
+    fail "When one target fails planning, no files should be mutated" "rc=$rc a=$(cat "$a") b=$(cat "$b") c=$(cat "$c")"
   fi
 }
 
@@ -788,7 +830,7 @@ def helper():
     return True
 PYEOF
   local fmap_json="${TEST_DIR}/batch-map.json"
-  FSUITE_TELEMETRY=0 "${FMAP}" -o json "$a" "$b" > "$fmap_json" 2>/dev/null || {
+  printf '%s\n%s\n' "$a" "$b" | FSUITE_TELEMETRY=0 "${FMAP}" -o json > "$fmap_json" 2>/dev/null || {
     fail "fmap JSON generation for batch should succeed"
     return
   }
@@ -796,13 +838,16 @@ PYEOF
     fail "Batch fmap-json should succeed"
     return
   }
-  local a_auth a_other
+  local a_auth a_other b_auth b_helper
   a_auth=$(sed -n '2p' "$a")
   a_other=$(sed -n '5p' "$a")
-  if [[ "$a_auth" == *'return deny()'* ]] && [[ "$a_other" == *'return False'* ]]; then
+  b_auth=$(sed -n '2p' "$b")
+  b_helper=$(sed -n '5p' "$b")
+  if [[ "$a_auth" == *'return deny()'* ]] && [[ "$a_other" == *'return False'* ]] && \
+     [[ "$b_auth" == *'return deny()'* ]] && [[ "$b_helper" == *'return True'* ]]; then
     pass "Batch fmap-json targets format works"
   else
-    fail "fmap-json batch should scope correctly" "a_auth='$a_auth' a_other='$a_other'"
+    fail "fmap-json batch should scope correctly" "a_auth='$a_auth' a_other='$a_other' b_auth='$b_auth' b_helper='$b_helper'"
   fi
 }
 
@@ -819,12 +864,12 @@ test_batch_stdin_targets() {
 }
 
 test_batch_stdin_payload_conflict() {
-  local rc=0
-  echo "/tmp/dummy.py" | FSUITE_TELEMETRY=0 "${FEDIT}" --targets-file - --targets-format paths --stdin --replace 'x' --with 'y' >/dev/null 2>&1 || rc=$?
-  if (( rc != 0 )); then
+  local rc=0 output
+  output=$(echo "/tmp/dummy.py" | FSUITE_TELEMETRY=0 "${FEDIT}" --targets-file - --targets-format paths --stdin --replace 'x' --with 'y' 2>&1) || rc=$?
+  if (( rc != 0 )) && [[ "$output" == *'--targets-file - (stdin targets) is mutually exclusive with --stdin (payload)'* ]]; then
     pass "--targets-file - + --stdin conflict detected"
   else
-    fail "--targets-file - and --stdin should be mutually exclusive"
+    fail "--targets-file - and --stdin should fail for the explicit conflict reason" "rc=$rc output=$output"
   fi
 }
 
@@ -859,12 +904,93 @@ test_batch_paths_output() {
   echo 'x = 1' > "$a"
   echo 'x = 1' > "$b"
   apply_output=$(printf '%s\n' "$a" "$b" | FSUITE_TELEMETRY=0 "${FEDIT}" -o paths --targets-file - --targets-format paths --replace 'x = 1' --with 'x = 2' --apply 2>/dev/null)
-  local line_count
-  line_count=$(printf '%s\n' "$apply_output" | wc -l | tr -d '[:space:]')
-  if [[ -z "$dry_output" ]] && (( line_count == 2 )); then
+  if [[ -z "$dry_output" ]] && [[ "$apply_output" == *"$a"* ]] && [[ "$apply_output" == *"$b"* ]]; then
     pass "Batch paths output only emits applied paths"
   else
     fail "Paths: empty on dry-run, one per applied on apply" "dry='$dry_output' apply='$apply_output'"
+  fi
+}
+
+test_batch_expect_precondition() {
+  local a="${TEST_DIR}/batch_expect_a.py" b="${TEST_DIR}/batch_expect_b.py"
+  cat > "$a" <<'EOF'
+def authenticate(user):
+    return False
+EOF
+  cat > "$b" <<'EOF'
+def authenticate(user):
+    return False
+EOF
+  printf '%s\n' "$a" "$b" | FSUITE_TELEMETRY=0 "${FEDIT}" --targets-file - --targets-format paths --expect 'def authenticate' --replace 'return False' --with 'return deny()' --apply >/dev/null 2>&1 || {
+    fail "Batch --expect precondition should succeed when all targets match"
+    return
+  }
+  if [[ "$(cat "$a")" == *'return deny()'* ]] && [[ "$(cat "$b")" == *'return deny()'* ]]; then
+    pass "Batch + --expect precondition works"
+  else
+    fail "Batch --expect should allow apply when all files satisfy the precondition"
+  fi
+}
+
+test_batch_deduplicates_paths() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    pass "Batch dedup test skipped (python3 not available)"
+    return 0
+  fi
+  local a="${TEST_DIR}/batch_dedup_a.py"
+  echo 'x = 1' > "$a"
+  local output targets_total
+  output=$(printf '%s\n%s\n' "$a" "$a" | FSUITE_TELEMETRY=0 "${FEDIT}" -o json --targets-file - --targets-format paths --replace 'x = 1' --with 'x = 2' 2>/dev/null)
+  targets_total=$(printf '%s' "$output" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['targets_total'])" 2>/dev/null || true)
+  if [[ "$targets_total" == "1" ]]; then
+    pass "Batch deduplicates repeated target paths"
+  else
+    fail "Batch should deduplicate repeated target paths" "targets_total=$targets_total output=$output"
+  fi
+}
+
+test_batch_allow_multiple() {
+  local a="${TEST_DIR}/batch_multi_a.py" b="${TEST_DIR}/batch_multi_b.py"
+  cat > "$a" <<'EOF'
+x = 1
+x = 1
+EOF
+  cat > "$b" <<'EOF'
+x = 1
+x = 1
+EOF
+  printf '%s\n' "$a" "$b" | FSUITE_TELEMETRY=0 "${FEDIT}" --targets-file - --targets-format paths --replace 'x = 1' --with 'x = 2' --allow-multiple --apply >/dev/null 2>&1 || {
+    fail "Batch + --allow-multiple should succeed"
+    return
+  }
+  if [[ "$(grep -c 'x = 2' "$a")" == "2" ]] && [[ "$(grep -c 'x = 2' "$b")" == "2" ]]; then
+    pass "Batch + --allow-multiple applies to each target"
+  else
+    fail "Batch --allow-multiple should replace every match in each file"
+  fi
+}
+
+test_batch_content_file_payload() {
+  local a="${TEST_DIR}/batch_cf_a.py" b="${TEST_DIR}/batch_cf_b.py" payload="${TEST_DIR}/batch_payload.txt"
+  cat > "$a" <<'EOF'
+def authenticate(user):
+    return True
+EOF
+  cat > "$b" <<'EOF'
+def authenticate(user):
+    return True
+EOF
+  cat > "$payload" <<'EOF'
+    audit_log(user)
+EOF
+  printf '%s\n' "$a" "$b" | FSUITE_TELEMETRY=0 "${FEDIT}" --targets-file - --targets-format paths --after 'def authenticate(user):' --content-file "$payload" --apply >/dev/null 2>&1 || {
+    fail "Batch + --content-file should succeed"
+    return
+  }
+  if [[ "$(sed -n '2p' "$a")" == '    audit_log(user)' ]] && [[ "$(sed -n '2p' "$b")" == '    audit_log(user)' ]]; then
+    pass "Batch + --content-file payload works"
+  else
+    fail "Batch content-file payload should be inserted into each target"
   fi
 }
 
@@ -961,14 +1087,17 @@ main() {
   run_test "Spaces in filename" test_spaces_in_filename
   run_test "Tier 3 telemetry" test_tier3_telemetry
 
-  # --- Symbol shortcut tests (4) ---
+  # --- Symbol shortcut tests (7) ---
   run_test "Function shortcut" test_function_shortcut
   run_test "Class shortcut" test_class_shortcut
   run_test "Shortcut+symbol conflict" test_shortcut_symbol_conflict
   run_test "Multiple shortcuts conflict" test_multiple_shortcuts_conflict
   run_test "Method aliases function" test_method_aliases_function
+  run_test "Import shortcut" test_import_shortcut
+  run_test "Constant shortcut" test_constant_shortcut
+  run_test "Type shortcut" test_type_shortcut
 
-  # --- Batch mode tests (12) ---
+  # --- Batch mode tests (17) ---
   run_test "Batch paths dry-run" test_batch_paths_dry_run
   run_test "Batch paths apply" test_batch_paths_apply
   run_test "Batch preflight failure" test_batch_preflight_failure_writes_nothing
@@ -981,6 +1110,10 @@ main() {
   run_test "Batch spaces in paths" test_batch_spaces_in_paths
   run_test "Batch preserves order" test_batch_preserves_order
   run_test "Batch empty input" test_batch_empty_input
+  run_test "Batch expect precondition" test_batch_expect_precondition
+  run_test "Batch deduplicates paths" test_batch_deduplicates_paths
+  run_test "Batch allow-multiple" test_batch_allow_multiple
+  run_test "Batch content-file payload" test_batch_content_file_payload
 
   echo ""
   echo "======================================"
