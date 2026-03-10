@@ -237,6 +237,7 @@ OPTIONS (history)
 
 OPTIONS (predict)
   --tool <name>      Predict for specific tool only (ftree, fsearch, fcontent)
+  --mode <name>      Restrict ftree predictions to tree, recon, or snapshot
 
 OPTIONS (clean)
   --days <N>         Keep last N days (default 90)
@@ -251,6 +252,7 @@ EXAMPLES
   fmetrics stats -o json       Machine-readable stats
   fmetrics history --tool ftree --limit 10
   fmetrics predict /project    Estimate runtimes for /project
+  fmetrics predict --tool ftree --mode snapshot /project
   fmetrics clean --days 30     Remove data older than 30 days
 EOF
 }
@@ -444,8 +446,14 @@ cmd_history() {
 
   local where=""
   if (( ${#where_clauses[@]} > 0 )); then
-    local IFS=" AND "
-    where="WHERE ${where_clauses[*]}"
+    local joined_where="" clause
+    for clause in "${where_clauses[@]}"; do
+      if [[ -n "$joined_where" ]]; then
+        joined_where+=" AND "
+      fi
+      joined_where+="$clause"
+    done
+    where="WHERE $joined_where"
   fi
 
   if [[ "$OUTPUT" == "json" ]]; then
@@ -489,9 +497,15 @@ _predict_size_mb() {
 _predict_get_avg() {
   # Get average duration for a tool from DB
   local tool_name="$1"
+  local mode_name="${2:-}"
   # Sanitize tool_name: escape single quotes for SQL safety
   local safe_tool="${tool_name//\'/\'\'}"
-  local sql="SELECT CAST(AVG(duration_ms) AS INTEGER) FROM telemetry WHERE tool='${safe_tool}' AND exit_code=0;"
+  local sql="SELECT CAST(AVG(duration_ms) AS INTEGER) FROM telemetry WHERE tool='${safe_tool}' AND exit_code=0"
+  if [[ -n "$mode_name" ]]; then
+    local safe_mode="${mode_name//\'/\'\'}"
+    sql="${sql} AND mode='${safe_mode}'"
+  fi
+  sql="${sql};"
   local result
   result=$(sqlite3 "$DB_FILE" "$sql" 2>/dev/null) || result=0
   [[ -z "$result" ]] && result=0
@@ -507,6 +521,13 @@ cmd_predict() {
       ftree|fsearch|fcontent) ;;
       *) die "Invalid --tool for predict: $PREDICT_TOOL (use ftree, fsearch, or fcontent)" ;;
     esac
+  fi
+  if [[ -n "${PREDICT_MODE:-}" ]]; then
+    case "$PREDICT_MODE" in
+      tree|recon|snapshot) ;;
+      *) die "Invalid --mode for predict: $PREDICT_MODE (use tree, recon, or snapshot)" ;;
+    esac
+    [[ "${PREDICT_TOOL:-}" == "ftree" ]] || die "--mode requires --tool ftree"
   fi
 
   ensure_db
@@ -550,8 +571,10 @@ cmd_predict() {
   if [[ -n "$predict_py" ]] && has python3; then
     local _tool_arg=""
     [[ -n "${PREDICT_TOOL:-}" ]] && _tool_arg="--tool $PREDICT_TOOL"
+    local _mode_arg=""
+    [[ -n "${PREDICT_MODE:-}" ]] && _mode_arg="--mode $PREDICT_MODE"
     local pred_json
-    pred_json=$(python3 "$predict_py" --db "$DB_FILE" --items "$total_items" --bytes "$total_bytes" --depth 3 --output json $_tool_arg 2>/dev/null) || pred_json=""
+    pred_json=$(python3 "$predict_py" --db "$DB_FILE" --items "$total_items" --bytes "$total_bytes" --depth 3 --output json $_tool_arg $_mode_arg 2>/dev/null) || pred_json=""
 
     if [[ -n "$pred_json" ]] && ! echo "$pred_json" | grep -q '"error"' 2>/dev/null; then
       if [[ "$OUTPUT" == "json" ]]; then
@@ -565,23 +588,36 @@ cmd_predict() {
         echo "    Size:  ${size_mb}MB"
         echo ""
         echo "  Estimated Runtimes:"
-        local t pred_ms std_ms conf h_pred h_std tool_block
-        local _predict_tools=(ftree fsearch fcontent)
-        [[ -n "${PREDICT_TOOL:-}" ]] && _predict_tools=("$PREDICT_TOOL")
-        for t in "${_predict_tools[@]}"; do
-          # Extract the JSON block for this tool, then parse fields portably
-          tool_block=$(echo "$pred_json" | sed -n 's/.*\({"tool"[^}]*"'"$t"'"[^}]*}\).*/\1/p' | head -1) || continue
-          [[ -n "$tool_block" ]] || continue
-          pred_ms=$(json_get "$tool_block" "predicted_ms") || continue
-          [[ "$pred_ms" =~ ^-?[0-9]+$ ]] || continue
-          (( pred_ms < 0 )) && continue
-          std_ms=$(json_get "$tool_block" "std_dev_ms") || std_ms=0
-          [[ "$std_ms" =~ ^[0-9]+$ ]] || std_ms=0
-          conf=$(json_get "$tool_block" "confidence") || conf="?"
-          h_pred=$(human_ms "$pred_ms")
-          h_std=$(human_ms "$std_ms")
-          printf '    %-12s ~%-8s +/-%s  [%s]\n' "$t" "$h_pred" "$h_std" "$conf"
-        done
+        local formatted_predictions=""
+        formatted_predictions=$(printf '%s' "$pred_json" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for pred in data.get("predictions", []):
+    label = pred.get("tool", "?")
+    mode = pred.get("mode")
+    if mode:
+        label = f"{label}:{mode}"
+    print("|".join([
+        label,
+        str(pred.get("predicted_ms", -1)),
+        str(pred.get("std_dev_ms", 0)),
+        pred.get("confidence", "none"),
+        pred.get("error", ""),
+    ]))
+') || formatted_predictions=""
+        local label pred_ms std_ms conf err h_pred h_std
+        while IFS='|' read -r label pred_ms std_ms conf err; do
+          [[ -n "$label" ]] || continue
+          [[ "$pred_ms" =~ ^-?[0-9]+$ ]] || pred_ms=-1
+          if (( pred_ms >= 0 )); then
+            [[ "$std_ms" =~ ^[0-9]+$ ]] || std_ms=0
+            h_pred=$(human_ms "$pred_ms")
+            h_std=$(human_ms "$std_ms")
+            printf '    %-20s ~%-8s +/-%s  [%s]\n' "$label" "$h_pred" "$h_std" "$conf"
+          else
+            printf '    %-20s -- %s\n' "$label" "${err:-no prediction}"
+          fi
+        done <<< "$formatted_predictions"
         local total_samples
         total_samples=$(json_get "$pred_json" "total_historical_samples") || total_samples="?"
         [[ "$total_samples" =~ ^[0-9]+$ ]] || total_samples="?"
@@ -598,14 +634,25 @@ cmd_predict() {
     echo -n "\"path\":\"$target\","
     echo -n "\"features\":{\"items\":$total_items,\"bytes\":$total_bytes},"
     echo -n "\"predictions\":["
-    local first=1 t avg_ms
+    local first=1 t avg_ms mode
     local _predict_tools=(ftree fsearch fcontent)
     [[ -n "${PREDICT_TOOL:-}" ]] && _predict_tools=("$PREDICT_TOOL")
     for t in "${_predict_tools[@]}"; do
-      (( first )) || echo -n ","
-      first=0
-      avg_ms=$(_predict_get_avg "$t")
-      echo -n "{\"tool\":\"$t\",\"predicted_ms\":$avg_ms,\"method\":\"average\",\"confidence\":\"low\"}"
+      if [[ "$t" == "ftree" ]]; then
+        local _predict_modes=(tree recon snapshot)
+        [[ -n "${PREDICT_MODE:-}" ]] && _predict_modes=("$PREDICT_MODE")
+        for mode in "${_predict_modes[@]}"; do
+          (( first )) || echo -n ","
+          first=0
+          avg_ms=$(_predict_get_avg "$t" "$mode")
+          echo -n "{\"tool\":\"$t\",\"mode\":\"$mode\",\"predicted_ms\":$avg_ms,\"method\":\"average\",\"confidence\":\"low\"}"
+        done
+      else
+        (( first )) || echo -n ","
+        first=0
+        avg_ms=$(_predict_get_avg "$t")
+        echo -n "{\"tool\":\"$t\",\"predicted_ms\":$avg_ms,\"method\":\"average\",\"confidence\":\"low\"}"
+      fi
     done
     echo "],\"total_historical_samples\":$count,\"method\":\"average_fallback\"}"
   else
@@ -615,12 +662,21 @@ cmd_predict() {
     echo "  Project: $total_items entries, ${size_mb}MB"
     echo ""
     echo "  Estimated Runtimes - based on historical averages:"
-    local t avg_ms
+    local t avg_ms mode
     local _predict_tools=(ftree fsearch fcontent)
     [[ -n "${PREDICT_TOOL:-}" ]] && _predict_tools=("$PREDICT_TOOL")
     for t in "${_predict_tools[@]}"; do
-      avg_ms=$(_predict_get_avg "$t")
-      printf "    %-12s ~%s\n" "$t" "$(human_ms "$avg_ms")"
+      if [[ "$t" == "ftree" ]]; then
+        local _predict_modes=(tree recon snapshot)
+        [[ -n "${PREDICT_MODE:-}" ]] && _predict_modes=("$PREDICT_MODE")
+        for mode in "${_predict_modes[@]}"; do
+          avg_ms=$(_predict_get_avg "$t" "$mode")
+          printf "    %-20s ~%s\n" "${t}:${mode}" "$(human_ms "$avg_ms")"
+        done
+      else
+        avg_ms=$(_predict_get_avg "$t")
+        printf "    %-20s ~%s\n" "$t" "$(human_ms "$avg_ms")"
+      fi
     done
     if ! has python3; then
       echo ""
@@ -769,6 +825,7 @@ OUTPUT="$DEFAULT_OUTPUT"
 LIMIT="$DEFAULT_LIMIT"
 FILTER_TOOL=""
 FILTER_PROJECT=""
+PREDICT_MODE=""
 PREDICT_PATH=""
 CLEAN_DAYS="$DEFAULT_CLEAN_DAYS"
 DRY_RUN=0
@@ -789,6 +846,9 @@ while [[ $# -gt 0 ]]; do
     --project)
       [[ -n "${2:-}" ]] || die "Missing value for $1"
       FILTER_PROJECT="$2"; shift 2 ;;
+    --mode)
+      [[ -n "${2:-}" ]] || die "Missing value for $1"
+      PREDICT_MODE="$2"; shift 2 ;;
     --limit)
       [[ -n "${2:-}" ]] || die "Missing value for $1"
       LIMIT="$2"
@@ -814,6 +874,9 @@ esac
 # Extract subcommand
 SUBCOMMAND="${POSITIONAL[0]:-}"
 [[ -n "$SUBCOMMAND" ]] || { usage; exit 0; }
+if [[ -n "$PREDICT_MODE" && "$SUBCOMMAND" != "predict" ]]; then
+  die "--mode is only valid with the predict subcommand"
+fi
 
 case "$SUBCOMMAND" in
   stats)   cmd_stats ;;

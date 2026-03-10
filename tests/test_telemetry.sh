@@ -10,9 +10,12 @@ FCONTENT="${FSUITE_DIR}/fcontent"
 FSEARCH="${FSUITE_DIR}/fsearch"
 FTREE="${FSUITE_DIR}/ftree"
 FMETRICS="${FSUITE_DIR}/fmetrics"
+FMETRICS_PREDICT="${FSUITE_DIR}/fmetrics-predict.py"
 
 TEST_DIR=""
 BACKUP_TELEMETRY=""
+ORIGINAL_HOME="${HOME:-}"
+SANDBOX_HOME=""
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -23,6 +26,10 @@ GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
 setup() {
+  SANDBOX_HOME="$(mktemp -d)"
+  export HOME="$SANDBOX_HOME"
+  mkdir -p "$HOME/.fsuite"
+
   TEST_DIR="$(mktemp -d)"
   mkdir -p "${TEST_DIR}/src"
   echo "hello world" > "${TEST_DIR}/src/test.txt"
@@ -46,10 +53,10 @@ teardown() {
     rm -rf "${TEST_DIR}"
   fi
 
-  # Restore telemetry backup
-  mkdir -p "$HOME/.fsuite" 2>/dev/null || true
-  if [[ -n "$BACKUP_TELEMETRY" && -f "$BACKUP_TELEMETRY" ]]; then
-    mv "$BACKUP_TELEMETRY" "$HOME/.fsuite/telemetry.jsonl"
+  export HOME="$ORIGINAL_HOME"
+
+  if [[ -n "${SANDBOX_HOME}" && -d "${SANDBOX_HOME}" ]]; then
+    rm -rf "${SANDBOX_HOME}"
   fi
 }
 
@@ -74,6 +81,33 @@ run_test() {
 
 run_fmetrics() {
   FSUITE_TELEMETRY=0 "${FMETRICS}" "$@"
+}
+
+seed_ftree_predict_fixture_db() {
+  mkdir -p "$HOME/.fsuite"
+  rm -f "$HOME/.fsuite/telemetry.jsonl" "$HOME/.fsuite/telemetry.db"
+  : > "$HOME/.fsuite/telemetry.jsonl"
+  run_fmetrics import >/dev/null 2>&1 || true
+
+  sqlite3 "$HOME/.fsuite/telemetry.db" <<'SQL'
+DELETE FROM telemetry;
+INSERT INTO telemetry (timestamp,tool,version,mode,path_hash,project_name,duration_ms,exit_code,depth,items_scanned,bytes_scanned,flags,backend,run_id) VALUES
+  ('2026-03-10T00:00:00Z','ftree','2.1.0','tree','tree01','predict-fixture',9,0,3,42,4200,'-o json','tree','tree01'),
+  ('2026-03-10T00:00:01Z','ftree','2.1.0','tree','tree02','predict-fixture',11,0,3,42,4200,'-o json','tree','tree02'),
+  ('2026-03-10T00:00:02Z','ftree','2.1.0','tree','tree03','predict-fixture',10,0,3,42,4200,'-o json','tree','tree03'),
+  ('2026-03-10T00:00:03Z','ftree','2.1.0','tree','tree04','predict-fixture',12,0,3,42,4200,'-o json','tree','tree04'),
+  ('2026-03-10T00:00:04Z','ftree','2.1.0','tree','tree05','predict-fixture',8,0,3,42,4200,'-o json','tree','tree05'),
+  ('2026-03-10T00:00:05Z','ftree','2.1.0','recon','recon01','predict-fixture',180,0,3,42,4200,'-o json --recon','tree','recon01'),
+  ('2026-03-10T00:00:06Z','ftree','2.1.0','recon','recon02','predict-fixture',190,0,3,42,4200,'-o json --recon','tree','recon02'),
+  ('2026-03-10T00:00:07Z','ftree','2.1.0','recon','recon03','predict-fixture',210,0,3,42,4200,'-o json --recon','tree','recon03'),
+  ('2026-03-10T00:00:08Z','ftree','2.1.0','recon','recon04','predict-fixture',220,0,3,42,4200,'-o json --recon','tree','recon04'),
+  ('2026-03-10T00:00:09Z','ftree','2.1.0','recon','recon05','predict-fixture',205,0,3,42,4200,'-o json --recon','tree','recon05'),
+  ('2026-03-10T00:00:10Z','ftree','2.1.0','snapshot','snap01','predict-fixture',5000,0,3,42,4200,'-o json --snapshot','tree','snap01'),
+  ('2026-03-10T00:00:11Z','ftree','2.1.0','snapshot','snap02','predict-fixture',5200,0,3,42,4200,'-o json --snapshot','tree','snap02'),
+  ('2026-03-10T00:00:12Z','ftree','2.1.0','snapshot','snap03','predict-fixture',5100,0,3,42,4200,'-o json --snapshot','tree','snap03'),
+  ('2026-03-10T00:00:13Z','ftree','2.1.0','snapshot','snap04','predict-fixture',5300,0,3,42,4200,'-o json --snapshot','tree','snap04'),
+  ('2026-03-10T00:00:14Z','ftree','2.1.0','snapshot','snap05','predict-fixture',4900,0,3,42,4200,'-o json --snapshot','tree','snap05');
+SQL
 }
 
 # ============================================================================
@@ -635,6 +669,108 @@ test_v15_predict_tool_filter() {
   fi
 }
 
+test_v15_history_multi_filter() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "fmetrics history multi-filter test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  rm -f "$HOME/.fsuite/telemetry.jsonl"
+  rm -f "$HOME/.fsuite/telemetry.db"
+
+  local history_proj="${TEST_DIR}/history_proj"
+  local other_proj="${TEST_DIR}/other_proj"
+  mkdir -p "${history_proj}/src" "${other_proj}/src"
+  echo "alpha" > "${history_proj}/src/file.txt"
+  echo "beta" > "${other_proj}/src/file.txt"
+
+  FSUITE_TELEMETRY=1 "${FTREE}" --project-name "HistoryProj" "${history_proj}" >/dev/null 2>&1 || true
+  FSUITE_TELEMETRY=1 "${FTREE}" --project-name "OtherProj" "${other_proj}" >/dev/null 2>&1 || true
+  FSUITE_TELEMETRY=1 "${FSEARCH}" --project-name "HistoryProj" "*.txt" "${history_proj}" >/dev/null 2>&1 || true
+
+  run_fmetrics import >/dev/null 2>&1 || true
+
+  local output run_count matched_project
+  output=$(run_fmetrics history --tool ftree --project HistoryProj -o json 2>&1) || true
+
+  run_count=$(python3 -c 'import json,sys; print(len(json.loads(sys.stdin.read())["runs"]))' <<< "$output" 2>/dev/null || echo "-1")
+  matched_project=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(data["runs"][0]["project"] if data["runs"] else "")' <<< "$output" 2>/dev/null || echo "")
+
+  if [[ "$run_count" == "1" ]] && [[ "$matched_project" == "HistoryProj" ]]; then
+    pass "fmetrics history combines --tool and --project filters correctly"
+  else
+    fail "history should return the ftree row for the requested project" "Got: $output"
+  fi
+}
+
+test_v16_predict_ftree_returns_per_mode_predictions() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "ftree per-mode predict test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  local target_dir="${TEST_DIR}/predict_target"
+  mkdir -p "${target_dir}/src"
+  echo "one" > "${target_dir}/src/a.txt"
+  echo "two" > "${target_dir}/src/b.txt"
+
+  seed_ftree_predict_fixture_db
+
+  local output mode_count
+  output=$(run_fmetrics predict --tool ftree -o json "${target_dir}" 2>&1) || true
+  mode_count=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(sum(1 for p in data.get("predictions", []) if p.get("tool") == "ftree" and p.get("mode") in {"tree","recon","snapshot"}))' <<< "$output" 2>/dev/null || echo "0")
+
+  if [[ "$mode_count" == "3" ]]; then
+    pass "fmetrics predict --tool ftree returns per-mode predictions"
+  else
+    fail "predict should return separate tree/recon/snapshot entries for ftree" "Got: $output"
+  fi
+}
+
+test_v16_predict_ftree_mode_snapshot_stays_in_cluster() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "ftree mode-specific predict test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  local target_dir="${TEST_DIR}/predict_target_snapshot"
+  mkdir -p "${target_dir}/src"
+  echo "one" > "${target_dir}/src/a.txt"
+  echo "two" > "${target_dir}/src/b.txt"
+
+  seed_ftree_predict_fixture_db
+
+  local output predicted mode
+  output=$(run_fmetrics predict --tool ftree --mode snapshot -o json "${target_dir}" 2>&1) || true
+  predicted=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); print(preds[0].get("predicted_ms", -1) if preds else -1)' <<< "$output" 2>/dev/null || echo "-1")
+  mode=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); print(preds[0].get("mode", "") if preds else "")' <<< "$output" 2>/dev/null || echo "")
+
+  if [[ "$mode" == "snapshot" ]] && [[ "$predicted" =~ ^[0-9]+$ ]] && (( predicted >= 4500 )); then
+    pass "fmetrics predict --mode snapshot stays in the snapshot cluster"
+  else
+    fail "snapshot prediction should stay near snapshot runtimes" "Got: $output"
+  fi
+}
+
+test_v16_predict_helper_degrades_confidence_on_zero_spread() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "predict helper confidence test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  seed_ftree_predict_fixture_db
+
+  local output confidence
+  output=$(python3 "${FMETRICS_PREDICT}" --db "$HOME/.fsuite/telemetry.db" --items 99999 --bytes 99999999 --depth 30 --tool ftree --mode snapshot --output json 2>&1) || true
+  confidence=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); print(preds[0].get("confidence", "") if preds else "")' <<< "$output" 2>/dev/null || echo "")
+
+  if [[ "$confidence" == "low" ]]; then
+    pass "predict helper degrades confidence when feature spread is zero"
+  else
+    fail "far targets should not get high confidence when feature spread collapses" "Got: $output"
+  fi
+}
+
 # ============================================================================
 # v1.5.0+ — Project Name Inference (walk-up heuristic)
 # ============================================================================
@@ -694,6 +830,14 @@ test_v15_project_name_fallback() {
   fi
 }
 
+test_harness_uses_sandbox_home() {
+  if [[ -n "${ORIGINAL_HOME}" ]] && [[ "$HOME" != "$ORIGINAL_HOME" ]] && [[ -d "$HOME/.fsuite" ]]; then
+    pass "Telemetry tests run inside a sandboxed HOME"
+  else
+    fail "Telemetry tests should sandbox HOME instead of mutating the caller environment" "ORIGINAL_HOME=${ORIGINAL_HOME} HOME=${HOME}"
+  fi
+}
+
 # ============================================================================
 # Main Test Runner
 # ============================================================================
@@ -716,6 +860,10 @@ main() {
   echo "Running tests..."
   echo ""
 
+  echo "== Harness Isolation =="
+  run_test "Telemetry harness uses sandboxed HOME" test_harness_uses_sandbox_home
+
+  echo ""
   # bytes_scanned tests
   echo "== Phase 1: bytes_scanned =="
   run_test "fcontent bytes_scanned > 0" test_fcontent_bytes_scanned
@@ -777,6 +925,10 @@ main() {
   run_test "fmetrics --self-check shows python3 status" test_v15_selfcheck_python3
   run_test "fmetrics --self-check shows predict script" test_v15_selfcheck_predict
   run_test "fmetrics predict --tool filter" test_v15_predict_tool_filter
+  run_test "fmetrics history combines tool+project filters" test_v15_history_multi_filter
+  run_test "fmetrics predict splits ftree by mode" test_v16_predict_ftree_returns_per_mode_predictions
+  run_test "fmetrics predict --mode snapshot stays in snapshot cluster" test_v16_predict_ftree_mode_snapshot_stays_in_cluster
+  run_test "predict helper lowers confidence on zero-spread features" test_v16_predict_helper_degrades_confidence_on_zero_spread
 
   echo ""
   echo "== v1.5.0+: Project Name Inference =="
