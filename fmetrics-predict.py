@@ -214,6 +214,54 @@ def prediction_targets(tool: Optional[str], mode: Optional[str]) -> List[Tuple[s
     return [("ftree", ftree_mode) for ftree_mode in FTREE_MODES] + [("fsearch", None), ("fcontent", None)]
 
 
+def collapse_ftree_predictions(
+    predictions: List[dict],
+    requested_tool: Optional[str],
+    requested_mode: Optional[str],
+) -> List[dict]:
+    """Preserve one-row-per-tool output by collapsing default ftree predictions."""
+    if requested_mode:
+        return predictions
+
+    ftree_predictions = [
+        pred for pred in predictions
+        if pred.get("tool") == "ftree" and pred.get("mode") in FTREE_MODES
+    ]
+    if not ftree_predictions:
+        return predictions
+
+    other_predictions = [
+        pred for pred in predictions
+        if not (pred.get("tool") == "ftree" and pred.get("mode") in FTREE_MODES)
+    ]
+
+    by_mode = {}
+    total_mode_samples = 0
+    for pred in ftree_predictions:
+        mode_name = pred["mode"]
+        by_mode[mode_name] = {
+            key: value
+            for key, value in pred.items()
+            if key not in {"tool", "mode"}
+        }
+        total_mode_samples += int(pred.get("samples", 0))
+
+    aggregate = {
+        "tool": "ftree",
+        "mode": "mixed",
+        "predicted_ms": -1,
+        "confidence": "low",
+        "samples": total_mode_samples,
+        "advisory": True,
+        "error": "mixed ftree modes; use --mode for actionable predictions",
+        "by_mode": by_mode,
+    }
+
+    if requested_tool == "ftree":
+        return [aggregate]
+    return [aggregate] + other_predictions
+
+
 def main():
     parser = argparse.ArgumentParser(description="k-NN runtime prediction for fsuite tools")
     parser.add_argument("--db", required=True, help="Path to telemetry.db")
@@ -282,7 +330,7 @@ def main():
                     "depth": args.depth,
                 },
                 "requested_mode": args.mode,
-                "predictions": predictions,
+                "predictions": collapse_ftree_predictions(predictions, args.tool, args.mode),
                 "total_historical_samples": total_samples,
             }
     except (OSError, sqlite3.Error) as e:

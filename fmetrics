@@ -579,17 +579,17 @@ cmd_predict() {
     if [[ -n "$pred_json" ]] && ! echo "$pred_json" | grep -q '"error"' 2>/dev/null; then
       if [[ "$OUTPUT" == "json" ]]; then
         echo "$pred_json"
-      else
-        echo "fmetrics predict -- $target"
-        echo "============================================"
-        echo ""
-        echo "  Project Characteristics:"
+        else
+          echo "fmetrics predict -- $target"
+          echo "============================================"
+          echo ""
+          echo "  Project Characteristics:"
         echo "    Items: $total_items"
         echo "    Size:  ${size_mb}MB"
         echo ""
         echo "  Estimated Runtimes:"
         local formatted_predictions=""
-        formatted_predictions=$(printf '%s' "$pred_json" | python3 -c '
+          formatted_predictions=$(printf '%s' "$pred_json" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
 for pred in data.get("predictions", []):
@@ -597,27 +597,49 @@ for pred in data.get("predictions", []):
     mode = pred.get("mode")
     if mode:
         label = f"{label}:{mode}"
+    by_mode = pred.get("by_mode", {})
     print("|".join([
+        "summary",
         label,
         str(pred.get("predicted_ms", -1)),
         str(pred.get("std_dev_ms", 0)),
         pred.get("confidence", "none"),
         pred.get("error", ""),
     ]))
+    for mode_name in ("tree", "recon", "snapshot"):
+        mode_pred = by_mode.get(mode_name)
+        if not mode_pred:
+            continue
+        print("|".join([
+            "mode",
+            f"{pred.get(\"tool\", \"?\")}:{mode_name}",
+            str(mode_pred.get("predicted_ms", -1)),
+            str(mode_pred.get("std_dev_ms", 0)),
+            mode_pred.get("confidence", "none"),
+            mode_pred.get("error", ""),
+        ]))
 ') || formatted_predictions=""
-        local label pred_ms std_ms conf err h_pred h_std
-        while IFS='|' read -r label pred_ms std_ms conf err; do
-          [[ -n "$label" ]] || continue
-          [[ "$pred_ms" =~ ^-?[0-9]+$ ]] || pred_ms=-1
-          if (( pred_ms >= 0 )); then
-            [[ "$std_ms" =~ ^[0-9]+$ ]] || std_ms=0
-            h_pred=$(human_ms "$pred_ms")
-            h_std=$(human_ms "$std_ms")
-            printf '    %-20s ~%-8s +/-%s  [%s]\n' "$label" "$h_pred" "$h_std" "$conf"
-          else
-            printf '    %-20s -- %s\n' "$label" "${err:-no prediction}"
-          fi
-        done <<< "$formatted_predictions"
+          local row_type label pred_ms std_ms conf err h_pred h_std
+          while IFS='|' read -r row_type label pred_ms std_ms conf err; do
+            [[ -n "$label" ]] || continue
+            [[ "$pred_ms" =~ ^-?[0-9]+$ ]] || pred_ms=-1
+            if (( pred_ms >= 0 )); then
+              [[ "$std_ms" =~ ^[0-9]+$ ]] || std_ms=0
+              h_pred=$(human_ms "$pred_ms")
+              h_std=$(human_ms "$std_ms")
+              if [[ "$row_type" == "mode" ]]; then
+                printf '      %-18s ~%-8s +/-%s  [%s]\n' "$label" "$h_pred" "$h_std" "$conf"
+              else
+                printf '    %-20s ~%-8s +/-%s  [%s]\n' "$label" "$h_pred" "$h_std" "$conf"
+              fi
+            else
+              if [[ "$row_type" == "mode" ]]; then
+                printf '      %-18s -- %s\n' "$label" "${err:-no prediction}"
+              else
+                printf '    %-20s -- %s\n' "$label" "${err:-no prediction}"
+              fi
+            fi
+          done <<< "$formatted_predictions"
         local total_samples
         total_samples=$(json_get "$pred_json" "total_historical_samples") || total_samples="?"
         [[ "$total_samples" =~ ^[0-9]+$ ]] || total_samples="?"
@@ -630,31 +652,92 @@ for pred in data.get("predictions", []):
 
   # Fallback: simple average-based prediction
   if [[ "$OUTPUT" == "json" ]]; then
-    echo -n "{\"tool\":\"fmetrics\",\"version\":\"$VERSION\",\"subcommand\":\"predict\","
-    echo -n "\"path\":\"$target\","
-    echo -n "\"features\":{\"items\":$total_items,\"bytes\":$total_bytes},"
-    echo -n "\"predictions\":["
-    local first=1 t avg_ms mode
-    local _predict_tools=(ftree fsearch fcontent)
-    [[ -n "${PREDICT_TOOL:-}" ]] && _predict_tools=("$PREDICT_TOOL")
-    for t in "${_predict_tools[@]}"; do
-      if [[ "$t" == "ftree" ]]; then
-        local _predict_modes=(tree recon snapshot)
-        [[ -n "${PREDICT_MODE:-}" ]] && _predict_modes=("$PREDICT_MODE")
-        for mode in "${_predict_modes[@]}"; do
-          (( first )) || echo -n ","
-          first=0
-          avg_ms=$(_predict_get_avg "$t" "$mode")
-          echo -n "{\"tool\":\"$t\",\"mode\":\"$mode\",\"predicted_ms\":$avg_ms,\"method\":\"average\",\"confidence\":\"low\"}"
-        done
-      else
-        (( first )) || echo -n ","
-        first=0
-        avg_ms=$(_predict_get_avg "$t")
-        echo -n "{\"tool\":\"$t\",\"predicted_ms\":$avg_ms,\"method\":\"average\",\"confidence\":\"low\"}"
-      fi
-    done
-    echo "],\"total_historical_samples\":$count,\"method\":\"average_fallback\"}"
+    local predictions_json
+    predictions_json=$(python3 - "$DB_FILE" "${PREDICT_TOOL:-}" "${PREDICT_MODE:-}" "$count" "$target" "$total_items" "$total_bytes" <<'PY'
+import json
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+requested_tool = sys.argv[2] or None
+requested_mode = sys.argv[3] or None
+total_samples = int(sys.argv[4])
+
+conn = sqlite3.connect(db_path)
+try:
+    tools = [requested_tool] if requested_tool else ["ftree", "fsearch", "fcontent"]
+    predictions = []
+    for tool in tools:
+        if tool == "ftree":
+            modes = [requested_mode] if requested_mode else ["tree", "recon", "snapshot"]
+            by_mode = {}
+            total_mode_samples = 0
+            for mode in modes:
+                row = conn.execute(
+                    "SELECT CAST(AVG(duration_ms) AS INTEGER), COUNT(*) FROM telemetry "
+                    "WHERE tool='ftree' AND mode=? AND exit_code=0",
+                    (mode,),
+                ).fetchone()
+                avg_ms = 0 if row is None or row[0] is None else int(row[0])
+                samples = 0 if row is None or row[1] is None else int(row[1])
+                total_mode_samples += samples
+                mode_pred = {
+                    "predicted_ms": avg_ms,
+                    "method": "average",
+                    "confidence": "low",
+                    "samples": samples,
+                }
+                if requested_mode:
+                    mode_pred["tool"] = "ftree"
+                    mode_pred["mode"] = mode
+                    predictions.append(mode_pred)
+                else:
+                    by_mode[mode] = mode_pred
+            if not requested_mode:
+                predictions.append({
+                    "tool": "ftree",
+                    "mode": "mixed",
+                    "predicted_ms": -1,
+                    "method": "average",
+                    "confidence": "low",
+                    "samples": total_mode_samples,
+                    "advisory": True,
+                    "error": "mixed ftree modes; use --mode for actionable predictions",
+                    "by_mode": by_mode,
+                })
+        else:
+            row = conn.execute(
+                "SELECT CAST(AVG(duration_ms) AS INTEGER), COUNT(*) FROM telemetry "
+                "WHERE tool=? AND exit_code=0",
+                (tool,),
+            ).fetchone()
+            avg_ms = 0 if row is None or row[0] is None else int(row[0])
+            samples = 0 if row is None or row[1] is None else int(row[1])
+            predictions.append({
+                "tool": tool,
+                "predicted_ms": avg_ms,
+                "method": "average",
+                "confidence": "low",
+                "samples": samples,
+            })
+    print(json.dumps({
+        "tool": "fmetrics",
+        "version": "2.1.0",
+        "subcommand": "predict",
+        "path": sys.argv[5],
+        "features": {
+            "items": int(sys.argv[6]),
+            "bytes": int(sys.argv[7]),
+        },
+        "predictions": predictions,
+        "total_historical_samples": total_samples,
+        "method": "average_fallback",
+    }))
+finally:
+    conn.close()
+PY
+)
+    echo "$predictions_json"
   else
     echo "fmetrics predict -- $target"
     echo "============================================"
@@ -666,13 +749,15 @@ for pred in data.get("predictions", []):
     local _predict_tools=(ftree fsearch fcontent)
     [[ -n "${PREDICT_TOOL:-}" ]] && _predict_tools=("$PREDICT_TOOL")
     for t in "${_predict_tools[@]}"; do
-      if [[ "$t" == "ftree" ]]; then
-        local _predict_modes=(tree recon snapshot)
-        [[ -n "${PREDICT_MODE:-}" ]] && _predict_modes=("$PREDICT_MODE")
-        for mode in "${_predict_modes[@]}"; do
+      if [[ "$t" == "ftree" ]] && [[ -z "${PREDICT_MODE:-}" ]]; then
+        printf "    %-20s -- %s\n" "ftree:mixed" "use --mode for actionable predictions"
+        for mode in tree recon snapshot; do
           avg_ms=$(_predict_get_avg "$t" "$mode")
-          printf "    %-20s ~%s\n" "${t}:${mode}" "$(human_ms "$avg_ms")"
+          printf "      %-18s ~%s\n" "${t}:${mode}" "$(human_ms "$avg_ms")"
         done
+      elif [[ "$t" == "ftree" ]]; then
+        avg_ms=$(_predict_get_avg "$t" "${PREDICT_MODE}")
+        printf "    %-20s ~%s\n" "${t}:${PREDICT_MODE}" "$(human_ms "$avg_ms")"
       else
         avg_ms=$(_predict_get_avg "$t")
         printf "    %-20s ~%s\n" "$t" "$(human_ms "$avg_ms")"

@@ -36,12 +36,6 @@ setup() {
   echo "function foo() { return 1; }" > "${TEST_DIR}/src/code.js"
   dd if=/dev/zero of="${TEST_DIR}/large_file.bin" bs=1024 count=50 2>/dev/null
 
-  # Backup existing telemetry
-  if [[ -f "$HOME/.fsuite/telemetry.jsonl" ]]; then
-    BACKUP_TELEMETRY="$(mktemp)"
-    cp "$HOME/.fsuite/telemetry.jsonl" "$BACKUP_TELEMETRY"
-  fi
-
   # Clear telemetry for clean tests
   rm -f "$HOME/.fsuite/telemetry.jsonl"
   rm -f "$HOME/.fsuite/telemetry.db"
@@ -703,9 +697,9 @@ test_v15_history_multi_filter() {
   fi
 }
 
-test_v16_predict_ftree_returns_per_mode_predictions() {
+test_v16_predict_ftree_preserves_default_contract_with_by_mode() {
   if ! command -v sqlite3 >/dev/null 2>&1; then
-    pass "ftree per-mode predict test skipped (sqlite3 not available)"
+    pass "ftree default predict contract test skipped (sqlite3 not available)"
     return 0
   fi
 
@@ -716,14 +710,17 @@ test_v16_predict_ftree_returns_per_mode_predictions() {
 
   seed_ftree_predict_fixture_db
 
-  local output mode_count
+  local output top_level_ftree mode_count mixed_mode by_mode_snapshot
   output=$(run_fmetrics predict --tool ftree -o json "${target_dir}" 2>&1) || true
+  top_level_ftree=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(sum(1 for p in data.get("predictions", []) if p.get("tool") == "ftree"))' <<< "$output" 2>/dev/null || echo "0")
+  mixed_mode=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); print(preds[0].get("mode", "") if preds else "")' <<< "$output" 2>/dev/null || echo "")
+  by_mode_snapshot=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); by_mode=(preds[0].get("by_mode", {}) if preds else {}); print("snapshot" if "snapshot" in by_mode else "")' <<< "$output" 2>/dev/null || echo "")
   mode_count=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(sum(1 for p in data.get("predictions", []) if p.get("tool") == "ftree" and p.get("mode") in {"tree","recon","snapshot"}))' <<< "$output" 2>/dev/null || echo "0")
 
-  if [[ "$mode_count" == "3" ]]; then
-    pass "fmetrics predict --tool ftree returns per-mode predictions"
+  if [[ "$top_level_ftree" == "1" ]] && [[ "$mixed_mode" == "mixed" ]] && [[ "$mode_count" == "0" ]] && [[ "$by_mode_snapshot" == "snapshot" ]]; then
+    pass "fmetrics predict --tool ftree preserves one-row contract with by_mode detail"
   else
-    fail "predict should return separate tree/recon/snapshot entries for ftree" "Got: $output"
+    fail "predict should preserve one top-level ftree row with by_mode detail" "Got: $output"
   fi
 }
 
@@ -768,6 +765,34 @@ test_v16_predict_helper_degrades_confidence_on_zero_spread() {
     pass "predict helper degrades confidence when feature spread is zero"
   else
     fail "far targets should not get high confidence when feature spread collapses" "Got: $output"
+  fi
+}
+
+test_v16_predict_rejects_mode_without_ftree_tool() {
+  local output
+  output=$(run_fmetrics predict --mode snapshot -o json "${TEST_DIR}" 2>&1) && {
+    fail "--mode without --tool ftree should fail" "Got success: $output"
+    return
+  }
+
+  if [[ "$output" == *"--mode requires --tool ftree"* ]]; then
+    pass "fmetrics predict rejects --mode without --tool ftree"
+  else
+    fail "predict should reject --mode without --tool ftree" "Got: $output"
+  fi
+}
+
+test_v16_predict_rejects_mode_with_non_ftree_tool() {
+  local output
+  output=$(run_fmetrics predict --tool fsearch --mode snapshot -o json "${TEST_DIR}" 2>&1) && {
+    fail "--mode with non-ftree tool should fail" "Got success: $output"
+    return
+  }
+
+  if [[ "$output" == *"--mode requires --tool ftree"* ]]; then
+    pass "fmetrics predict rejects --mode with non-ftree tool"
+  else
+    fail "predict should reject --mode with non-ftree tool" "Got: $output"
   fi
 }
 
@@ -926,9 +951,11 @@ main() {
   run_test "fmetrics --self-check shows predict script" test_v15_selfcheck_predict
   run_test "fmetrics predict --tool filter" test_v15_predict_tool_filter
   run_test "fmetrics history combines tool+project filters" test_v15_history_multi_filter
-  run_test "fmetrics predict splits ftree by mode" test_v16_predict_ftree_returns_per_mode_predictions
+  run_test "fmetrics predict preserves ftree default contract with by_mode detail" test_v16_predict_ftree_preserves_default_contract_with_by_mode
   run_test "fmetrics predict --mode snapshot stays in snapshot cluster" test_v16_predict_ftree_mode_snapshot_stays_in_cluster
   run_test "predict helper lowers confidence on zero-spread features" test_v16_predict_helper_degrades_confidence_on_zero_spread
+  run_test "fmetrics predict rejects --mode without --tool ftree" test_v16_predict_rejects_mode_without_ftree_tool
+  run_test "fmetrics predict rejects --mode with non-ftree tool" test_v16_predict_rejects_mode_with_non_ftree_tool
 
   echo ""
   echo "== v1.5.0+: Project Name Inference =="
