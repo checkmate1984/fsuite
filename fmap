@@ -879,6 +879,39 @@ extract_symbol_name() {
         return 0
       fi
       ;;
+    import)
+      if [[ "$trimmed" =~ (^|[[:space:]])import[[:space:]]+([_[:alpha:]][_[:alnum:]]*)[[:space:]]+from[[:space:]] ]]; then
+        printf '%s\n' "${BASH_REMATCH[2]}"
+        return 0
+      fi
+      if [[ "$trimmed" =~ (^|[[:space:]])from[[:space:]]+([_[:alpha:]][_[:alnum:].:/-]*)[[:space:]]+import[[:space:]] ]]; then
+        name="${BASH_REMATCH[2]}"
+        name="${name##*/}"
+        name="${name##*.}"
+        name="${name##*::}"
+        printf '%s\n' "$name"
+        return 0
+      fi
+      if [[ "$trimmed" =~ require\([\"\']([^\"\']+)[\"\']\) ]]; then
+        name="${BASH_REMATCH[1]}"
+        name="${name##*/}"
+        printf '%s\n' "$name"
+        return 0
+      fi
+      if [[ "$trimmed" =~ (^|[[:space:]])import[[:space:]]+[\"\']([^\"\']+)[\"\'] ]]; then
+        name="${BASH_REMATCH[2]}"
+        name="${name##*/}"
+        printf '%s\n' "$name"
+        return 0
+      fi
+      if [[ "$trimmed" =~ (^|[[:space:]])use[[:space:]]+([_[:alpha:]][_[:alnum:].:]*) ]]; then
+        name="${BASH_REMATCH[2]}"
+        name="${name##*.}"
+        name="${name##*::}"
+        printf '%s\n' "$name"
+        return 0
+      fi
+      ;;
   esac
 
   return 1

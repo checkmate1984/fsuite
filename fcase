@@ -818,6 +818,7 @@ cmd_target_import() {
   result_json="$(IMPORT_JSON="$input_json" python3 - "$DB_FILE" "$case_id" "${session_id:-}" "$now" 2>"$err_file" <<'PY'
 import json
 import os
+import re
 import sqlite3
 import sys
 
@@ -845,6 +846,28 @@ conn = sqlite3.connect(db_path)
 conn.execute("PRAGMA foreign_keys=ON")
 imported = 0
 
+def normalized_symbol_name(symbol):
+    for key in ("name", "identifier"):
+        value = symbol.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    text = (symbol.get("text") or "").strip()
+    if not text:
+        return ""
+
+    patterns = (
+        r"(?:^|\s)(?:def|function|func|fun|fn)\s+([_A-Za-z]\w*)",
+        r"(?:^|\s)(?:class|struct|enum|interface|protocol|trait|module|object|extension|actor|type)\s+([_A-Za-z]\w*)",
+        r"([_A-Za-z]\w*)\s*\(",
+        r"([_A-Za-z]\w*)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return text
+
 try:
     for file_entry in files:
         if not isinstance(file_entry, dict):
@@ -853,7 +876,9 @@ try:
         for symbol in file_entry.get("symbols") or []:
             if not isinstance(symbol, dict):
                 continue
-            text = symbol.get("text") or ""
+            symbol_name = normalized_symbol_name(symbol)
+            if not symbol_name:
+                continue
             symbol_type = symbol.get("type") or ""
             line = symbol.get("line")
             reason = f"Imported from fmap line {line}" if isinstance(line, int) and line > 0 else "Imported from fmap"
@@ -862,7 +887,7 @@ try:
                 INSERT INTO targets (case_id, path, symbol, symbol_type, rank, reason, state, created_at, updated_at)
                 VALUES (?, ?, ?, ?, NULL, ?, 'candidate', ?, ?)
                 """,
-                (case_id, path, text, symbol_type, reason, now, now),
+                (case_id, path, symbol_name, symbol_type, reason, now, now),
             )
             imported += 1
     if imported == 0:
@@ -1154,7 +1179,7 @@ cmd_hypothesis_set() {
   is_valid_hypothesis_status "$status" || die "hypothesis set --status must be one of: open, active, validated, rejected"
 
   ensure_db
-  local case_id session_id now count_sql update_confidence
+  local case_id session_id now count_sql update_confidence update_reason event_reason
   case_id="$(case_exists_or_die "$slug")"
   count_sql="$(db_query <<<"SELECT COUNT(*) FROM hypotheses WHERE id = $hypothesis_id AND case_id = $case_id;")"
   [[ "$count_sql" == "1" ]] || die "hypothesis not found for case: $hypothesis_id"
@@ -1165,9 +1190,16 @@ cmd_hypothesis_set() {
   else
     update_confidence=""
   fi
-  db_exec <<<"UPDATE hypotheses SET status = $(sql_quote "$status"), reason = $(sql_quote "$reason"), updated_at = $(sql_quote "$now")${update_confidence} WHERE id = $hypothesis_id AND case_id = $case_id;"
+  if [[ -n "$reason" ]]; then
+    update_reason=", reason = $(sql_quote "$reason")"
+    event_reason=",\"reason\":\"$(printf '%s' "$reason" | json_escape)\""
+  else
+    update_reason=""
+    event_reason=""
+  fi
+  db_exec <<<"UPDATE hypotheses SET status = $(sql_quote "$status"), updated_at = $(sql_quote "$now")${update_reason}${update_confidence} WHERE id = $hypothesis_id AND case_id = $case_id;"
   db_exec <<<"UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
-  append_event "$case_id" "$session_id" "hypothesis_set" "$(printf '{"id":%s,"status":"%s","reason":"%s","confidence":"%s"}' "$hypothesis_id" "$(printf '%s' "$status" | json_escape)" "$(printf '%s' "$reason" | json_escape)" "$(printf '%s' "$confidence" | json_escape)")" "$now"
+  append_event "$case_id" "$session_id" "hypothesis_set" "$(printf '{"id":%s,"status":"%s"%s%s}' "$hypothesis_id" "$(printf '%s' "$status" | json_escape)" "$event_reason" "$( [[ -n "$confidence" ]] && printf ',\"confidence\":\"%s\"' "$(printf '%s' "$confidence" | json_escape)" )")" "$now"
   echo "Updated hypothesis ${hypothesis_id} for ${slug}"
 }
 

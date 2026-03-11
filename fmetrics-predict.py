@@ -340,12 +340,13 @@ def main():
     if args.output == "json":
         print(json.dumps(output))
     else:
+        rendered_predictions = output["predictions"]
         print(f"fmetrics predict -- k-NN Regression (k={args.k})")
         print("=" * 44)
         print(f"  Target: {args.items} items, {args.bytes} bytes, depth {args.depth}")
         print(f"  Historical samples: {total_samples}")
         print()
-        for p in predictions:
+        for p in rendered_predictions:
             label = p["tool"] if not p.get("mode") else f'{p["tool"]}:{p["mode"]}'
             if p.get("predicted_ms", -1) >= 0:
                 print(f"  {label:<20} ~{p['predicted_ms']}ms "

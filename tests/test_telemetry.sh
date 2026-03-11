@@ -724,6 +724,29 @@ test_v16_predict_ftree_preserves_default_contract_with_by_mode() {
   fi
 }
 
+test_v16_predict_ftree_pretty_renders_mode_breakdown() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "ftree pretty predict test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  local target_dir="${TEST_DIR}/predict_target_pretty"
+  mkdir -p "${target_dir}/src"
+  echo "one" > "${target_dir}/src/a.txt"
+  echo "two" > "${target_dir}/src/b.txt"
+
+  seed_ftree_predict_fixture_db
+
+  local output
+  output=$(run_fmetrics predict --tool ftree "${target_dir}" 2>&1) || true
+
+  if [[ "$output" == *"ftree:mixed"* ]] && [[ "$output" == *"ftree:tree"* ]] && [[ "$output" == *"ftree:recon"* ]] && [[ "$output" == *"ftree:snapshot"* ]]; then
+    pass "fmetrics pretty predict renders ftree mode breakdown"
+  else
+    fail "pretty predict should render ftree mixed summary plus per-mode rows" "Got: $output"
+  fi
+}
+
 test_v16_predict_ftree_mode_snapshot_stays_in_cluster() {
   if ! command -v sqlite3 >/dev/null 2>&1; then
     pass "ftree mode-specific predict test skipped (sqlite3 not available)"
@@ -765,6 +788,28 @@ test_v16_predict_helper_degrades_confidence_on_zero_spread() {
     pass "predict helper degrades confidence when feature spread is zero"
   else
     fail "far targets should not get high confidence when feature spread collapses" "Got: $output"
+  fi
+}
+
+test_v16_predict_helper_pretty_preserves_ftree_mixed_contract() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "predict helper pretty contract test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  seed_ftree_predict_fixture_db
+
+  local output mixed_count tree_row recon_row snapshot_row
+  output=$(python3 "${FMETRICS_PREDICT}" --db "$HOME/.fsuite/telemetry.db" --items 42 --bytes 4200 --depth 3 --tool ftree --output pretty 2>&1) || true
+  mixed_count=$(grep -c "ftree:mixed" <<< "$output" || true)
+  tree_row=$(grep -c "ftree:tree" <<< "$output" || true)
+  recon_row=$(grep -c "ftree:recon" <<< "$output" || true)
+  snapshot_row=$(grep -c "ftree:snapshot" <<< "$output" || true)
+
+  if [[ "$mixed_count" == "1" ]] && [[ "$tree_row" == "0" ]] && [[ "$recon_row" == "0" ]] && [[ "$snapshot_row" == "0" ]]; then
+    pass "fmetrics-predict pretty output preserves collapsed ftree contract"
+  else
+    fail "predict helper pretty output should collapse default ftree rows" "Got: $output"
   fi
 }
 
@@ -952,8 +997,10 @@ main() {
   run_test "fmetrics predict --tool filter" test_v15_predict_tool_filter
   run_test "fmetrics history combines tool+project filters" test_v15_history_multi_filter
   run_test "fmetrics predict preserves ftree default contract with by_mode detail" test_v16_predict_ftree_preserves_default_contract_with_by_mode
+  run_test "fmetrics pretty predict renders ftree mode breakdown" test_v16_predict_ftree_pretty_renders_mode_breakdown
   run_test "fmetrics predict --mode snapshot stays in snapshot cluster" test_v16_predict_ftree_mode_snapshot_stays_in_cluster
   run_test "predict helper lowers confidence on zero-spread features" test_v16_predict_helper_degrades_confidence_on_zero_spread
+  run_test "fmetrics-predict pretty output preserves collapsed ftree contract" test_v16_predict_helper_pretty_preserves_ftree_mixed_contract
   run_test "fmetrics predict rejects --mode without --tool ftree" test_v16_predict_rejects_mode_without_ftree_tool
   run_test "fmetrics predict rejects --mode with non-ftree tool" test_v16_predict_rejects_mode_with_non_ftree_tool
 

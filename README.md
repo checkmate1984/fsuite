@@ -185,6 +185,21 @@ fsuite works best when the agent stops compensating for weak default tooling and
 
 The mindset shift is simple: literal search is a strength here, not a fallback. If the exact token, phrase, or signature in front of you is the best narrowing handle, use it directly. The goal is not to imitate the habits agents learned from weaker default tools. The goal is to use the strongest local contract available.
 
+### Operating Doctrine
+
+```text
+1. Run `fsuite` once per session to load the suite-level mental model.
+2. Run `ftree` once to establish territory before narrowing.
+3. Start with `fsearch` to narrow candidate files by path or filename.
+4. Prefer `fmap + fread` before broad `fcontent`.
+5. Use `fcontent` only for exact-text confirmation after narrowing.
+6. Prefer `-o paths` for piping, `-o json` for programmatic decisions, and `pretty` only for human terminal output.
+7. Use `-q` for silent control flow and existence checks.
+8. Use `fcase` once the seam is known and continuity becomes the bottleneck.
+9. Use `fmetrics` to measure what happened and estimate the next pass.
+10. Do not overcompensate for weak default tools. Literal search is a strength here, not a fallback.
+```
+
 ---
 
 ## fsuite Help
@@ -301,7 +316,8 @@ fcase next auth-seam --body "Review denial branch after map/read pass"
 ### Decision Rule for Agents
 
 - Run `ftree` once to establish territory.
-- Run one narrowing pass with `fsearch`.
+- Start with `fsearch` to narrow candidate files.
+- Add `fcontent` only if exact-text confirmation is needed.
 - Prefer `fmap` + `fread` before broad `fcontent`.
 - Use `fcase` when continuity, evidence tracking, or handoff becomes the bottleneck.
 - Use `fcontent` as exact-text confirmation after narrowing, not as the first conceptual repo search.
@@ -704,6 +720,63 @@ fcase next auth-seam --body "Patch denial branch after reviewing symbol map"
 fcase handoff auth-seam -o json
 ```
 
+#### Investigation Loop
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant fsuite
+    participant ftree
+    participant fsearch
+    participant fcontent
+    participant fmap
+    participant fread
+    participant fcase
+    participant SQLite as SQLite (fcase.db)
+
+    User->>fsuite: first contact
+    fsuite-->>User: suite-level workflow guidance
+
+    User->>ftree: scout once
+    ftree-->>User: territory, project shape, hotspots
+
+    User->>fsearch: -o paths <pattern>
+    fsearch-->>User: candidate paths
+
+    opt exact-text confirmation only if needed
+        User->>fcontent: -o paths <literal-or-regex>
+        fcontent-->>User: narrowed paths
+    end
+
+    User->>fmap: -o json [paths] [--name <symbol>]
+    fmap-->>User: ranked symbols and structure
+
+    User->>fcase: init <slug>
+    fcase->>SQLite: CREATE case, session, event
+    fcase-->>User: case envelope
+
+    User->>fcase: target import <slug> (fmap JSON)
+    fcase->>SQLite: INSERT targets, event
+    fcase-->>User: ack
+
+    User->>fread: --symbol <name> [--symbol-type <type>] <path>
+    fread->>fmap: resolve symbol
+    fmap-->>fread: symbol metadata
+    fread-->>User: bounded context + lines
+
+    User->>fcase: evidence import <slug> (fread JSON)
+    fcase->>SQLite: INSERT evidence, event
+    fcase-->>User: ack
+
+    User->>fcase: next <slug>
+    fcase->>SQLite: UPDATE next_move, event
+    fcase-->>User: ack
+
+    User->>fcase: handoff <slug>
+    fcase->>SQLite: SELECT case, targets, evidence, hypotheses, events
+    fcase-->>User: handoff JSON envelope
+```
+
 ### `fedit` &mdash; surgical patching
 
 Applies **preview-first text patches** after you have already narrowed the target with `fsearch`, `fread`, and `fmap`. It defaults to dry-run, emits a unified diff, and only mutates the file when `--apply` is present.
@@ -765,6 +838,38 @@ fmetrics history --tool ftree --limit 10
 
 # Estimate scan time before a large recon
 fmetrics predict /project
+```
+
+#### Prediction Contract
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant fmetrics
+    participant predict as fmetrics-predict.py
+    participant DB as History DB
+
+    alt explicit ftree mode
+        User->>fmetrics: predict --tool ftree --mode tree
+        fmetrics->>predict: requested_tool=ftree, requested_mode=tree
+        predict->>DB: fetch ftree history for mode=tree
+        DB-->>predict: historical ftree:tree records
+        predict->>predict: per-feature delta, distance, confidence
+        predict-->>fmetrics: actionable tree-scoped prediction
+        fmetrics-->>User: pretty / JSON output for ftree:tree
+    else default ftree prediction
+        User->>fmetrics: predict --tool ftree
+        fmetrics->>predict: requested_tool=ftree, requested_mode=null
+        predict->>DB: fetch ftree history for tree/recon/snapshot
+        DB-->>predict: per-mode historical records
+        predict->>predict: compute per-mode predictions
+        predict->>predict: collapse to one advisory mixed row with by_mode
+        predict-->>fmetrics: mixed advisory prediction + by_mode detail
+        fmetrics-->>User: one top-level ftree row with by_mode
+    end
+
+    Note over predict: If zero_spread_mismatch, confidence = low
+    Note over fmetrics,predict: If model path is unavailable, average fallback keeps the same contract
 ```
 
 ---
@@ -1175,8 +1280,8 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 --summary "Authenticate branch" --body "..."` | Store structured proof from a read or search |
 | `fcase hypothesis add auth-seam --body "Cleanup bug lives in tool cancellation"` | Track an open explanation |
 | `fcase reject auth-seam --hypothesis-id 1 --reason "Process survives normal completion too"` | Reject one hypothesis explicitly |
-| `fmap -o json /project/src/auth.py \| fcase target import auth-seam` | Import mapped symbols as structured targets |
-| `fread -o json /project/src/auth.py --around "def authenticate" -A 20 \| fcase evidence import auth-seam` | Import bounded reads as structured evidence |
+| `fmap -o json /project/src/auth.py | fcase target import auth-seam` | Import mapped symbols as structured targets |
+| `fread -o json /project/src/auth.py --around "def authenticate" -A 20 | fcase evidence import auth-seam` | Import bounded reads as structured evidence |
 | `fcase next auth-seam --body "Patch denial branch after reviewing symbol map"` | Update the next best move |
 | `fcase handoff auth-seam -o json` | Emit a concise handoff packet for the next agent |
 | `fcase export auth-seam -o json` | Export the full portable case envelope |
@@ -1412,8 +1517,8 @@ These are designed for AI agents, CI pipelines, cron jobs, and automation script
 | `hypothesis add <slug>` | `--body`, `--confidence` | Add a hypothesis |
 | `hypothesis set <slug>` | `--id`, `--status`, `--reason`, `--confidence` | Update a hypothesis state |
 | `reject <slug>` | `--target-id` or `--hypothesis-id`, `--reason` | Typed alias for ruling out a target or rejecting a hypothesis |
-| `target import <slug>` | `--input <path|- >`, `-o json` | Import structured targets from `fmap -o json` |
-| `evidence import <slug>` | `--input <path|- >`, `-o json` | Import structured evidence from `fread -o json` |
+| `target import <slug>` | `--input <path or ->`, `-o json` | Import structured targets from `fmap -o json` |
+| `evidence import <slug>` | `--input <path or ->`, `-o json` | Import structured evidence from `fread -o json` |
 | `next <slug>` | `--body`, `-o json` | Update the next best move |
 | `handoff <slug>` | `-o json` | Emit a concise handoff packet |
 | `export <slug>` | `-o json` | Export the full case envelope |

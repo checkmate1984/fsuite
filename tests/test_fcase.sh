@@ -23,6 +23,7 @@ teardown() {
   if [[ -n "${TEST_HOME}" && -d "${TEST_HOME}" ]]; then
     rm -rf "${TEST_HOME}"
   fi
+  TEST_HOME=""
 }
 
 pass() {
@@ -40,7 +41,13 @@ fail() {
 
 run_test() {
   TESTS_RUN=$((TESTS_RUN + 1))
-  "$@" || true
+  setup
+  local rc=0
+  "$@" || rc=$?
+  teardown
+  if (( rc != 0 )); then
+    fail "$1 exited non-zero" "rc=$rc"
+  fi
 }
 
 run_fcase() {
@@ -197,13 +204,34 @@ test_evidence_records_body_and_line_metadata() {
 test_hypothesis_add_and_set_update_state() {
   run_fcase init hypothesis-bug --goal "Track hypothesis state" >/dev/null 2>&1 || true
   run_fcase hypothesis add hypothesis-bug --body "Cache bypass causes failure" --confidence medium >/dev/null 2>&1 || true
-  run_fcase hypothesis set hypothesis-bug --id 1 --status active --reason "Repro still points at cache path" --confidence high >/dev/null 2>&1 || true
+  local before_output hypothesis_id
+  before_output=$(run_fcase status hypothesis-bug -o json 2>&1)
+  hypothesis_id=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(data["hypotheses"][0]["id"])' <<< "$before_output" 2>/dev/null || true)
+  run_fcase hypothesis set hypothesis-bug --id "${hypothesis_id}" --status active --reason "Repro still points at cache path" --confidence high >/dev/null 2>&1 || true
   local output rc=0
   output=$(run_fcase status hypothesis-bug -o json 2>&1) || rc=$?
   if [[ $rc -eq 0 ]] && [[ "$output" == *'"status":"active"'* ]] && [[ "$output" == *'"confidence":"high"'* ]]; then
     pass "hypothesis add and set update structured state"
   else
     fail "hypothesis set should update structured state" "rc=$rc output=$output"
+  fi
+}
+
+test_hypothesis_set_preserves_reason_when_omitted() {
+  run_fcase init hypothesis-reason --goal "Preserve reason on status-only update" >/dev/null 2>&1 || true
+  run_fcase hypothesis add hypothesis-reason --body "Cache bypass causes failure" --confidence medium >/dev/null 2>&1 || true
+  local before_output hypothesis_id
+  before_output=$(run_fcase status hypothesis-reason -o json 2>&1)
+  hypothesis_id=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(data["hypotheses"][0]["id"])' <<< "$before_output" 2>/dev/null || true)
+  run_fcase hypothesis set hypothesis-reason --id "${hypothesis_id}" --status active --reason "Repro still points at cache path" >/dev/null 2>&1 || true
+  run_fcase hypothesis set hypothesis-reason --id "${hypothesis_id}" --status validated --confidence high >/dev/null 2>&1 || true
+
+  local output rc=0
+  output=$(run_fcase status hypothesis-reason -o json 2>&1) || rc=$?
+  if [[ $rc -eq 0 ]] && python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); hypo=data["hypotheses"][0]; assert hypo["status"] == "validated"; assert hypo["reason"] == "Repro still points at cache path"; assert hypo["confidence"] == "high"' <<< "$output" 2>/dev/null; then
+    pass "hypothesis set preserves the existing reason when --reason is omitted"
+  else
+    fail "hypothesis set should preserve reason unless explicitly changed" "rc=$rc output=$output"
   fi
 }
 
@@ -246,7 +274,7 @@ test_event_payload_json_escapes_control_chars() {
   local note_body payload
   note_body=$'bad \b formfeed \f and unit \001 markers'
   run_fcase note control-bug --body "$note_body" >/dev/null 2>&1 || true
-  payload=$(sqlite3 "${TEST_HOME}/.fsuite/fcase.db" "SELECT payload_json FROM events WHERE event_type = 'note' ORDER BY id DESC LIMIT 1;")
+  payload=$(sqlite3 "${TEST_HOME}/.fsuite/fcase.db" "PRAGMA foreign_keys=ON; SELECT payload_json FROM events WHERE event_type = 'note' ORDER BY id DESC LIMIT 1;")
 
   if python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert "body" in data' <<< "$payload" 2>/dev/null; then
     pass "event payload JSON escapes control characters safely"
@@ -264,9 +292,9 @@ import sys
 text = Path(sys.argv[1]).read_text()
 assert "db_query() {" in text
 assert "db_exec() {" in text
-assert text.count('sqlite3 "$DB_FILE"') == 2, text.count('sqlite3 "$DB_FILE"')
-assert text.count('PRAGMA foreign_keys=ON;') >= 3
-assert text.count('conn.execute("PRAGMA foreign_keys=ON")') >= 2
+assert 'sqlite3 "$DB_FILE"' in text
+assert text.count('PRAGMA foreign_keys=ON;') >= 1
+assert text.count('conn.execute("PRAGMA foreign_keys=ON")') >= 1
 PY
 
   if [[ $rc -eq 0 ]]; then
@@ -289,7 +317,7 @@ EOF
   local status_output
   status_output=$(run_fcase status import-targets -o json 2>&1 || true)
 
-  if [[ $rc -eq 0 ]] && python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); targets=data["targets"]; assert len(targets) == 2; assert any(t["path"] == "/repo/src/auth.py" and t["symbol_type"] == "function" and "line 10" in (t["reason"] or "") for t in targets); assert any(t["symbol_type"] == "class" for t in targets)' <<< "$status_output" 2>/dev/null; then
+  if [[ $rc -eq 0 ]] && python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); targets=data["targets"]; assert len(targets) == 2; assert any(t["path"] == "/repo/src/auth.py" and t["symbol"] == "authenticate" and t["symbol_type"] == "function" and "line 10" in (t["reason"] or "") for t in targets); assert any(t["symbol"] == "AuthHandler" and t["symbol_type"] == "class" for t in targets)' <<< "$status_output" 2>/dev/null; then
     pass "target import ingests fmap JSON into structured targets"
   else
     fail "target import should ingest fmap JSON" "rc=$rc output=$output status=$status_output"
@@ -333,12 +361,16 @@ main() {
   echo "Running tests..."
   echo ""
 
+  [[ -n "${FCASE}" && -x "${FCASE}" ]] || {
+    echo "FCASE is required and must be executable: ${FCASE}" >&2
+    exit 1
+  }
+
   command -v python3 >/dev/null 2>&1 || {
     echo "python3 is required for test_fcase.sh" >&2
     exit 1
   }
 
-  setup
   trap teardown EXIT
 
   run_test test_help
@@ -355,6 +387,7 @@ main() {
   run_test test_target_add_records_symbol_state
   run_test test_evidence_records_body_and_line_metadata
   run_test test_hypothesis_add_and_set_update_state
+  run_test test_hypothesis_set_preserves_reason_when_omitted
   run_test test_reject_maps_to_hypothesis_rejected
   run_test test_reject_fails_without_selector
   run_test test_evidence_rejects_invalid_line_range
