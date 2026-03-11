@@ -67,6 +67,7 @@ test_prefix_install_copies_tools_and_assets() {
     "${prefix}/bin/fcontent" \
     "${prefix}/bin/fmap" \
     "${prefix}/bin/fread" \
+    "${prefix}/bin/fcase" \
     "${prefix}/bin/fedit" \
     "${prefix}/bin/fmetrics" \
     "${prefix}/share/fsuite/_fsuite_common.sh" \
@@ -96,6 +97,7 @@ test_prefix_install_versions_work() {
     FSUITE_TELEMETRY=0 "${prefix}/bin/fcontent" --version
     FSUITE_TELEMETRY=0 "${prefix}/bin/fmap" --version
     FSUITE_TELEMETRY=0 "${prefix}/bin/fread" --version
+    FSUITE_TELEMETRY=0 "${prefix}/bin/fcase" --version
     FSUITE_TELEMETRY=0 "${prefix}/bin/fedit" --version
     FSUITE_TELEMETRY=0 "${prefix}/bin/fmetrics" --version
   )
@@ -106,11 +108,54 @@ test_prefix_install_versions_work() {
      [[ "$output" =~ fcontent\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
      [[ "$output" =~ fmap\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
      [[ "$output" =~ fread\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
+     [[ "$output" =~ fcase\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
      [[ "$output" =~ fedit\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
      [[ "$output" =~ fmetrics\ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
     pass "Installed tools report versions from the prefix"
   else
     fail "Installed tools should be executable from the prefix" "Got: $output"
+  fi
+}
+
+test_installed_fcase_runs_case_commands() {
+  local prefix="${TEST_ROOT}/fcase"
+  local fcase_home="${TEST_ROOT}/fcase-home"
+  FSUITE_TELEMETRY=0 "${INSTALLER}" --prefix "$prefix" >/dev/null 2>&1 || {
+    fail "fcase install should succeed"
+    return
+  }
+
+  mkdir -p "${fcase_home}"
+
+  local output rc=0
+  output=$(HOME="${fcase_home}" FSUITE_TELEMETRY=0 "${prefix}/bin/fcase" list -o json 2>&1) || rc=$?
+
+  if [[ $rc -eq 0 ]] && [[ "$output" == *'"cases"'* ]]; then
+    pass "Installed fcase runs real case commands from the prefix"
+  else
+    fail "Installed fcase should execute beyond --version" "rc=$rc output=$output"
+  fi
+}
+
+test_verify_install_surfaces_sqlite3_failures() {
+  local prefix="${TEST_ROOT}/verify-sqlite"
+  local shim_dir="${TEST_ROOT}/shim-bin"
+  mkdir -p "${shim_dir}"
+
+  cat > "${shim_dir}/sqlite3" <<'EOF'
+#!/usr/bin/env bash
+echo "sqlite3 shim failure" >&2
+exit 127
+EOF
+  chmod +x "${shim_dir}/sqlite3"
+
+  local output rc=0
+  output=$(PATH="${shim_dir}:$PATH" FSUITE_TELEMETRY=0 "${INSTALLER}" --prefix "$prefix" 2>&1) || rc=$?
+
+  if [[ $rc -ne 0 ]] && [[ "$output" == *"sqlite3 shim failure"* ]]; then
+    pass "Installer verification surfaces sqlite3 runtime failures"
+  else
+    fail "Installer verification should surface sqlite3 runtime failures" "rc=$rc output=$output"
   fi
 }
 
@@ -125,7 +170,10 @@ test_fsuite_help_explains_flow() {
   output=$(FSUITE_TELEMETRY=0 "${prefix}/bin/fsuite" 2>&1)
 
   if [[ "$output" == *"Canonical agent flow"* ]] && \
-     [[ "$output" == *"ftree -> fsearch | fcontent -> fmap -> fread -> fedit -> fmetrics"* ]]; then
+     [[ "$output" == *"ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> fmetrics"* ]] && \
+     [[ "$output" == *"Composable sensor suite"* ]] && \
+     [[ "$output" == *"Literal search is a strength here, not a fallback."* ]] && \
+     [[ "$output" == *"fcase     Preserve investigation state and hand off cleanly"* ]]; then
     pass "fsuite command explains the suite flow"
   else
     fail "fsuite command should explain the suite workflow" "Got: $output"
@@ -151,6 +199,28 @@ test_installed_fmetrics_finds_predict_helper() {
   fi
 }
 
+test_debian_packaging_declares_fcase_runtime_contract() {
+  local control_file="${REPO_DIR}/debian/control"
+  local rules_file="${REPO_DIR}/debian/rules"
+
+  if [[ ! -f "$control_file" ]] || [[ ! -f "$rules_file" ]]; then
+    fail "Debian packaging metadata should exist"
+    return
+  fi
+
+  local control rules
+  control="$(cat "$control_file")"
+  rules="$(cat "$rules_file")"
+
+  if [[ "$control" == *"Depends: "* ]] && \
+     [[ "$control" == *"sqlite3"* ]] && \
+     [[ "$rules" == *"install -D -m 755 fcase "* ]]; then
+    pass "Debian packaging declares fcase runtime dependency and install path"
+  else
+    fail "Debian packaging should include sqlite3 and install fcase" "control=$control rules=$rules"
+  fi
+}
+
 main() {
   echo "======================================"
   echo "  install.sh Test Suite"
@@ -167,8 +237,11 @@ main() {
   run_test "Installer help output" test_installer_help
   run_test "Prefix install copies tools and assets" test_prefix_install_copies_tools_and_assets
   run_test "Installed tools report versions" test_prefix_install_versions_work
+  run_test "Installed fcase runs real commands" test_installed_fcase_runs_case_commands
+  run_test "Installer surfaces sqlite3 verify failures" test_verify_install_surfaces_sqlite3_failures
   run_test "fsuite command explains flow" test_fsuite_help_explains_flow
   run_test "Installed fmetrics finds predict helper" test_installed_fmetrics_finds_predict_helper
+  run_test "Debian packaging declares fcase runtime contract" test_debian_packaging_declares_fcase_runtime_contract
 
   echo ""
   echo "======================================"

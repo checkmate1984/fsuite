@@ -20,8 +20,8 @@ USAGE
   fsuite usage
 
 DESCRIPTION
-  fsuite is the suite-level guide for the seven operational tools:
-    ftree, fsearch, fcontent, fmap, fread, fedit, fmetrics
+  fsuite is the suite-level guide for the eight operational tools:
+    ftree, fsearch, fcontent, fmap, fread, fcase, fedit, fmetrics
 
   Use fsuite when you want the conceptual flow, tool roles, and headless
   operating pattern without digging through the README first.
@@ -36,30 +36,41 @@ print_help() {
   cat <<EOF
 fsuite ${VERSION}
 
-Seven operational tools. One headless workflow.
+Eight operational tools. One composable sensor suite.
 
   ftree     Scout the project once
   fsearch   Find candidate files
   fcontent  Confirm exact text across the narrowed set
   fmap      Map symbols and structure
   fread     Read the exact seam you care about
+  fcase     Preserve investigation state and hand off cleanly
   fedit     Preview and apply surgical patches
   fmetrics  Measure what happened and predict the next run
 
 Canonical agent flow
 
-  ftree -> fsearch | fcontent -> fmap -> fread -> fedit -> fmetrics
-  Scout    Narrowing             Bridge   Read     Change    Measure
+  ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> fmetrics
+  Scout    Narrowing             Bridge   Read     Preserve  Change    Measure
 
-Practical guidance
+First-contact mindset
 
-  - Use ftree first for broad orientation.
-  - Use fsearch to narrow candidate files.
-  - Use fcontent after narrowing, not as the first broad repo search.
-  - Treat fmap as the bridge from discovery to surgical reading and editing.
-  - Use fread once the seam is known.
-  - Use fedit with dry-run first, then --apply.
-  - Use fmetrics after execution if you care about telemetry and runtime history.
+  - Composable sensor suite. Not a single sacred path.
+  - There are stronger and weaker combinations, but no one true sequence.
+  - Stop overcompensating for weak default tools; trust the direct contract.
+  - Literal search is a strength here, not a fallback.
+  - Use -o json and -o paths aggressively.
+  - Treat fmap as the bridge in the middle, not only a producer before fread.
+  - fmap + fread is the power pair for understanding code.
+  - fcase preserves the seam once you know what matters.
+  - Use ftree intentionally and sparingly on large repos.
+  - Use fedit only after inspected context.
+  - Use fmetrics for observability, not as a reason to spam ftree.
+
+Strong combinations
+
+  - fsearch -> fmap
+  - fcontent -o paths -> fmap
+  - fsearch -> fcontent -o paths -> fmap
 
 Headless defaults
 
@@ -71,11 +82,11 @@ Headless defaults
 Examples
 
   fsuite flow
-  ftree --snapshot -o json /project
-  fsearch -o paths '*.ts' /project/src | fcontent -o paths "auth"
   fsearch -o paths '*.ts' /project/src | fmap -o json
+  fsearch -o paths '*.ts' /project/src | fcontent -o paths "auth" | fmap -o json
   fread -o json /project/src/auth.ts --around "function authenticate" -A 20
   fedit -o json /project/src/auth.ts --function validateLength --replace "return false;" --with "return true;"
+  ftree --snapshot -o json /project
   fmetrics import && fmetrics stats -o json
 
 Use each tool's --help for the full flag surface.
@@ -101,6 +112,9 @@ Tool roles
   fread
     Bounded reads around lines, patterns, symbols, and diffs.
 
+  fcase
+    Structured continuity for cases, evidence, hypotheses, and handoffs.
+
   fedit
     Surgical patching with dry-run diffs, symbol shortcuts, preconditions, and batch mode.
 
@@ -113,29 +127,44 @@ print_flow() {
   cat <<'EOF'
 Recommended workflow
 
-  1. ftree
-     Build the broad repo picture once.
+  1. fsuite
+     Load the suite-level mental model once.
 
-  2. fsearch
-     Narrow to likely files.
+  2. ftree
+     Build the broad repo picture once, then stop unless the target changes.
 
-  3. fcontent
-     Use only when exact textual confirmation is needed across the narrowed set.
+  3. fsearch or fcontent
+     Narrow to likely files by path or by literal evidence.
 
   4. fmap
-     Bridge discovery to structural understanding.
+     Bridge discovery to structural understanding in the middle of the pipeline.
 
   5. fread
-     Read the exact code seam now that the target is clear.
+     Pair with fmap to read the exact seam now that the target is clear.
 
-  6. fedit
-     Preview and apply a surgical change.
+  6. fcase
+     Preserve the current case state once the seam, evidence, and next move are known.
 
-  7. fmetrics
+  7. fedit
+     Preview and apply a surgical change only after inspected context.
+
+  8. fmetrics
      Measure runtime history and import telemetry if needed.
 
+Strong combinations:
+  - fsearch -> fmap
+  - fcontent -o paths -> fmap
+  - fsearch -> fcontent -o paths -> fmap
+  - fmap + fread
+  - fmap + fread + fcase
+
+Mindset:
+  - heuristic, not rigid rule
+  - literal search is a first-class narrowing move
+  - use -o json and -o paths aggressively
+
 Heuristic, not rigid rule:
-  ftree -> fsearch | fcontent -> fmap -> fread -> fedit -> fmetrics
+  ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> fmetrics
 EOF
 }
 
@@ -146,14 +175,23 @@ Examples
   # Scout once
   ftree --snapshot -o json /project
 
-  # Narrow candidates, then confirm exact text only if needed
-  fsearch -o paths '*.py' /project/src | fcontent -o paths "authenticate"
-
-  # Map structure before broad reads
+  # Narrow by path, then map structure
   fsearch -o paths '*.py' /project/src | fmap -o json
 
-  # Read the exact seam
+  # Narrow by literal evidence, then map structure
+  fcontent -o paths "authenticate" /project/src | fmap -o json
+
+  # Narrow twice when needed: path -> exact text -> structure
+  fsearch -o paths '*.py' /project/src | fcontent -o paths "authenticate" | fmap -o json
+
+  # fmap + fread is the power pair for understanding code
   fread -o json /project/src/auth.py --around "def authenticate" -B 5 -A 20
+
+  # Preserve continuity before editing or handing off
+  fcase init auth-seam --goal "Trace authenticate flow"
+  fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 --summary "Authenticate branch" --body "..."
+  fread -o json /project/src/auth.py --around "def authenticate" -A 20 | fcase evidence import auth-seam
+  fcase next auth-seam --body "Patch denial branch after reviewing symbol map"
 
   # Preview and apply a patch
   fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()"

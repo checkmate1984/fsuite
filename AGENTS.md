@@ -5,8 +5,8 @@ Use `fsuite` for suite-level guidance first, then use the operational tools for 
 ## Mental Model
 
 ```text
-fsuite -> ftree -> fsearch | fcontent -> fmap -> fread -> fedit -> fmetrics
-Guide     Scout    Narrowing             Bridge   Read     Edit      Measure
+fsuite -> ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> fmetrics
+Guide     Scout    Narrowing             Bridge   Read     Preserve  Edit      Measure
 ```
 
 ## Headless Defaults
@@ -35,10 +35,14 @@ fsearch -o paths '*.py' /project/src | fmap -o json
 # 4) Read exact context
 fread -o json /project/src/auth.py --around "def authenticate" -B 5 -A 20
 
-# 5) Only if exact text confirmation is still needed
+# 5) Preserve investigation state once the seam is known
+fcase init auth-seam --goal "Trace authenticate flow"
+fcase next auth-seam --body "Review denial branch before patching"
+
+# 6) Only if exact text confirmation is still needed
 fsearch -o paths '*.py' /project/src | fcontent -o json "authenticate"
 
-# 6) Measure and predict
+# 7) Measure and predict
 fmetrics import
 fmetrics stats -o json
 fmetrics predict /project
@@ -50,6 +54,7 @@ fmetrics predict /project
 - Run `ftree` once to establish territory.
 - Run one narrowing pass with `fsearch`.
 - Prefer `fmap` and `fread` before broad `fcontent`.
+- Use `fcase` once the seam is known and continuity becomes the bottleneck.
 - Use `fcontent` as exact-text confirmation after narrowing, not as the first conceptual repo search.
 - Do not rediscover the repo unless the target changes or a contradiction appears.
 
@@ -60,6 +65,7 @@ fmetrics predict /project
 - Need symbol skeleton without full reads: `fmap`
 - Need exact text confirmation across already narrowed files: `fcontent`
 - Need bounded file context: `fread`
+- Need durable case state, evidence, or a handoff: `fcase`
 - Need surgical edits with preview/apply: `fedit`
 - Need runtime history or preflight cost: `fmetrics`
 

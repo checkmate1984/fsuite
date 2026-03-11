@@ -96,6 +96,12 @@ STDIN_FORMAT=""
 
 TARGET_PATH=""
 NEXT_HINT=""
+SYMBOL_NAME=""
+SYMBOL_RESOLUTION_PATH=""
+SYMBOL_RESOLUTION_SYMBOL=""
+SYMBOL_RESOLUTION_TYPE=""
+SYMBOL_RESOLUTION_LINE_START=""
+SYMBOL_RESOLUTION_LINE_END=""
 
 TOTAL_LINES_READ=0
 TOTAL_BYTES_READ=0
@@ -114,6 +120,9 @@ READ_FILE_COUNT=0
 WARN_COUNT=0
 ERR_COUNT=0
 declare -a WARN_MSGS ERR_PATHS ERR_CODES ERR_DETAILS
+
+CANDIDATE_COUNT=0
+declare -a CANDIDATE_PATHS CANDIDATE_SYMBOLS CANDIDATE_TYPES CANDIDATE_STARTS CANDIDATE_ENDS
 
 _RR_CONTENT=""
 _RR_BYTES=0
@@ -384,6 +393,232 @@ add_chunk() {
   CHUNK_BYTES[$CHUNK_COUNT]="$bytes"
   CHUNK_LINES[$CHUNK_COUNT]="$lines"
   CHUNK_COUNT=$((CHUNK_COUNT + 1))
+}
+
+set_symbol_resolution() {
+  SYMBOL_RESOLUTION_PATH="$1"
+  SYMBOL_RESOLUTION_SYMBOL="$2"
+  SYMBOL_RESOLUTION_TYPE="$3"
+  SYMBOL_RESOLUTION_LINE_START="$4"
+  SYMBOL_RESOLUTION_LINE_END="$5"
+}
+
+add_symbol_candidate() {
+  local path="$1" symbol="$2" sym_type="$3" start="$4" end="$5"
+  CANDIDATE_PATHS[$CANDIDATE_COUNT]="$path"
+  CANDIDATE_SYMBOLS[$CANDIDATE_COUNT]="$symbol"
+  CANDIDATE_TYPES[$CANDIDATE_COUNT]="$sym_type"
+  CANDIDATE_STARTS[$CANDIDATE_COUNT]="$start"
+  CANDIDATE_ENDS[$CANDIDATE_COUNT]="$end"
+  CANDIDATE_COUNT=$((CANDIDATE_COUNT + 1))
+}
+
+derive_symbol_end_from_file() {
+  local file_path="$1" start_line="$2" sym_type="$3" fmap_bin="$4"
+  local fmap_json result
+
+  fmap_json="$(mktemp)"
+  if ! FSUITE_TELEMETRY=0 "$fmap_bin" -o json "$file_path" > "$fmap_json"; then
+    rm -f "$fmap_json"
+    printf '0'
+    return 0
+  fi
+
+  result="$(perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+
+    my ($json_path, $start, $sym_type) = @ARGV;
+    open my $fh, q{<:raw}, $json_path or exit 90;
+    local $/;
+    my $data = JSON::PP::decode_json(<$fh>);
+    my $file = $data->{files}[0];
+    exit 20 unless $file && ref($file->{symbols}) eq q{ARRAY};
+    my @symbols = @{ $file->{symbols} };
+    my $idx = -1;
+    for my $i (0 .. $#symbols) {
+      my $sym = $symbols[$i];
+      next unless ($sym->{line} // 0) == $start;
+      next unless ($sym->{type} // q{}) eq $sym_type;
+      $idx = $i;
+      last;
+    }
+    exit 21 if $idx < 0;
+    my $indent = $symbols[$idx]{indent} // 0;
+    for my $i ($idx + 1 .. $#symbols) {
+      my $next = $symbols[$i];
+      next unless ($next->{line} // 0) > $start;
+      if (($next->{indent} // 0) <= $indent) {
+        print (($next->{line} // 0) - 1);
+        exit 0;
+      }
+    }
+    print 0;
+  ' "$fmap_json" "$start_line" "$sym_type" 2>/dev/null || true)"
+
+  rm -f "$fmap_json"
+  [[ "$result" =~ ^[0-9]+$ ]] || result=0
+  printf '%s' "$result"
+}
+
+resolve_symbol_request() {
+  local target="$1"
+  local scope_abs fmap_bin fmap_json result rc resolved_path resolved_start resolved_end resolved_symbol resolved_type total_lines
+
+  scope_abs="$(normalize_abs_path "$target")"
+
+  if [[ ! -e "$scope_abs" ]]; then
+    add_error "$scope_abs" "not_found" "file does not exist"
+    return 1
+  fi
+  if [[ ! -r "$scope_abs" ]]; then
+    add_error "$scope_abs" "permission" "permission denied"
+    return 1
+  fi
+  if [[ ! -f "$scope_abs" ]] && [[ ! -d "$scope_abs" ]]; then
+    add_error "$scope_abs" "not_regular" "not a regular file or directory"
+    return 1
+  fi
+
+  fmap_bin="${_FSUITE_SCRIPT_DIR}/fmap"
+  [[ -x "$fmap_bin" ]] || fmap_bin="$(command -v fmap 2>/dev/null || true)"
+  if [[ -z "$fmap_bin" ]]; then
+    add_error "$scope_abs" "symbol_lookup_failed" "fmap is required for --symbol but was not found"
+    return 1
+  fi
+
+  fmap_json="$(mktemp)"
+  if ! FSUITE_TELEMETRY=0 "$fmap_bin" -o json --name "$SYMBOL_NAME" "$scope_abs" > "$fmap_json"; then
+    rm -f "$fmap_json"
+    add_error "$scope_abs" "symbol_lookup_failed" "fmap symbol lookup failed"
+    return 1
+  fi
+
+  result="$(perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+
+    sub derive_end_line {
+      my ($file, $start, $sym_type) = @_;
+      return 0 unless $file && ref($file->{symbols}) eq q{ARRAY};
+      my @symbols = @{ $file->{symbols} };
+      my $idx = -1;
+      for my $i (0 .. $#symbols) {
+        my $sym = $symbols[$i];
+        next unless ($sym->{line} // 0) == $start;
+        next unless ($sym->{type} // q{}) eq $sym_type;
+        $idx = $i;
+        last;
+      }
+      return 0 if $idx < 0;
+      my $indent = $symbols[$idx]{indent} // 0;
+      for my $i ($idx + 1 .. $#symbols) {
+        my $next = $symbols[$i];
+        next unless ($next->{line} // 0) > $start;
+        if (($next->{indent} // 0) <= $indent) {
+          return ($next->{line} // 0) - 1;
+        }
+      }
+      return 0;
+    }
+
+    my ($json_path, $query) = @ARGV;
+    open my $fh, q{<:raw}, $json_path or exit 90;
+    local $/;
+    my $json = <$fh>;
+    my $data = JSON::PP::decode_json($json);
+    my @matches = @{ $data->{matches} || [] };
+    my @exact = grep { defined($_->{symbol}) && $_->{symbol} eq $query } @matches;
+    my @files = @{ $data->{files} || [] };
+    my %files_by_path = map { (($_->{path} // q{}) => $_) } @files;
+
+    if (!@exact) {
+      exit 20;
+    }
+
+    if (@exact > 1) {
+      for my $cand (@exact) {
+        my $path = $cand->{path} // q{};
+        my $start = $cand->{line_start} // 0;
+        my $sym_type = $cand->{symbol_type} // q{};
+        my $end = defined $cand->{line_end} ? ($cand->{line_end} // 0) : 0;
+        if (!$end && exists $files_by_path{$path}) {
+          $end = derive_end_line($files_by_path{$path}, $start, $sym_type);
+        }
+        print join(qq{\t},
+          $path,
+          ($cand->{symbol} // q{}),
+          $sym_type,
+          $start,
+          ($end || 0)
+        ), qq{\n};
+      }
+      exit 21;
+    }
+
+    my $cand = $exact[0];
+    my $path = $cand->{path} // q{};
+    my $start = $cand->{line_start} // 0;
+    my $sym_type = $cand->{symbol_type} // q{};
+    my $end = defined $cand->{line_end} ? ($cand->{line_end} // 0) : 0;
+    if (!$end && exists $files_by_path{$path}) {
+      $end = derive_end_line($files_by_path{$path}, $start, $sym_type);
+    }
+    print join(qq{\t},
+      $path,
+      ($cand->{symbol} // q{}),
+      $sym_type,
+      $start,
+      ($end || 0)
+    );
+  ' "$fmap_json" "$SYMBOL_NAME" 2>/dev/null)" || rc=$?
+
+  rm -f "$fmap_json"
+  rc="${rc:-0}"
+
+  case "$rc" in
+    0)
+      IFS=$'\t' read -r resolved_path resolved_symbol resolved_type resolved_start resolved_end <<< "$result"
+      [[ "$resolved_start" =~ ^[0-9]+$ ]] || resolved_start=0
+      [[ "$resolved_end" =~ ^[0-9]+$ ]] || resolved_end=0
+      if (( resolved_end <= 0 )); then
+        resolved_end="$(derive_symbol_end_from_file "$resolved_path" "$resolved_start" "$resolved_type" "$fmap_bin")"
+      fi
+      if (( resolved_end <= 0 )); then
+        total_lines="$(count_file_lines "$resolved_path" 2>/dev/null || echo 0)"
+        [[ "$total_lines" =~ ^[0-9]+$ ]] || total_lines=0
+        resolved_end="$total_lines"
+      fi
+      set_symbol_resolution "$resolved_path" "$resolved_symbol" "$resolved_type" "$resolved_start" "$resolved_end"
+      printf '%s\t%s\t%s\n' "$resolved_path" "$resolved_start" "$resolved_end"
+      return 0
+      ;;
+    20)
+      add_error "$scope_abs" "symbol_not_found" "symbol '$SYMBOL_NAME' not found in scope"
+      return 1
+      ;;
+    21)
+      while IFS=$'\t' read -r resolved_path resolved_symbol resolved_type resolved_start resolved_end; do
+        [[ -n "$resolved_path" ]] || continue
+        [[ "$resolved_end" =~ ^[0-9]+$ ]] || resolved_end=0
+        if (( resolved_end <= 0 )); then
+          resolved_end="$(derive_symbol_end_from_file "$resolved_path" "$resolved_start" "$resolved_type" "$fmap_bin")"
+        fi
+        if (( resolved_end <= 0 )); then
+          total_lines="$(count_file_lines "$resolved_path" 2>/dev/null || echo 0)"
+          [[ "$total_lines" =~ ^[0-9]+$ ]] || total_lines=0
+          resolved_end="$total_lines"
+        fi
+        add_symbol_candidate "$resolved_path" "$resolved_symbol" "$resolved_type" "$resolved_start" "$resolved_end"
+      done <<< "$result"
+      add_error "$scope_abs" "symbol_ambiguous" "symbol '$SYMBOL_NAME' matched multiple exact symbols"
+      return 1
+      ;;
+    *)
+      add_error "$scope_abs" "symbol_lookup_failed" "failed to resolve symbol '$SYMBOL_NAME'"
+      return 1
+      ;;
+  esac
 }
 
 read_range_chunk() {
@@ -790,6 +1025,32 @@ render_json() {
   done
   echo -n "],"
 
+  if [[ -n "$SYMBOL_NAME" ]]; then
+    if [[ -n "$SYMBOL_RESOLUTION_PATH" ]]; then
+      echo -n "\"symbol_resolution\":{"
+      echo -n "\"query\":\"$(json_escape_str "$SYMBOL_NAME")\","
+      echo -n "\"symbol\":\"$(json_escape_str "$SYMBOL_RESOLUTION_SYMBOL")\","
+      echo -n "\"symbol_type\":\"$(json_escape_str "$SYMBOL_RESOLUTION_TYPE")\","
+      echo -n "\"path\":\"$(json_escape_str "$SYMBOL_RESOLUTION_PATH")\","
+      echo -n "\"line_start\":${SYMBOL_RESOLUTION_LINE_START},"
+      echo -n "\"line_end\":${SYMBOL_RESOLUTION_LINE_END}"
+      echo -n "},"
+    else
+      echo -n "\"symbol_resolution\":null,"
+    fi
+
+    echo -n "\"candidates\":["
+    for (( i=0; i<CANDIDATE_COUNT; i++ )); do
+      (( i > 0 )) && echo -n ","
+      echo -n "{\"path\":\"$(json_escape_str "${CANDIDATE_PATHS[$i]}")\","
+      echo -n "\"symbol\":\"$(json_escape_str "${CANDIDATE_SYMBOLS[$i]}")\","
+      echo -n "\"symbol_type\":\"$(json_escape_str "${CANDIDATE_TYPES[$i]}")\","
+      echo -n "\"line_start\":${CANDIDATE_STARTS[$i]},"
+      echo -n "\"line_end\":${CANDIDATE_ENDS[$i]}}"
+    done
+    echo -n "],"
+  fi
+
   echo -n "\"warnings\":["
   for (( i=0; i<WARN_COUNT; i++ )); do
     (( i > 0 )) && echo -n ","
@@ -849,6 +1110,8 @@ fread — budgeted file reading with line numbers, token estimates, and pipeline
 
 USAGE
   fread <file>                                   Read file (capped)
+  fread <file> --symbol authenticate             Read one exact symbol block
+  fread <dir> --symbol authenticate              Resolve one exact symbol within a directory scope
   fread <file> -r 120:220                        Line range
   fread <file> --head 50                         First N lines
   fread <file> --tail 30                         Last N lines
@@ -864,6 +1127,7 @@ OPTIONS
   --around-line N             Context around specific line number
   --around PATTERN            Context around first literal pattern match
   --all-matches               With --around: include all matches up to caps
+  --symbol NAME               Read exactly one exact symbol match within file or directory scope
   -B, --before N              Lines before (default 5)
   -A, --after N               Lines after (default 10)
   --max-lines N               Cap total emitted lines (default 200)
@@ -883,6 +1147,7 @@ OPTIONS
 
 NOTES
   Budget precedence: token_budget > max_bytes > max_lines
+  --symbol is strict: exactly one exact symbol match succeeds; ambiguous or missing matches fail
   --stdin-format=unified-diff reads NEW-side hunk ranges from +++ path and @@ +start,count
 EOF
 }
@@ -1003,6 +1268,12 @@ while [[ $# -gt 0 ]]; do
       _TELEM_FLAGS+=" --all-matches"
       shift
       ;;
+    --symbol)
+      [[ -n "${2:-}" ]] || die "Missing value for --symbol"
+      SYMBOL_NAME="$2"
+      _TELEM_FLAGS+=" --symbol"
+      shift 2
+      ;;
     -B|--before)
       [[ -n "${2:-}" ]] || die "Missing value for --before"
       [[ "$2" =~ ^[0-9]+$ ]] || die "--before must be an integer"
@@ -1110,6 +1381,9 @@ selector_count=0
 (( AROUND_LINE > 0 )) && selector_count=$((selector_count + 1))
 [[ -n "$AROUND_PATTERN" ]] && selector_count=$((selector_count + 1))
 (( selector_count > 1 )) && die "Choose only one of: --lines, --head, --tail, --around-line, --around"
+if [[ -n "$SYMBOL_NAME" ]] && (( selector_count > 0 )); then
+  die "Choose either --symbol or one of: --lines, --head, --tail, --around-line, --around"
+fi
 
 TARGET_PATH="${POSITIONAL[0]:-}"
 
@@ -1120,7 +1394,7 @@ if (( FROM_STDIN == 1 )); then
     unified-diff) MODE="stdin_unified_diff" ;;
     *) die "Invalid --stdin-format: $STDIN_FORMAT (expected paths or unified-diff)" ;;
   esac
-  if (( selector_count > 0 )) || [[ -n "$TARGET_PATH" ]]; then
+  if (( selector_count > 0 )) || [[ -n "$TARGET_PATH" ]] || [[ -n "$SYMBOL_NAME" ]]; then
     die "File selectors and positional path are not valid with --from-stdin"
   fi
 else
@@ -1135,6 +1409,11 @@ if (( FROM_STDIN == 1 )); then
     process_stdin_paths "$MAX_FILES"
   else
     process_stdin_unified_diff "$BEFORE" "$AFTER"
+  fi
+elif [[ -n "$SYMBOL_NAME" ]]; then
+  MODE="symbol"
+  if resolve_symbol_request "$TARGET_PATH" >/dev/null; then
+    process_single_file "$SYMBOL_RESOLUTION_PATH" "$SYMBOL_RESOLUTION_LINE_START" "$SYMBOL_RESOLUTION_LINE_END" "$SYMBOL_RESOLUTION_LINE_START"
   fi
 elif [[ -n "$AROUND_PATTERN" ]]; then
   MODE="around"

@@ -10,9 +10,12 @@ FCONTENT="${FSUITE_DIR}/fcontent"
 FSEARCH="${FSUITE_DIR}/fsearch"
 FTREE="${FSUITE_DIR}/ftree"
 FMETRICS="${FSUITE_DIR}/fmetrics"
+FMETRICS_PREDICT="${FSUITE_DIR}/fmetrics-predict.py"
 
 TEST_DIR=""
 BACKUP_TELEMETRY=""
+ORIGINAL_HOME="${HOME:-}"
+SANDBOX_HOME=""
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -23,17 +26,15 @@ GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
 setup() {
+  SANDBOX_HOME="$(mktemp -d)"
+  export HOME="$SANDBOX_HOME"
+  mkdir -p "$HOME/.fsuite"
+
   TEST_DIR="$(mktemp -d)"
   mkdir -p "${TEST_DIR}/src"
   echo "hello world" > "${TEST_DIR}/src/test.txt"
   echo "function foo() { return 1; }" > "${TEST_DIR}/src/code.js"
   dd if=/dev/zero of="${TEST_DIR}/large_file.bin" bs=1024 count=50 2>/dev/null
-
-  # Backup existing telemetry
-  if [[ -f "$HOME/.fsuite/telemetry.jsonl" ]]; then
-    BACKUP_TELEMETRY="$(mktemp)"
-    cp "$HOME/.fsuite/telemetry.jsonl" "$BACKUP_TELEMETRY"
-  fi
 
   # Clear telemetry for clean tests
   rm -f "$HOME/.fsuite/telemetry.jsonl"
@@ -46,10 +47,10 @@ teardown() {
     rm -rf "${TEST_DIR}"
   fi
 
-  # Restore telemetry backup
-  mkdir -p "$HOME/.fsuite" 2>/dev/null || true
-  if [[ -n "$BACKUP_TELEMETRY" && -f "$BACKUP_TELEMETRY" ]]; then
-    mv "$BACKUP_TELEMETRY" "$HOME/.fsuite/telemetry.jsonl"
+  export HOME="$ORIGINAL_HOME"
+
+  if [[ -n "${SANDBOX_HOME}" && -d "${SANDBOX_HOME}" ]]; then
+    rm -rf "${SANDBOX_HOME}"
   fi
 }
 
@@ -74,6 +75,33 @@ run_test() {
 
 run_fmetrics() {
   FSUITE_TELEMETRY=0 "${FMETRICS}" "$@"
+}
+
+seed_ftree_predict_fixture_db() {
+  mkdir -p "$HOME/.fsuite"
+  rm -f "$HOME/.fsuite/telemetry.jsonl" "$HOME/.fsuite/telemetry.db"
+  : > "$HOME/.fsuite/telemetry.jsonl"
+  run_fmetrics import >/dev/null 2>&1 || true
+
+  sqlite3 "$HOME/.fsuite/telemetry.db" <<'SQL'
+DELETE FROM telemetry;
+INSERT INTO telemetry (timestamp,tool,version,mode,path_hash,project_name,duration_ms,exit_code,depth,items_scanned,bytes_scanned,flags,backend,run_id) VALUES
+  ('2026-03-10T00:00:00Z','ftree','2.1.0','tree','tree01','predict-fixture',9,0,3,42,4200,'-o json','tree','tree01'),
+  ('2026-03-10T00:00:01Z','ftree','2.1.0','tree','tree02','predict-fixture',11,0,3,42,4200,'-o json','tree','tree02'),
+  ('2026-03-10T00:00:02Z','ftree','2.1.0','tree','tree03','predict-fixture',10,0,3,42,4200,'-o json','tree','tree03'),
+  ('2026-03-10T00:00:03Z','ftree','2.1.0','tree','tree04','predict-fixture',12,0,3,42,4200,'-o json','tree','tree04'),
+  ('2026-03-10T00:00:04Z','ftree','2.1.0','tree','tree05','predict-fixture',8,0,3,42,4200,'-o json','tree','tree05'),
+  ('2026-03-10T00:00:05Z','ftree','2.1.0','recon','recon01','predict-fixture',180,0,3,42,4200,'-o json --recon','tree','recon01'),
+  ('2026-03-10T00:00:06Z','ftree','2.1.0','recon','recon02','predict-fixture',190,0,3,42,4200,'-o json --recon','tree','recon02'),
+  ('2026-03-10T00:00:07Z','ftree','2.1.0','recon','recon03','predict-fixture',210,0,3,42,4200,'-o json --recon','tree','recon03'),
+  ('2026-03-10T00:00:08Z','ftree','2.1.0','recon','recon04','predict-fixture',220,0,3,42,4200,'-o json --recon','tree','recon04'),
+  ('2026-03-10T00:00:09Z','ftree','2.1.0','recon','recon05','predict-fixture',205,0,3,42,4200,'-o json --recon','tree','recon05'),
+  ('2026-03-10T00:00:10Z','ftree','2.1.0','snapshot','snap01','predict-fixture',5000,0,3,42,4200,'-o json --snapshot','tree','snap01'),
+  ('2026-03-10T00:00:11Z','ftree','2.1.0','snapshot','snap02','predict-fixture',5200,0,3,42,4200,'-o json --snapshot','tree','snap02'),
+  ('2026-03-10T00:00:12Z','ftree','2.1.0','snapshot','snap03','predict-fixture',5100,0,3,42,4200,'-o json --snapshot','tree','snap03'),
+  ('2026-03-10T00:00:13Z','ftree','2.1.0','snapshot','snap04','predict-fixture',5300,0,3,42,4200,'-o json --snapshot','tree','snap04'),
+  ('2026-03-10T00:00:14Z','ftree','2.1.0','snapshot','snap05','predict-fixture',4900,0,3,42,4200,'-o json --snapshot','tree','snap05');
+SQL
 }
 
 # ============================================================================
@@ -635,6 +663,213 @@ test_v15_predict_tool_filter() {
   fi
 }
 
+test_v15_history_multi_filter() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "fmetrics history multi-filter test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  rm -f "$HOME/.fsuite/telemetry.jsonl"
+  rm -f "$HOME/.fsuite/telemetry.db"
+
+  local history_proj="${TEST_DIR}/history_proj"
+  local other_proj="${TEST_DIR}/other_proj"
+  mkdir -p "${history_proj}/src" "${other_proj}/src"
+  echo "alpha" > "${history_proj}/src/file.txt"
+  echo "beta" > "${other_proj}/src/file.txt"
+
+  FSUITE_TELEMETRY=1 "${FTREE}" --project-name "HistoryProj" "${history_proj}" >/dev/null 2>&1 || true
+  FSUITE_TELEMETRY=1 "${FTREE}" --project-name "OtherProj" "${other_proj}" >/dev/null 2>&1 || true
+  FSUITE_TELEMETRY=1 "${FSEARCH}" --project-name "HistoryProj" "*.txt" "${history_proj}" >/dev/null 2>&1 || true
+
+  run_fmetrics import >/dev/null 2>&1 || true
+
+  local output run_count matched_project
+  output=$(run_fmetrics history --tool ftree --project HistoryProj -o json 2>&1) || true
+
+  run_count=$(python3 -c 'import json,sys; print(len(json.loads(sys.stdin.read())["runs"]))' <<< "$output" 2>/dev/null || echo "-1")
+  matched_project=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(data["runs"][0]["project"] if data["runs"] else "")' <<< "$output" 2>/dev/null || echo "")
+
+  if [[ "$run_count" == "1" ]] && [[ "$matched_project" == "HistoryProj" ]]; then
+    pass "fmetrics history combines --tool and --project filters correctly"
+  else
+    fail "history should return the ftree row for the requested project" "Got: $output"
+  fi
+}
+
+test_v16_predict_ftree_preserves_default_contract_with_by_mode() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "ftree default predict contract test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  local target_dir="${TEST_DIR}/predict_target"
+  mkdir -p "${target_dir}/src"
+  echo "one" > "${target_dir}/src/a.txt"
+  echo "two" > "${target_dir}/src/b.txt"
+
+  seed_ftree_predict_fixture_db
+
+  local output top_level_ftree mode_count mixed_mode by_mode_snapshot
+  output=$(run_fmetrics predict --tool ftree -o json "${target_dir}" 2>&1) || true
+  top_level_ftree=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(sum(1 for p in data.get("predictions", []) if p.get("tool") == "ftree"))' <<< "$output" 2>/dev/null || echo "0")
+  mixed_mode=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); print(preds[0].get("mode", "") if preds else "")' <<< "$output" 2>/dev/null || echo "")
+  by_mode_snapshot=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); by_mode=(preds[0].get("by_mode", {}) if preds else {}); print("snapshot" if "snapshot" in by_mode else "")' <<< "$output" 2>/dev/null || echo "")
+  mode_count=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(sum(1 for p in data.get("predictions", []) if p.get("tool") == "ftree" and p.get("mode") in {"tree","recon","snapshot"}))' <<< "$output" 2>/dev/null || echo "0")
+
+  if [[ "$top_level_ftree" == "1" ]] && [[ "$mixed_mode" == "mixed" ]] && [[ "$mode_count" == "0" ]] && [[ "$by_mode_snapshot" == "snapshot" ]]; then
+    pass "fmetrics predict --tool ftree preserves one-row contract with by_mode detail"
+  else
+    fail "predict should preserve one top-level ftree row with by_mode detail" "Got: $output"
+  fi
+}
+
+test_v16_predict_ftree_pretty_renders_mode_breakdown() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "ftree pretty predict test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  local target_dir="${TEST_DIR}/predict_target_pretty"
+  mkdir -p "${target_dir}/src"
+  echo "one" > "${target_dir}/src/a.txt"
+  echo "two" > "${target_dir}/src/b.txt"
+
+  seed_ftree_predict_fixture_db
+
+  local output
+  output=$(run_fmetrics predict --tool ftree "${target_dir}" 2>&1) || true
+
+  if [[ "$output" == *"ftree:mixed"* ]] && [[ "$output" == *"ftree:tree"* ]] && [[ "$output" == *"ftree:recon"* ]] && [[ "$output" == *"ftree:snapshot"* ]]; then
+    pass "fmetrics pretty predict renders ftree mode breakdown"
+  else
+    fail "pretty predict should render ftree mixed summary plus per-mode rows" "Got: $output"
+  fi
+}
+
+test_v16_predict_ftree_mode_snapshot_stays_in_cluster() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "ftree mode-specific predict test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  local target_dir="${TEST_DIR}/predict_target_snapshot"
+  mkdir -p "${target_dir}/src"
+  echo "one" > "${target_dir}/src/a.txt"
+  echo "two" > "${target_dir}/src/b.txt"
+
+  seed_ftree_predict_fixture_db
+
+  local output predicted mode
+  output=$(run_fmetrics predict --tool ftree --mode snapshot -o json "${target_dir}" 2>&1) || true
+  predicted=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); print(preds[0].get("predicted_ms", -1) if preds else -1)' <<< "$output" 2>/dev/null || echo "-1")
+  mode=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); print(preds[0].get("mode", "") if preds else "")' <<< "$output" 2>/dev/null || echo "")
+
+  if [[ "$mode" == "snapshot" ]] && [[ "$predicted" =~ ^[0-9]+$ ]] && (( predicted >= 4500 )); then
+    pass "fmetrics predict --mode snapshot stays in the snapshot cluster"
+  else
+    fail "snapshot prediction should stay near snapshot runtimes" "Got: $output"
+  fi
+}
+
+test_v16_predict_helper_degrades_confidence_on_zero_spread() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "predict helper confidence test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  seed_ftree_predict_fixture_db
+
+  local output confidence
+  output=$(python3 "${FMETRICS_PREDICT}" --db "$HOME/.fsuite/telemetry.db" --items 99999 --bytes 99999999 --depth 30 --tool ftree --mode snapshot --output json 2>&1) || true
+  confidence=$(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); preds=data.get("predictions", []); print(preds[0].get("confidence", "") if preds else "")' <<< "$output" 2>/dev/null || echo "")
+
+  if [[ "$confidence" == "low" ]]; then
+    pass "predict helper degrades confidence when feature spread is zero"
+  else
+    fail "far targets should not get high confidence when feature spread collapses" "Got: $output"
+  fi
+}
+
+test_v16_predict_helper_pretty_preserves_ftree_mixed_contract() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    pass "predict helper pretty contract test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  seed_ftree_predict_fixture_db
+
+  local output mixed_count tree_row recon_row snapshot_row
+  output=$(python3 "${FMETRICS_PREDICT}" --db "$HOME/.fsuite/telemetry.db" --items 42 --bytes 4200 --depth 3 --tool ftree --output pretty 2>&1) || true
+  mixed_count=$(grep -c "ftree:mixed" <<< "$output" || true)
+  tree_row=$(grep -c "ftree:tree" <<< "$output" || true)
+  recon_row=$(grep -c "ftree:recon" <<< "$output" || true)
+  snapshot_row=$(grep -c "ftree:snapshot" <<< "$output" || true)
+
+  if [[ "$mixed_count" == "1" ]] && [[ "$tree_row" == "0" ]] && [[ "$recon_row" == "0" ]] && [[ "$snapshot_row" == "0" ]]; then
+    pass "fmetrics-predict pretty output preserves collapsed ftree contract"
+  else
+    fail "predict helper pretty output should collapse default ftree rows" "Got: $output"
+  fi
+}
+
+test_v16_predict_json_fallback_survives_broken_python3() {
+  local sqlite3_bin
+  sqlite3_bin="$(command -v sqlite3 2>/dev/null || true)"
+  if [[ -z "$sqlite3_bin" ]]; then
+    pass "predict fallback test skipped (sqlite3 not available)"
+    return 0
+  fi
+
+  seed_ftree_predict_fixture_db
+
+  local shim_dir="${TEST_DIR}/shim-bin"
+  mkdir -p "${shim_dir}"
+  printf '%s\n' '#!/bin/sh' 'exit 127' > "${shim_dir}/python3"
+  printf '%s\n' '#!/bin/sh' "PATH=/usr/bin:/bin exec \"${sqlite3_bin}\" \"\$@\"" > "${shim_dir}/sqlite3"
+  chmod +x "${shim_dir}/python3" "${shim_dir}/sqlite3"
+
+  local target_dir="${TEST_DIR}/predict_target_broken_python"
+  mkdir -p "${target_dir}"
+
+  local output rc=0
+  output=$(PATH="${shim_dir}:/bin:/usr/bin" FSUITE_TELEMETRY=0 "${FMETRICS}" predict -o json "${target_dir}" 2>&1) || rc=$?
+
+  if [[ $rc -eq 0 ]] && python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert data["method"] == "average_fallback"; assert data["predictions"][0]["tool"] == "ftree"' <<< "$output" 2>/dev/null; then
+    pass "fmetrics JSON fallback survives missing or broken python3"
+  else
+    fail "predict -o json should fall back without a working python3 helper" "rc=$rc output=$output"
+  fi
+}
+
+test_v16_predict_rejects_mode_without_ftree_tool() {
+  local output
+  output=$(run_fmetrics predict --mode snapshot -o json "${TEST_DIR}" 2>&1) && {
+    fail "--mode without --tool ftree should fail" "Got success: $output"
+    return
+  }
+
+  if [[ "$output" == *"--mode requires --tool ftree"* ]]; then
+    pass "fmetrics predict rejects --mode without --tool ftree"
+  else
+    fail "predict should reject --mode without --tool ftree" "Got: $output"
+  fi
+}
+
+test_v16_predict_rejects_mode_with_non_ftree_tool() {
+  local output
+  output=$(run_fmetrics predict --tool fsearch --mode snapshot -o json "${TEST_DIR}" 2>&1) && {
+    fail "--mode with non-ftree tool should fail" "Got success: $output"
+    return
+  }
+
+  if [[ "$output" == *"--mode requires --tool ftree"* ]]; then
+    pass "fmetrics predict rejects --mode with non-ftree tool"
+  else
+    fail "predict should reject --mode with non-ftree tool" "Got: $output"
+  fi
+}
+
 # ============================================================================
 # v1.5.0+ — Project Name Inference (walk-up heuristic)
 # ============================================================================
@@ -694,6 +929,14 @@ test_v15_project_name_fallback() {
   fi
 }
 
+test_harness_uses_sandbox_home() {
+  if [[ -n "${ORIGINAL_HOME}" ]] && [[ "$HOME" != "$ORIGINAL_HOME" ]] && [[ -d "$HOME/.fsuite" ]]; then
+    pass "Telemetry tests run inside a sandboxed HOME"
+  else
+    fail "Telemetry tests should sandbox HOME instead of mutating the caller environment" "ORIGINAL_HOME=${ORIGINAL_HOME} HOME=${HOME}"
+  fi
+}
+
 # ============================================================================
 # Main Test Runner
 # ============================================================================
@@ -716,6 +959,10 @@ main() {
   echo "Running tests..."
   echo ""
 
+  echo "== Harness Isolation =="
+  run_test "Telemetry harness uses sandboxed HOME" test_harness_uses_sandbox_home
+
+  echo ""
   # bytes_scanned tests
   echo "== Phase 1: bytes_scanned =="
   run_test "fcontent bytes_scanned > 0" test_fcontent_bytes_scanned
@@ -777,6 +1024,15 @@ main() {
   run_test "fmetrics --self-check shows python3 status" test_v15_selfcheck_python3
   run_test "fmetrics --self-check shows predict script" test_v15_selfcheck_predict
   run_test "fmetrics predict --tool filter" test_v15_predict_tool_filter
+  run_test "fmetrics history combines tool+project filters" test_v15_history_multi_filter
+  run_test "fmetrics predict preserves ftree default contract with by_mode detail" test_v16_predict_ftree_preserves_default_contract_with_by_mode
+  run_test "fmetrics pretty predict renders ftree mode breakdown" test_v16_predict_ftree_pretty_renders_mode_breakdown
+  run_test "fmetrics predict --mode snapshot stays in snapshot cluster" test_v16_predict_ftree_mode_snapshot_stays_in_cluster
+  run_test "predict helper lowers confidence on zero-spread features" test_v16_predict_helper_degrades_confidence_on_zero_spread
+  run_test "fmetrics-predict pretty output preserves collapsed ftree contract" test_v16_predict_helper_pretty_preserves_ftree_mixed_contract
+  run_test "fmetrics JSON fallback survives broken python3" test_v16_predict_json_fallback_survives_broken_python3
+  run_test "fmetrics predict rejects --mode without --tool ftree" test_v16_predict_rejects_mode_without_ftree_tool
+  run_test "fmetrics predict rejects --mode with non-ftree tool" test_v16_predict_rejects_mode_with_non_ftree_tool
 
   echo ""
   echo "== v1.5.0+: Project Name Inference =="

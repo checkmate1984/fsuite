@@ -16,9 +16,9 @@
 
 ---
 
-**A suite-level guide plus seven operational tools for filesystem reconnaissance, patching, and analytics.**
+**A suite-level guide plus eight operational tools for filesystem reconnaissance, continuity, patching, and analytics.**
 
-`fsuite` provides one suite-level guide command plus seven operational tools that turn filesystem exploration into a clean, scriptable, agent-friendly pipeline:
+`fsuite` provides one suite-level guide command plus eight operational tools that turn filesystem exploration into a clean, scriptable, agent-friendly investigation workflow:
 
 | Tool | Purpose |
 |------|---------|
@@ -28,10 +28,11 @@
 | **`ftree`** | Visualize directory structure with smart defaults and recon mode |
 | **`fmap`** | Extract structural skeleton from code (code cartography) |
 | **`fread`** | Read files with budgets, ranges, context windows, and diff-aware input |
+| **`fcase`** | Preserve investigation state, evidence, and handoffs once the seam is known |
 | **`fedit`** | Apply surgical text patches with dry-run diffs, preconditions, and symbol scoping |
 | **`fmetrics`** | Analyze telemetry, history, and predicted runtime |
 
-The first five operational tools are reconnaissance drones. `fedit` is the surgical patch arm. `fmetrics` is the flight recorder and analyst. Together they cover **scout -> find/search -> map -> read -> edit -> measure**. The `fsuite` command is the suite-level explainer that teaches that flow to humans and agents on first contact.
+The first five operational tools are reconnaissance drones. `fcase` is the continuity ledger. `fedit` is the surgical patch arm. `fmetrics` is the flight recorder and analyst. Together they cover **scout -> find/search -> map -> read -> preserve -> edit -> measure**. The `fsuite` command is the suite-level explainer that teaches that flow to humans and agents on first contact.
 
 Works with **Claude Code**, **Codex**, **OpenCode**, and any shell-capable agent harness that can call local binaries.
 
@@ -47,6 +48,7 @@ Works with **Claude Code**, **Codex**, **OpenCode**, and any shell-capable agent
 
 - [Why This Exists](#why-this-exists-the-lightbulb-moment)
 - [Quick Start](#quick-start)
+- [First-Contact Mindset](#first-contact-mindset)
 - [fsuite Help](#fsuite-help)
 - [Fast Paths](#fast-paths-copypaste)
 - [Tools](#tools)
@@ -55,6 +57,7 @@ Works with **Claude Code**, **Codex**, **OpenCode**, and any shell-capable agent
   - [ftree](#ftree--directory-structure-visualization)
   - [fmap](#fmap--code-cartography)
   - [fread](#fread--budgeted-file-reading)
+  - [fcase](#fcase--continuity--handoff-ledger)
   - [fedit](#fedit--surgical-patching)
   - [fmetrics](#fmetrics--telemetry-analytics)
 - [Output Formats](#output-formats)
@@ -91,7 +94,7 @@ It didn't just say "nice tools." It wrote a full self-assessment. Unprompted con
 | **fsearch** | *"Augment. Use alongside Glob for discovery and pipeline scenarios."* — Pattern normalization + pipeline composability. |
 | **fcontent** | *"Augment. Use for pipeline searches and scoped discovery."* — Piped mode + match caps designed for LLM context windows. |
 
-That first round exposed the real missing step: after recon and search, the agent still had to spend extra calls just to read the right slice of a file. `fmap` and `fread` close that gap. `fedit` turns that bounded context into a safe patch surface. `fmetrics` closes the final loop by turning live usage into operational feedback instead of guesswork.
+That first round exposed the real missing step: after recon and search, the agent still had to spend extra calls just to read the right slice of a file. `fmap` and `fread` close that gap. `fcase` preserves the investigation once the seam is known. `fedit` turns that bounded context into a safe patch surface. `fmetrics` closes the final loop by turning live usage into operational feedback instead of guesswork.
 
 **The workflow shift — before and after:**
 
@@ -100,17 +103,19 @@ BEFORE fsuite:
   Spawn Explore agent -> 10-15 internal tool calls -> still blind on structure
 
 AFTER fsuite:
-  ftree --snapshot -o json  ->  fsearch -o paths  ->  fmap -o json  ->  fread -o json  ->  fedit -o json
-  5-6 calls. Structural context, bounded file reads, and previewable edits. Still dramatically fewer tool invocations.
+  ftree --snapshot -o json  ->  fsearch -o paths  ->  fmap -o json  ->  fread -o json  ->  fcase init auth-seam --goal "Trace authenticate flow"  ->  fedit -o json
+  6-7 calls. Structural context, bounded reads, durable continuity, and previewable edits. Still dramatically fewer tool invocations.
 ```
 
 And once those reads are happening in the real world:
 
 ```text
 AFTER execution:
-  ... -> fcontent -o json (only if exact text confirmation is needed) -> fedit -o json -> fmetrics import -> fmetrics stats / predict
-  Search inside the narrowed set, patch surgically, then measure what actually happened and plan the next pass.
+  ... -> fcontent -o json (only if exact text confirmation is needed) -> fcase handoff auth-seam -o json -> fedit -o json -> fmetrics import -> fmetrics stats / predict
+  Search inside the narrowed set, preserve what matters, patch surgically, then measure what actually happened and plan the next pass.
 ```
+
+> **Proof callout — Nightfox investigation:** In a live Nightfox runtime incident, the breakthrough came when the operator coached the agent to stop overcompensating and trust fsuite's direct contracts. The useful path was not a sacred sequence. It was a clean combination of `fsearch`, `fmap`, `fread`, and targeted `fcontent` that surfaced a real subprocess-lifecycle bug. The milestone was not just that the tools worked. It was that the agent stopped fighting them.
 
 The full unedited analysis is in **[AGENT-ANALYSIS.md](AGENT-ANALYSIS.md)** — the raw self-assessment, exactly as Claude Code wrote it after studying and testing every tool in this repo.
 
@@ -149,11 +154,50 @@ cd fsuite
 # Read targeted context around a function or match
 ./fread /project/src/auth.py --around "def authenticate" -A 20
 
+# Preserve the live investigation once the seam is known
+./fcase init auth-seam --goal "Trace authenticate flow"
+
 # Combine: find logs, then grep inside them
 ./fsearch --output paths '*.log' /var/log | ./fcontent "ERROR"
 
 # Import telemetry and inspect runtime history
 ./fmetrics import && ./fmetrics stats
+```
+
+---
+
+## First-Contact Mindset
+
+fsuite works best when the agent stops compensating for weak default tooling and starts reasoning natively with the contracts in front of it. This is a composable sensor suite, not a single sacred sequence. Some combinations are stronger than others, but the right move is to choose the smallest chain that increases certainty without flooding context.
+
+- Use `-o json` and `-o paths` aggressively. They are the default agent surfaces.
+- `ftree` is powerful, but use it intentionally and sparingly on large repos.
+- `fsearch -> fmap` is a strong default when you know the area but not the seam.
+- `fcontent -o paths -> fmap` is strong when literal evidence is the cleanest narrowing signal.
+- `fsearch -> fcontent -o paths -> fmap` is a real narrowing pattern, not an anti-pattern.
+- `fmap` is not just a producer before `fread`; it is the bridge in the middle of the pipeline.
+- `fmap + fread` is the power pair for understanding code.
+- `fcase` begins once the seam is known and continuity becomes the bottleneck.
+- `fedit` comes after inspected context, not before.
+- `fmetrics` is for observability and next-pass planning, not a reason to spam `ftree`.
+
+### Tool-Native Reasoning
+
+The mindset shift is simple: literal search is a strength here, not a fallback. If the exact token, phrase, or signature in front of you is the best narrowing handle, use it directly. The goal is not to imitate the habits agents learned from weaker default tools. The goal is to use the strongest local contract available.
+
+### Operating Doctrine
+
+```text
+1. Run `fsuite` once per session to load the suite-level mental model.
+2. Run `ftree` once to establish territory before narrowing.
+3. Start with `fsearch` to narrow candidate files by path or filename.
+4. Prefer `fmap + fread` before broad `fcontent`.
+5. Use `fcontent` only for exact-text confirmation after narrowing.
+6. Prefer `-o paths` for piping, `-o json` for programmatic decisions, and `pretty` only for human terminal output.
+7. Use `-q` for silent control flow and existence checks.
+8. Use `fcase` once the seam is known and continuity becomes the bottleneck.
+9. Use `fmetrics` to measure what happened and estimate the next pass.
+10. Do not overcompensate for weak default tools. Literal search is a strength here, not a fallback.
 ```
 
 ---
@@ -167,8 +211,8 @@ If your harness reads repo instructions automatically, use the bundled [AGENTS.m
 If an agent only remembers one thing, it should remember this:
 
 ```text
-fsuite -> ftree -> fsearch | fcontent -> fmap -> fread -> fedit -> fmetrics
-Guide     Scout    Narrowing             Bridge   Read     Edit      Measure
+fsuite -> ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> fmetrics
+Guide     Scout    Narrowing             Bridge   Read     Preserve  Edit      Measure
 ```
 
 The CLI equivalent is:
@@ -176,6 +220,17 @@ The CLI equivalent is:
 ```bash
 fsuite
 ```
+
+### First-Contact Guidance
+
+- Composable sensor suite, not a single sacred path
+- Stronger and weaker combinations exist, but not one true sequence
+- Use `-o json` and `-o paths` aggressively
+- Treat `fmap` as the bridge in the middle of the pipeline
+- Treat literal search as a first-class narrowing move
+- Use `fcase` to preserve state once the seam is known
+- Use `fedit` only after inspected context
+- Use `fmetrics` for observability, not as a reason to repeat recon
 
 ### What Each Tool Is For
 
@@ -186,6 +241,7 @@ fsuite
 | `fmap` | "What symbols exist in these source files?" | `-o json` |
 | `fcontent` | "Which narrowed files contain this exact text?" | `-o json` or `-o paths` |
 | `fread` | "Show me the exact lines around this function, match, or diff hunk." | `-o json` |
+| `fcase` | "What matters now, what have we ruled out, and what should the next agent do?" | `-o json` |
 | `fedit` | "Preview and apply a surgical patch against the exact symbol or anchor I just inspected." | `-o json` |
 | `fmetrics` | "What did these runs cost, and what will the next one cost?" | `stats -o json`, `predict` |
 
@@ -198,7 +254,7 @@ fsuite
 - `-q` is for existence checks and silent control flow.
 - Use `fsuite` for the suite-level mental model and each tool's `--help` for the full flag breakdown.
 
-### Default Agent Workflow
+### Strong Default Flow
 
 ```bash
 # 0) Load the suite-level guide once
@@ -216,24 +272,54 @@ fsearch -o paths '*.py' /project/src | fmap -o json
 # 4) Read the exact code neighborhood you care about
 fread -o json /project/src/auth.py --around "def authenticate" -B 5 -A 20
 
-# 5) Only if you still need exact text confirmation, search inside the narrowed set
+# 5) Preserve the current case once the seam is known
+fcase init auth-seam --goal "Trace authenticate flow"
+fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 --summary "Authenticate branch" --body "..."
+fcase next auth-seam --body "Patch denial branch after reviewing symbol map"
+
+# 6) Only if you still need exact text confirmation, search inside the narrowed set
 fsearch -o paths '*.py' /project/src | fcontent -o json "authenticate"
 
-# 6) Preview and then apply the patch
+# 7) Preview and then apply the patch
 fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()"
 fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()" --apply
 
-# 7) Import telemetry and inspect the cost of what just happened
+# 8) Import telemetry and inspect the cost of what just happened
 fmetrics import
 fmetrics stats -o json
 fmetrics predict /project
 ```
 
+This is a strong default, not a sacred sequence. When exact text is the cleanest narrowing signal, use `fcontent` directly. When you already have a narrowed path set, prefer `-o paths` and keep the next step cheap.
+
+### Strong Combination Patterns
+
+```bash
+# Path narrowing to structure
+fsearch -o paths '*.py' /project/src | fmap -o json
+
+# Literal narrowing to structure
+fcontent -o paths "authenticate" /project/src | fmap -o json
+
+# Path narrowing, then literal confirmation, then structure
+fsearch -o paths '*.py' /project/src | fcontent -o paths "authenticate" | fmap -o json
+
+# Structure + bounded reading
+fsearch -o paths '*.py' /project/src | fmap -o json
+fread -o json /project/src/auth.py --around "def authenticate" -B 5 -A 20
+
+# Preserve the seam for a reset or handoff
+fcase init auth-seam --goal "Trace authenticate flow"
+fcase next auth-seam --body "Review denial branch after map/read pass"
+```
+
 ### Decision Rule for Agents
 
 - Run `ftree` once to establish territory.
-- Run one narrowing pass with `fsearch`.
+- Start with `fsearch` to narrow candidate files.
+- Add `fcontent` only if exact-text confirmation is needed.
 - Prefer `fmap` + `fread` before broad `fcontent`.
+- Use `fcase` when continuity, evidence tracking, or handoff becomes the bottleneck.
 - Use `fcontent` as exact-text confirmation after narrowing, not as the first conceptual repo search.
 - Do not rediscover the repo twice unless the target changes or a contradiction appears.
 
@@ -244,6 +330,7 @@ fmetrics predict /project
 | structural skeleton without reading full files | `fmap` |
 | content matches across files | `fcontent` |
 | bounded context from a known file | `fread` |
+| durable case state, evidence, or a handoff | `fcase` |
 | safe patch application against inspected context | `fedit` |
 | runtime history or a preflight estimate | `fmetrics` |
 
@@ -415,7 +502,7 @@ fcontent [OPTIONS] <query> [path]
 - Quiet mode (`-q`) for existence checks — exit 0 if found, 1 if not
 - Pass-through for extra `rg` flags via `--rg-args`
 
-**Operational note:** use `fcontent` after narrowing with `fsearch`/`fmap`/`fread`. It is an exact-text confirmation tool, not the best first-pass repo exploration step.
+**Operational note:** use `fcontent` after narrowing with `fsearch`/`fmap`/`fread`, but do not treat literal search as a fallback. Within a narrowed scope, exact text is often the cleanest and fastest route to the next structural step. `fcontent -o paths` is especially useful when the next move is `fmap`.
 
 **Examples:**
 
@@ -425,6 +512,9 @@ fcontent "database" /home/user/project
 
 # Pipe from fsearch
 fsearch --output paths '*.log' /var/log | fcontent "CRITICAL"
+
+# Narrow by exact text, then bridge into structure
+fsearch --output paths '*.py' /project/src | fcontent --output paths "authenticate" | fmap -o json
 
 # JSON output for agent consumption
 fcontent --output json "api_key" /home/user/project
@@ -528,6 +618,9 @@ fmap /project/src/auth.py
 # JSON output for agents
 fmap -o json /project
 
+# Rank exact then substring symbol-name hits
+fmap --name authenticate -o json /project/src
+
 # Pipeline: find Python files, extract structure
 fsearch -o paths '*.py' /project | fmap -o json
 
@@ -547,6 +640,7 @@ Reads **just enough file content** for the next step in an investigation. It fil
 
 ```bash
 fread [OPTIONS] <file>
+fread [OPTIONS] <dir> --symbol <name>
 ```
 
 **Key features:**
@@ -572,11 +666,115 @@ fread /project/src/auth.py -r 120:220
 # Read around a literal pattern
 fread /project/src/auth.py --around "def authenticate" -B 5 -A 20
 
+# Read one exact symbol block from a known file or directory scope
+fread /project/src/auth.py --symbol authenticate -o json
+fread /project/src --symbol authenticate -o json
+
 # Read around a changed hunk from git diff
 git diff | fread --from-stdin --stdin-format=unified-diff -B 3 -A 10
 
 # Pipe file paths from fsearch and cap how many get read
 fsearch -o paths '*.py' /project | fread --from-stdin --stdin-format=paths --max-files 5 -o json
+```
+
+### `fcase` &mdash; continuity / handoff ledger
+
+Preserves the live shape of an investigation once the seam is known. `fcase` tracks what the case is trying to solve, which targets matter, what evidence has been captured, which hypotheses are open or rejected, and what the next best move is for a reset or handoff.
+
+```bash
+fcase <subcommand> [options]
+```
+
+**Key features:**
+
+- Separate SQLite ledger at `~/.fsuite/fcase.db`
+- Fast current-state reads for `status` and `handoff`
+- Typed targets, evidence, and hypotheses instead of ad hoc notes
+- Append-only events for history without making handoff reconstruct the world
+- Explicit imports from `fmap` and `fread` JSON when continuity should start from existing proof
+- Pretty or JSON output for human and agent use
+
+**Examples:**
+
+```bash
+# Start a case once the seam is known
+fcase init auth-seam --goal "Trace authenticate flow"
+
+# Track the file and symbol that matter
+fcase target add auth-seam --path /project/src/auth.py --symbol authenticate --symbol-type function --state active --reason "Primary decision point"
+
+# Preserve proof from a targeted read
+fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 \
+  --summary "Authenticate branch" --body "return deny() is bypassed in the false branch"
+
+# Import structured targets straight from fmap
+fmap -o json /project/src/auth.py | fcase target import auth-seam
+
+# Import structured evidence straight from fread
+fread -o json /project/src/auth.py --around "def authenticate" -B 5 -A 20 | fcase evidence import auth-seam
+
+# Keep the next best move current
+fcase next auth-seam --body "Patch denial branch after reviewing symbol map"
+
+# Hand off cleanly
+fcase handoff auth-seam -o json
+```
+
+#### Investigation Loop
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant fsuite
+    participant ftree
+    participant fsearch
+    participant fcontent
+    participant fmap
+    participant fread
+    participant fcase
+    participant SQLite as SQLite (fcase.db)
+
+    User->>fsuite: first contact
+    fsuite-->>User: suite-level workflow guidance
+
+    User->>ftree: scout once
+    ftree-->>User: territory, project shape, hotspots
+
+    User->>fsearch: -o paths <pattern>
+    fsearch-->>User: candidate paths
+
+    opt exact-text confirmation only if needed
+        User->>fcontent: -o paths <literal-or-regex>
+        fcontent-->>User: narrowed paths
+    end
+
+    User->>fmap: -o json [paths] [--name <symbol>]
+    fmap-->>User: ranked symbols and structure
+
+    User->>fcase: init <slug>
+    fcase->>SQLite: CREATE case, session, event
+    fcase-->>User: case envelope
+
+    User->>fcase: target import <slug> (fmap JSON)
+    fcase->>SQLite: INSERT targets, event
+    fcase-->>User: ack
+
+    User->>fread: --symbol <name> [--symbol-type <type>] <path>
+    fread->>fmap: resolve symbol
+    fmap-->>fread: symbol metadata
+    fread-->>User: bounded context + lines
+
+    User->>fcase: evidence import <slug> (fread JSON)
+    fcase->>SQLite: INSERT evidence, event
+    fcase-->>User: ack
+
+    User->>fcase: next <slug>
+    fcase->>SQLite: UPDATE next_move, event
+    fcase-->>User: ack
+
+    User->>fcase: handoff <slug>
+    fcase->>SQLite: SELECT case, targets, evidence, hypotheses, events
+    fcase-->>User: handoff JSON envelope
 ```
 
 ### `fedit` &mdash; surgical patching
@@ -642,17 +840,67 @@ fmetrics history --tool ftree --limit 10
 fmetrics predict /project
 ```
 
+#### Prediction Contract
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant fmetrics
+    participant predict as fmetrics-predict.py
+    participant DB as History DB
+
+    alt explicit ftree mode
+        User->>fmetrics: predict --tool ftree --mode tree
+        fmetrics->>predict: requested_tool=ftree, requested_mode=tree
+        predict->>DB: fetch ftree history for mode=tree
+        DB-->>predict: historical ftree:tree records
+        predict->>predict: per-feature delta, distance, confidence
+        predict-->>fmetrics: actionable tree-scoped prediction
+        fmetrics-->>User: pretty / JSON output for ftree:tree
+    else default ftree prediction
+        User->>fmetrics: predict --tool ftree
+        fmetrics->>predict: requested_tool=ftree, requested_mode=null
+        predict->>DB: fetch ftree history for tree/recon/snapshot
+        DB-->>predict: per-mode historical records
+        predict->>predict: compute per-mode predictions
+        predict->>predict: collapse to one advisory mixed row with by_mode
+        predict-->>fmetrics: mixed advisory prediction + by_mode detail
+        fmetrics-->>User: one top-level ftree row with by_mode
+    end
+
+    Note over predict: If zero_spread_mismatch, confidence = low
+    Note over fmetrics,predict: If model path is unavailable, average fallback keeps the same contract
+```
+
 ---
 
 ## Output Formats
 
-The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fedit`) support three output modes via `--output` / `-o`:
+The filesystem tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fedit`) support three output modes via `--output` / `-o`. `fcase` supports `pretty` and `json`, which is enough for current-state reads and handoff packets.
 
 | Mode | Description | Best for |
 |------|-------------|----------|
 | `pretty` | Human-readable header + formatted list | Terminal use, debugging |
 | `paths` | One file path per line, no decoration | Piping, shell scripts |
 | `json` | Compact JSON object with metadata | AI agents, tool integrations |
+
+### JSON schema (`fcase` — status)
+
+```json
+{
+  "tool": "fcase",
+  "version": "0.1.0",
+  "case": {
+    "slug": "auth-seam",
+    "goal": "Trace authenticate flow",
+    "next_move": "Patch denial branch after reviewing symbol map"
+  },
+  "targets": [],
+  "evidence": [],
+  "hypotheses": [],
+  "recent_events": []
+}
+```
 
 ### JSON schema (`fsearch`)
 
@@ -730,6 +978,8 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
 
 ### JSON schema (`fmap`)
 
+Base fields are always present. `query` and `matches` are emitted when `--name` is active.
+
 ```json
 {
   "tool": "fmap",
@@ -741,7 +991,19 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
   "total_symbols": 12,
   "shown_symbols": 12,
   "truncated": false,
+  "query": "authenticate",
   "languages": {"python": 1},
+  "matches": [
+    {
+      "path": "/project/src/auth.py",
+      "symbol": "authenticate",
+      "symbol_type": "function",
+      "line_start": 14,
+      "line_end": 27,
+      "match_kind": "exact",
+      "rank": 1
+    }
+  ],
   "files": [
     {
       "path": "auth.py",
@@ -758,11 +1020,13 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
 
 ### JSON schema (`fread`)
 
+Base fields are always present. `symbol_resolution` and `candidates` are emitted when `--symbol` is active.
+
 ```json
 {
   "tool": "fread",
   "version": "2.1.0",
-  "mode": "around",
+  "mode": "symbol",
   "truncated": false,
   "truncation_reason": "none",
   "token_estimate": 148,
@@ -793,6 +1057,15 @@ The six operational tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fed
       "status": "read"
     }
   ],
+  "symbol_resolution": {
+    "query": "authenticate",
+    "symbol": "authenticate",
+    "symbol_type": "function",
+    "path": "/project/src/auth.py",
+    "line_start": 120,
+    "line_end": 137
+  },
+  "candidates": [],
   "warnings": [],
   "errors": []
 }
@@ -960,6 +1233,7 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `fmap /project` | Map all source files under `/project` (pretty output) |
 | `fmap /project/src/auth.py` | Map a single file |
 | `fmap -o json /project` | JSON output with symbol metadata |
+| `fmap --name authenticate -o json /project` | Rank/filter symbols by exact then substring symbol-name matches |
 | `fmap -o paths /project` | File paths that contain symbols |
 | `fmap -t function /project` | Show only function definitions |
 | `fmap -t class /project` | Show only class definitions |
@@ -984,6 +1258,8 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `fread /project/src/auth.py --tail 40` | Read the last 40 lines |
 | `fread /project/src/auth.py --around-line 150 -B 5 -A 15` | Read context around line 150 |
 | `fread /project/src/auth.py --around "def authenticate" -B 5 -A 20` | Read around the first literal pattern match |
+| `fread /project/src/auth.py --symbol authenticate -o json` | Read one exact symbol block from a file |
+| `fread /project/src --symbol authenticate -o json` | Resolve and read one exact symbol block from a directory scope |
 | `fread /project/src/auth.py --all-matches --around "TODO"` | Read around every match until caps are hit |
 | `fread /project/src/auth.py --max-lines 80 --max-bytes 12000` | Enforce hard output budgets |
 | `fread /project/src/auth.py --token-budget 2000 -o json` | Cap by estimated token cost |
@@ -991,6 +1267,25 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `git diff \| fread --from-stdin --stdin-format=unified-diff -B 3 -A 10` | Read context around changed hunks |
 | `fread --self-check` | Verify dependencies (`sed`, `awk`, `grep`, `wc`, `od`, `perl`) |
 | `fread --version` | Print version |
+
+### `fcase` — Preserve Investigation Continuity
+
+| Command | What it does |
+|---------|-------------|
+| `fcase init auth-seam --goal "Trace authenticate flow"` | Create a new investigation case and open its first session |
+| `fcase list -o json` | List known cases for automation |
+| `fcase status auth-seam -o json` | Read the current case state quickly |
+| `fcase note auth-seam --body "Focused on denial branch"` | Append a note to the case history |
+| `fcase target add auth-seam --path /project/src/auth.py --symbol authenticate --symbol-type function --state active` | Mark the main file/symbol seam as active |
+| `fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 --summary "Authenticate branch" --body "..."` | Store structured proof from a read or search |
+| `fcase hypothesis add auth-seam --body "Cleanup bug lives in tool cancellation"` | Track an open explanation |
+| `fcase reject auth-seam --hypothesis-id 1 --reason "Process survives normal completion too"` | Reject one hypothesis explicitly |
+| `fmap -o json /project/src/auth.py | fcase target import auth-seam` | Import mapped symbols as structured targets |
+| `fread -o json /project/src/auth.py --around "def authenticate" -A 20 | fcase evidence import auth-seam` | Import bounded reads as structured evidence |
+| `fcase next auth-seam --body "Patch denial branch after reviewing symbol map"` | Update the next best move |
+| `fcase handoff auth-seam -o json` | Emit a concise handoff packet for the next agent |
+| `fcase export auth-seam -o json` | Export the full portable case envelope |
+| `fcase --version` | Print version |
 
 ### `fedit` — Apply Surgical Patches
 
@@ -1056,6 +1351,8 @@ These are designed for AI agents, CI pipelines, cron jobs, and automation script
 | **Map code structure** | `fmap -o json /project` | Agent gets functions, classes, imports per file |
 | **Map specific files** | `fsearch -o paths '*.py' /project \| fmap -o json` | Pipeline: find then map structure |
 | **Read targeted context** | `fread -o json /project/src/auth.py --around "def authenticate" -A 20` | Agent reads one function neighborhood without flooding context |
+| **Preserve case state** | `fcase status auth-seam -o json` | Agent reloads what matters now without replaying chat history |
+| **Emit a handoff** | `fcase handoff auth-seam -o json` | Agent hands the current seam, evidence, and next move to the next run |
 | **Preview a patch** | `fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()"` | Agent gets a structured diff before changing code |
 | **Apply a patch** | `fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()" --apply` | Agent mutates only after it has inspected the diff |
 | **Shortcut-scoped patch** | `fedit -o json /project/src/auth.py --function authenticate --replace "return False" --with "return deny()"` | Agent targets one function directly from the CLI |
@@ -1207,6 +1504,25 @@ These are designed for AI agents, CI pipelines, cron jobs, and automation script
 | `--self-check` | — | — | — |
 | `--install-hints` | — | — | — |
 
+**`fcase`**
+
+| Subcommand | Key Flags | Description |
+|------------|-----------|-------------|
+| `init <slug>` | `--goal`, `--priority`, `-o json` | Create a case and open the first session |
+| `list` | `-o json` | Show known cases |
+| `status <slug>` | `-o json` | Read current case state |
+| `note <slug>` | `--body` | Append a note event |
+| `target add <slug>` | `--path`, `--symbol`, `--symbol-type`, `--rank`, `--reason`, `--state` | Add a typed target |
+| `evidence <slug>` | `--tool`, `--path`, `--symbol`, `--lines`, `--match-line`, `--summary`, `--body` or `--body-file` | Store structured proof |
+| `hypothesis add <slug>` | `--body`, `--confidence` | Add a hypothesis |
+| `hypothesis set <slug>` | `--id`, `--status`, `--reason`, `--confidence` | Update a hypothesis state |
+| `reject <slug>` | `--target-id` or `--hypothesis-id`, `--reason` | Typed alias for ruling out a target or rejecting a hypothesis |
+| `target import <slug>` | `--input <path or ->`, `-o json` | Import structured targets from `fmap -o json` |
+| `evidence import <slug>` | `--input <path or ->`, `-o json` | Import structured evidence from `fread -o json` |
+| `next <slug>` | `--body`, `-o json` | Update the next best move |
+| `handoff <slug>` | `-o json` | Emit a concise handoff packet |
+| `export <slug>` | `-o json` | Export the full case envelope |
+
 **`fread`**
 
 | Flag | Short | Values | Default |
@@ -1218,6 +1534,7 @@ These are designed for AI agents, CI pipelines, cron jobs, and automation script
 | `--around-line` | — | any integer | — |
 | `--around` | — | literal pattern | — |
 | `--all-matches` | — | — | off |
+| `--symbol` | — | exact symbol name | — |
 | `--before` | `-B` | any integer | `5` |
 | `--after` | `-A` | any integer | `10` |
 | `--max-lines` | — | any integer | `200` |
@@ -1261,7 +1578,7 @@ These are designed for AI agents, CI pipelines, cron jobs, and automation script
 | `fd` / `fdfind` | Faster filename search backend | `sudo apt install fd-find` |
 | `rg` (ripgrep) | **Required** by `fcontent` | `sudo apt install ripgrep` |
 | `perl` | **Required** by `fread` for JSON escaping and portable timing fallback | `sudo apt install perl` |
-| `sqlite3` | Required by `fmetrics import/stats/history/clean` | `sudo apt install sqlite3` |
+| `sqlite3` | Required by `fcase` case storage and `fmetrics import/stats/history/clean` | `sudo apt install sqlite3` |
 
 All tools include built-in guidance:
 
@@ -1276,6 +1593,7 @@ fmap --self-check          # Verify grep is available
 fmap --install-hints       # Print install command for grep
 fread --self-check         # Verify sed/awk/grep/wc/od/perl
 fread --install-hints      # Print install commands for core deps
+fcase --help               # Show case ledger subcommands
 fmetrics --self-check      # Verify sqlite3 + python3 helper chain
 fmetrics --install-hints
 ```
@@ -1387,13 +1705,16 @@ This installs into `~/.local/bin` and `~/.local/share/fsuite`.
 ### Alternate: manual symlink install
 
 ```bash
-chmod +x fsearch fcontent ftree fmap fread fedit fmetrics
+chmod +x fsuite fsearch fcontent ftree fmap fread fcase fedit fmetrics
+
+sudo ln -s "$(pwd)/fsuite" /usr/local/bin/fsuite
 
 sudo ln -s "$(pwd)/fsearch" /usr/local/bin/fsearch
 sudo ln -s "$(pwd)/fcontent" /usr/local/bin/fcontent
 sudo ln -s "$(pwd)/ftree" /usr/local/bin/ftree
 sudo ln -s "$(pwd)/fmap" /usr/local/bin/fmap
 sudo ln -s "$(pwd)/fread" /usr/local/bin/fread
+sudo ln -s "$(pwd)/fcase" /usr/local/bin/fcase
 sudo ln -s "$(pwd)/fedit" /usr/local/bin/fedit
 sudo ln -s "$(pwd)/fmetrics" /usr/local/bin/fmetrics
 ```

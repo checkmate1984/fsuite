@@ -1,0 +1,1492 @@
+#!/usr/bin/env bash
+# fcase — continuity and handoff ledger for fsuite investigations.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+FCASE_DIR="$HOME/.fsuite"
+DB_FILE="$FCASE_DIR/fcase.db"
+DEFAULT_OUTPUT="pretty"
+
+die() {
+  local code=1
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    code="$1"
+    shift
+  fi
+  echo "fcase: $*" >&2
+  exit "$code"
+}
+
+has() { command -v "$1" >/dev/null 2>&1; }
+
+json_escape() {
+  perl -CS -0pe '
+    s/\\/\\\\/g;
+    s/"/\\"/g;
+    s/\x08/\\b/g;
+    s/\x0c/\\f/g;
+    s/\n/\\n/g;
+    s/\r/\\r/g;
+    s/\t/\\t/g;
+    s/([\x00-\x07\x0b\x0e-\x1f])/sprintf("\\u%04x", ord($1))/ge;
+  '
+}
+
+sql_quote() {
+  local value="${1//\'/\'\'}"
+  printf "'%s'" "$value"
+}
+
+now_utc() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+usage() {
+  cat <<'EOF'
+fcase — continuity and handoff ledger for fsuite investigations
+
+USAGE
+  fcase --help
+  fcase --version
+  fcase init <slug> --goal ... [--priority ...] [-o pretty|json]
+  fcase list [-o pretty|json]
+  fcase status <slug> [-o pretty|json]
+  fcase note <slug> --body ...
+  fcase next <slug> --body ... [-o pretty|json]
+  fcase handoff <slug> [-o pretty|json]
+  fcase export <slug> -o json
+  fcase target add <slug> --path ... [--symbol ... --symbol-type ... --rank ... --reason ... --state ...]
+  fcase target import <slug> [-o pretty|json] [--input <path|- >]
+  fcase evidence <slug> --tool ... [--path ... --symbol ... --lines <start:end> --match-line ... --summary ...] (--body ... | --body-file <path>)
+  fcase evidence import <slug> [-o pretty|json] [--input <path|- >]
+  fcase hypothesis add <slug> --body ... [--confidence ...]
+  fcase hypothesis set <slug> --id ... --status ... [--reason ... --confidence ...]
+  fcase reject <slug> (--target-id <id> | --hypothesis-id <id>) [--reason ...]
+
+DESCRIPTION
+  fcase preserves investigation state once the seam is known:
+    init         Create a case and open a session
+    list         Show known cases
+    status       Show current case state
+    note         Append a note to a case
+    next         Update the next best move
+    handoff      Generate a concise handoff packet
+    export       Export the full case envelope
+    target import    Import structured targets from fmap JSON
+    evidence import  Import structured evidence from fread JSON
+EOF
+}
+
+db_query() {
+  local separator=""
+  if [[ "${1:-}" == "--separator" ]]; then
+    separator="${2:-}"
+    [[ -n "$separator" ]] || die "db_query requires a value for --separator"
+    shift 2
+  fi
+
+  has sqlite3 || die 3 "sqlite3 is required"
+  mkdir -p "$FCASE_DIR" 2>/dev/null || die "Cannot create $FCASE_DIR"
+
+  if [[ -n "$separator" ]]; then
+    { printf 'PRAGMA foreign_keys=ON;\n'; cat; } | sqlite3 -separator "$separator" "$DB_FILE"
+  else
+    { printf 'PRAGMA foreign_keys=ON;\n'; cat; } | sqlite3 "$DB_FILE"
+  fi
+}
+
+db_exec() {
+  has sqlite3 || die 3 "sqlite3 is required"
+  mkdir -p "$FCASE_DIR" 2>/dev/null || die "Cannot create $FCASE_DIR"
+  { printf 'PRAGMA foreign_keys=ON;\n'; cat; } | sqlite3 "$DB_FILE" >/dev/null
+}
+
+ensure_db() {
+  db_exec <<'SQL'
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+PRAGMA user_version=1;
+
+CREATE TABLE IF NOT EXISTS cases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug TEXT NOT NULL UNIQUE,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  priority TEXT NOT NULL DEFAULT 'normal',
+  next_move TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS case_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  actor TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS targets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  symbol TEXT,
+  symbol_type TEXT,
+  rank INTEGER,
+  reason TEXT,
+  state TEXT NOT NULL DEFAULT 'candidate',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  tool TEXT NOT NULL,
+  path TEXT,
+  symbol TEXT,
+  line_start INTEGER,
+  line_end INTEGER,
+  match_line INTEGER,
+  summary TEXT,
+  body TEXT NOT NULL,
+  payload_json TEXT,
+  fingerprint TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hypotheses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  confidence TEXT,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  session_id INTEGER REFERENCES case_sessions(id) ON DELETE SET NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT,
+  created_at TEXT NOT NULL
+);
+SQL
+}
+
+case_id_for_slug() {
+  local slug="$1"
+  db_query <<<"SELECT id FROM cases WHERE slug = $(sql_quote "$slug");"
+}
+
+latest_session_id_for_case() {
+  local case_id="$1"
+  db_query <<<"SELECT id FROM case_sessions WHERE case_id = $case_id ORDER BY id DESC LIMIT 1;"
+}
+
+case_exists_or_die() {
+  local slug="$1"
+  local case_id
+  case_id="$(case_id_for_slug "$slug")"
+  [[ -n "$case_id" ]] || die "case not found: $slug"
+  printf '%s' "$case_id"
+}
+
+append_event() {
+  local case_id="$1"
+  local session_id="$2"
+  local event_type="$3"
+  local payload_json="$4"
+  local created_at="$5"
+  db_exec <<<"INSERT INTO events (case_id, session_id, event_type, payload_json, created_at) VALUES ($case_id, ${session_id:-NULL}, $(sql_quote "$event_type"), $(sql_quote "$payload_json"), $(sql_quote "$created_at"));"
+}
+
+is_valid_target_state() {
+  case "$1" in
+    candidate|active|validated|ruled_out) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_valid_hypothesis_status() {
+  case "$1" in
+    open|active|validated|rejected) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+parse_lines_range() {
+  local raw="$1"
+  [[ "$raw" =~ ^([0-9]+):([0-9]+)$ ]] || return 1
+  local start="${BASH_REMATCH[1]}"
+  local end="${BASH_REMATCH[2]}"
+  (( start > 0 )) || return 1
+  (( end > 0 )) || return 1
+  (( start <= end )) || return 1
+  printf '%s|%s' "$start" "$end"
+}
+
+materialize_import_payload_file() {
+  local input_path="${1:-}"
+  if [[ -n "$input_path" && "$input_path" != "-" ]]; then
+    [[ -f "$input_path" ]] || die "import input file not found: $input_path"
+    printf '%s\n' "$input_path"
+    return
+  fi
+
+  local payload_file
+  payload_file="$(mktemp)"
+
+  if [[ -n "$input_path" && "$input_path" == "-" ]]; then
+    cat > "$payload_file"
+    printf '%s\n' "$payload_file"
+    return
+  fi
+
+  if [[ -t 0 ]]; then
+    rm -f "$payload_file"
+    die "import requires piped JSON or --input <path|- >"
+  fi
+
+  cat > "$payload_file"
+  printf '%s\n' "$payload_file"
+}
+
+status_json() {
+  local slug="$1"
+  db_query <<SQL
+WITH target_case AS (
+  SELECT id, slug, goal, status, priority, next_move, created_at, updated_at
+  FROM cases
+  WHERE slug = $(sql_quote "$slug")
+)
+SELECT json_object(
+  'case', (
+    SELECT json_object(
+      'id', id,
+      'slug', slug,
+      'goal', goal,
+      'status', status,
+      'priority', priority,
+      'next_move', next_move,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ) FROM target_case
+  ),
+  'active_session', (
+    SELECT json_object(
+      'id', id,
+      'actor', actor,
+      'started_at', started_at,
+      'ended_at', ended_at,
+      'summary', summary
+    )
+    FROM case_sessions
+    WHERE case_id = (SELECT id FROM target_case)
+    ORDER BY id DESC
+    LIMIT 1
+  ),
+  'targets', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'path', path,
+      'symbol', symbol,
+      'symbol_type', symbol_type,
+      'rank', rank,
+      'reason', reason,
+      'state', state,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ))
+    FROM targets
+    WHERE case_id = (SELECT id FROM target_case)
+  ), json('[]')),
+  'evidence', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'tool', tool,
+      'path', path,
+      'symbol', symbol,
+      'line_start', line_start,
+      'line_end', line_end,
+      'match_line', match_line,
+      'summary', summary,
+      'body', body,
+      'payload_json', payload_json,
+      'fingerprint', fingerprint,
+      'created_at', created_at
+    ))
+    FROM evidence
+    WHERE case_id = (SELECT id FROM target_case)
+  ), json('[]')),
+  'hypotheses', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'body', body,
+      'status', status,
+      'confidence', confidence,
+      'reason', reason,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ))
+    FROM hypotheses
+    WHERE case_id = (SELECT id FROM target_case)
+  ), json('[]')),
+  'recent_events', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'session_id', session_id,
+      'event_type', event_type,
+      'payload_json', payload_json,
+      'created_at', created_at
+    ))
+    FROM (
+      SELECT id, session_id, event_type, payload_json, created_at
+      FROM events
+      WHERE case_id = (SELECT id FROM target_case)
+      ORDER BY id DESC
+      LIMIT 10
+    )
+  ), json('[]'))
+);
+SQL
+}
+
+handoff_json() {
+  local slug="$1"
+  db_query <<SQL
+WITH target_case AS (
+  SELECT id, slug, goal, status, priority, next_move, created_at, updated_at
+  FROM cases
+  WHERE slug = $(sql_quote "$slug")
+)
+SELECT json_object(
+  'case', (
+    SELECT json_object(
+      'id', id,
+      'slug', slug,
+      'goal', goal,
+      'status', status,
+      'priority', priority,
+      'next_move', next_move,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ) FROM target_case
+  ),
+  'active_session', (
+    SELECT json_object(
+      'id', id,
+      'actor', actor,
+      'started_at', started_at,
+      'ended_at', ended_at,
+      'summary', summary
+    )
+    FROM case_sessions
+    WHERE case_id = (SELECT id FROM target_case)
+    ORDER BY id DESC
+    LIMIT 1
+  ),
+  'targets', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'path', path,
+      'symbol', symbol,
+      'symbol_type', symbol_type,
+      'rank', rank,
+      'reason', reason,
+      'state', state
+    ))
+    FROM targets
+    WHERE case_id = (SELECT id FROM target_case)
+  ), json('[]')),
+  'hypotheses', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'body', body,
+      'status', status,
+      'confidence', confidence,
+      'reason', reason
+    ))
+    FROM hypotheses
+    WHERE case_id = (SELECT id FROM target_case)
+  ), json('[]')),
+  'recent_events', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'event_type', event_type,
+      'payload_json', payload_json,
+      'created_at', created_at
+    ))
+    FROM (
+      SELECT id, event_type, payload_json, created_at
+      FROM events
+      WHERE case_id = (SELECT id FROM target_case)
+      ORDER BY id DESC
+      LIMIT 10
+    )
+  ), json('[]'))
+);
+SQL
+}
+
+export_json() {
+  local slug="$1"
+  db_query <<SQL
+WITH target_case AS (
+  SELECT id, slug, goal, status, priority, next_move, created_at, updated_at
+  FROM cases
+  WHERE slug = $(sql_quote "$slug")
+)
+SELECT json_object(
+  'case', (
+    SELECT json_object(
+      'id', id,
+      'slug', slug,
+      'goal', goal,
+      'status', status,
+      'priority', priority,
+      'next_move', next_move,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ) FROM target_case
+  ),
+  'sessions', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'started_at', started_at,
+      'ended_at', ended_at,
+      'actor', actor,
+      'summary', summary
+    ))
+    FROM (
+      SELECT id, started_at, ended_at, actor, summary
+      FROM case_sessions
+      WHERE case_id = (SELECT id FROM target_case)
+      ORDER BY id ASC
+    )
+  ), json('[]')),
+  'targets', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'path', path,
+      'symbol', symbol,
+      'symbol_type', symbol_type,
+      'rank', rank,
+      'reason', reason,
+      'state', state,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ))
+    FROM (
+      SELECT *
+      FROM targets
+      WHERE case_id = (SELECT id FROM target_case)
+      ORDER BY id ASC
+    )
+  ), json('[]')),
+  'evidence', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'tool', tool,
+      'path', path,
+      'symbol', symbol,
+      'line_start', line_start,
+      'line_end', line_end,
+      'match_line', match_line,
+      'summary', summary,
+      'body', body,
+      'payload_json', payload_json,
+      'fingerprint', fingerprint,
+      'created_at', created_at
+    ))
+    FROM (
+      SELECT *
+      FROM evidence
+      WHERE case_id = (SELECT id FROM target_case)
+      ORDER BY id ASC
+    )
+  ), json('[]')),
+  'hypotheses', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'body', body,
+      'status', status,
+      'confidence', confidence,
+      'reason', reason,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ))
+    FROM (
+      SELECT *
+      FROM hypotheses
+      WHERE case_id = (SELECT id FROM target_case)
+      ORDER BY id ASC
+    )
+  ), json('[]')),
+  'events', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'session_id', session_id,
+      'event_type', event_type,
+      'payload_json', payload_json,
+      'created_at', created_at
+    ))
+    FROM (
+      SELECT *
+      FROM events
+      WHERE case_id = (SELECT id FROM target_case)
+      ORDER BY id ASC
+    )
+  ), json('[]'))
+);
+SQL
+}
+
+cmd_init() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "init requires <slug>"
+
+  local goal=""
+  local priority="normal"
+  local output="$DEFAULT_OUTPUT"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --goal)
+        goal="${2:-}"
+        shift 2
+        ;;
+      --priority)
+        priority="${2:-}"
+        shift 2
+        ;;
+      -o|--output)
+        output="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for init: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$goal" ]] || die "init requires --goal"
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+
+  local now actor escaped_slug escaped_goal escaped_priority
+  now="$(now_utc)"
+  actor="${USER:-unknown}"
+  escaped_slug="$(sql_quote "$slug")"
+  escaped_goal="$(sql_quote "$goal")"
+  escaped_priority="$(sql_quote "$priority")"
+
+  if ! db_exec <<SQL
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
+INSERT INTO cases (slug, goal, status, priority, next_move, created_at, updated_at)
+VALUES (${escaped_slug}, ${escaped_goal}, 'open', ${escaped_priority}, '', $(sql_quote "$now"), $(sql_quote "$now"));
+INSERT INTO case_sessions (case_id, started_at, ended_at, actor, summary)
+VALUES (last_insert_rowid(), $(sql_quote "$now"), NULL, $(sql_quote "$actor"), '');
+INSERT INTO events (case_id, session_id, event_type, payload_json, created_at)
+VALUES (
+  (SELECT id FROM cases WHERE slug = ${escaped_slug}),
+  (SELECT id FROM case_sessions WHERE case_id = (SELECT id FROM cases WHERE slug = ${escaped_slug}) ORDER BY id DESC LIMIT 1),
+  'case_init',
+  json_object('slug', ${escaped_slug}, 'goal', ${escaped_goal}, 'priority', ${escaped_priority}),
+  $(sql_quote "$now")
+);
+COMMIT;
+SQL
+  then
+    die "failed to create case (slug may already exist)"
+  fi
+
+  if [[ "$output" == "json" ]]; then
+    db_query <<SQL
+SELECT json_object(
+  'case', (
+    SELECT json_object(
+      'id', id,
+      'slug', slug,
+      'goal', goal,
+      'status', status,
+      'priority', priority,
+      'next_move', next_move,
+      'created_at', created_at,
+      'updated_at', updated_at
+    )
+    FROM cases
+    WHERE slug = ${escaped_slug}
+  ),
+  'session', (
+    SELECT json_object(
+      'id', id,
+      'actor', actor,
+      'started_at', started_at,
+      'ended_at', ended_at,
+      'summary', summary
+    )
+    FROM case_sessions
+    WHERE case_id = (SELECT id FROM cases WHERE slug = ${escaped_slug})
+    ORDER BY id DESC
+    LIMIT 1
+  ),
+  'event', (
+    SELECT json_object(
+      'id', id,
+      'event_type', event_type,
+      'payload_json', payload_json,
+      'created_at', created_at
+    )
+    FROM events
+    WHERE case_id = (SELECT id FROM cases WHERE slug = ${escaped_slug})
+    ORDER BY id DESC
+    LIMIT 1
+  )
+);
+SQL
+  else
+    echo "Created case: ${slug}"
+    echo "Goal: ${goal}"
+    echo "Priority: ${priority}"
+  fi
+}
+
+cmd_list() {
+  local output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        output="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for list: $1"
+        ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+  if [[ "$output" == "json" ]]; then
+    db_query <<'SQL'
+SELECT json_object(
+  'cases',
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'slug', slug,
+      'goal', goal,
+      'status', status,
+      'priority', priority,
+      'next_move', next_move,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ))
+    FROM (
+      SELECT id, slug, goal, status, priority, next_move, created_at, updated_at
+      FROM cases
+      ORDER BY updated_at DESC, id DESC
+    )
+  ), json('[]'))
+);
+SQL
+  else
+    local count
+    count="$(db_query <<<'SELECT COUNT(*) FROM cases;')"
+    echo "Cases: ${count}"
+    db_query --separator ' | ' <<<"SELECT slug, status, priority, goal FROM cases ORDER BY updated_at DESC, id DESC;"
+  fi
+}
+
+cmd_status() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "status requires <slug>"
+
+  local output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        output="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for status: $1"
+        ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+  local case_id
+  case_id="$(case_id_for_slug "$slug")"
+  [[ -n "$case_id" ]] || die "case not found: $slug"
+
+  if [[ "$output" == "json" ]]; then
+    status_json "$slug"
+  else
+    local details
+    details="$(db_query --separator '|' <<<"SELECT slug, goal, status, priority, next_move, updated_at FROM cases WHERE slug = $(sql_quote "$slug");")"
+    IFS='|' read -r case_slug case_goal case_status case_priority case_next case_updated <<<"$details"
+    echo "Case: ${case_slug}"
+    echo "Goal: ${case_goal}"
+    echo "Status: ${case_status}"
+    echo "Priority: ${case_priority}"
+    echo "Next: ${case_next}"
+    echo "Updated: ${case_updated}"
+  fi
+}
+
+cmd_target_add() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "target add requires <slug>"
+
+  local path="" symbol="" symbol_type="" rank="" reason="" state="candidate"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --path) path="${2:-}"; shift 2 ;;
+      --symbol) symbol="${2:-}"; shift 2 ;;
+      --symbol-type) symbol_type="${2:-}"; shift 2 ;;
+      --rank) rank="${2:-}"; shift 2 ;;
+      --reason) reason="${2:-}"; shift 2 ;;
+      --state) state="${2:-}"; shift 2 ;;
+      *) die "Unknown option for target add: $1" ;;
+    esac
+  done
+  [[ -n "$path" ]] || die "target add requires --path"
+  [[ -z "$rank" || "$rank" =~ ^[0-9]+$ ]] || die "target add --rank must be an integer"
+  is_valid_target_state "$state" || die "target add --state must be one of: candidate, active, validated, ruled_out"
+
+  ensure_db
+  local case_id session_id now payload rank_sql json_rank
+  case_id="$(case_exists_or_die "$slug")"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  if [[ -n "$rank" ]]; then rank_sql="$rank"; else rank_sql="NULL"; fi
+  if [[ "$rank_sql" == "NULL" ]]; then json_rank="null"; else json_rank="$rank_sql"; fi
+  db_exec <<SQL
+INSERT INTO targets (case_id, path, symbol, symbol_type, rank, reason, state, created_at, updated_at)
+VALUES (
+  $case_id,
+  $(sql_quote "$path"),
+  $(sql_quote "$symbol"),
+  $(sql_quote "$symbol_type"),
+  $rank_sql,
+  $(sql_quote "$reason"),
+  $(sql_quote "$state"),
+  $(sql_quote "$now"),
+  $(sql_quote "$now")
+);
+UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;
+SQL
+  payload="$(printf '{"path":"%s","symbol":"%s","symbol_type":"%s","rank":%s,"reason":"%s","state":"%s"}' \
+    "$(printf '%s' "$path" | json_escape)" \
+    "$(printf '%s' "$symbol" | json_escape)" \
+    "$(printf '%s' "$symbol_type" | json_escape)" \
+    "$json_rank" \
+    "$(printf '%s' "$reason" | json_escape)" \
+    "$(printf '%s' "$state" | json_escape)")"
+  append_event "$case_id" "$session_id" "target_add" "$payload" "$now"
+  echo "Added target to ${slug}"
+}
+
+cmd_target_import() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "target import requires <slug>"
+
+  local output="$DEFAULT_OUTPUT" input_path=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output) output="${2:-}"; shift 2 ;;
+      --input) input_path="${2:-}"; shift 2 ;;
+      *) die "Unknown option for target import: $1" ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+  has python3 || die 3 "python3 is required for target import"
+
+  ensure_db
+  local case_id session_id now payload_path err_file result_json rc=0 imported err_msg cleanup_payload=0
+  case_id="$(case_exists_or_die "$slug")"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  payload_path="$(materialize_import_payload_file "$input_path")"
+  [[ -z "$input_path" || "$input_path" == "-" ]] && cleanup_payload=1
+  err_file="$(mktemp)"
+  result_json="$(python3 - "$DB_FILE" "$case_id" "${session_id:-}" "$now" "$payload_path" 2>"$err_file" <<'PY'
+import json
+import re
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+case_id = int(sys.argv[2])
+session_id = None if sys.argv[3] in ("", "NULL") else int(sys.argv[3])
+now = sys.argv[4]
+payload_path = sys.argv[5]
+
+try:
+    with open(payload_path, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+except json.JSONDecodeError as exc:
+    print(f"target import requires valid JSON: {exc}", file=sys.stderr)
+    sys.exit(2)
+except OSError as exc:
+    print(f"target import could not read payload: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+if payload.get("tool") != "fmap":
+    print("target import requires fmap JSON input", file=sys.stderr)
+    sys.exit(2)
+
+files = payload.get("files")
+if not isinstance(files, list):
+    print("target import requires fmap JSON with a files array", file=sys.stderr)
+    sys.exit(2)
+
+conn = sqlite3.connect(db_path)
+conn.execute("PRAGMA foreign_keys=ON")
+imported = 0
+
+def normalized_symbol_name(symbol):
+    for key in ("name", "identifier"):
+        value = symbol.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    text = (symbol.get("text") or "").strip()
+    if not text:
+        return ""
+
+    patterns = (
+        r"(?:^|\s)(?:def|function|func|fun|fn)\s+([_A-Za-z]\w*)",
+        r"(?:^|\s)(?:class|struct|enum|interface|protocol|trait|module|object|extension|actor|type)\s+([_A-Za-z]\w*)",
+        r"([_A-Za-z]\w*)\s*\(",
+        r"([_A-Za-z]\w*)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return text
+
+try:
+    for file_entry in files:
+        if not isinstance(file_entry, dict):
+            continue
+        path = file_entry.get("path") or payload.get("path") or ""
+        for symbol in file_entry.get("symbols") or []:
+            if not isinstance(symbol, dict):
+                continue
+            symbol_name = normalized_symbol_name(symbol)
+            if not symbol_name:
+                continue
+            symbol_type = symbol.get("type") or ""
+            line = symbol.get("line")
+            reason = f"Imported from fmap line {line}" if isinstance(line, int) and line > 0 else "Imported from fmap"
+            conn.execute(
+                """
+                INSERT INTO targets (case_id, path, symbol, symbol_type, rank, reason, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, NULL, ?, 'candidate', ?, ?)
+                """,
+                (case_id, path, symbol_name, symbol_type, reason, now, now),
+            )
+            imported += 1
+    if imported == 0:
+        print("target import found no symbols in fmap JSON", file=sys.stderr)
+        sys.exit(2)
+
+    conn.execute("UPDATE cases SET updated_at = ? WHERE id = ?", (now, case_id))
+    event_payload = json.dumps({"source_tool": "fmap", "imported_targets": imported}, separators=(",", ":"))
+    conn.execute(
+        """
+        INSERT INTO events (case_id, session_id, event_type, payload_json, created_at)
+        VALUES (?, ?, 'target_import', ?, ?)
+        """,
+        (case_id, session_id, event_payload, now),
+    )
+    conn.commit()
+finally:
+    conn.close()
+
+json.dump({"imported": imported, "event_type": "target_import"}, sys.stdout, separators=(",", ":"))
+PY
+  )" || rc=$?
+  err_msg="$(cat "$err_file")"
+  rm -f "$err_file"
+  if (( cleanup_payload )); then
+    rm -f "$payload_path"
+  fi
+  (( rc == 0 )) || die "${err_msg:-target import failed}"
+
+  imported="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["imported"])' <<< "$result_json" 2>/dev/null || printf '0')"
+  if [[ "$output" == "json" ]]; then
+    printf '{"case":{"slug":"%s"},"imported":%s,"event":{"event_type":"target_import"}}\n' \
+      "$(printf '%s' "$slug" | json_escape)" \
+      "$imported"
+  else
+    echo "Imported ${imported} targets into ${slug}"
+  fi
+}
+
+cmd_evidence() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "evidence requires <slug>"
+
+  local tool="" path="" symbol="" lines="" match_line="" summary="" body="" body_file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tool) tool="${2:-}"; shift 2 ;;
+      --path) path="${2:-}"; shift 2 ;;
+      --symbol) symbol="${2:-}"; shift 2 ;;
+      --lines) lines="${2:-}"; shift 2 ;;
+      --match-line) match_line="${2:-}"; shift 2 ;;
+      --summary) summary="${2:-}"; shift 2 ;;
+      --body) body="${2:-}"; shift 2 ;;
+      --body-file) body_file="${2:-}"; shift 2 ;;
+      *) die "Unknown option for evidence: $1" ;;
+    esac
+  done
+  [[ -n "$tool" ]] || die "evidence requires --tool"
+  if [[ -n "$body" && -n "$body_file" ]]; then
+    die "evidence requires exactly one body source"
+  fi
+  if [[ -z "$body" && -z "$body_file" ]]; then
+    die "evidence requires exactly one body source"
+  fi
+  if [[ -n "$body_file" ]]; then
+    [[ -f "$body_file" ]] || die "evidence body file not found: $body_file"
+    body="$(cat "$body_file")"
+  fi
+
+  local line_start_sql="NULL" line_end_sql="NULL"
+  if [[ -n "$lines" ]]; then
+    local parsed start end
+    parsed="$(parse_lines_range "$lines")" || die "evidence --lines must be start:end with positive ascending integers"
+    IFS='|' read -r start end <<<"$parsed"
+    line_start_sql="$start"
+    line_end_sql="$end"
+    if [[ -n "$match_line" ]]; then
+      [[ "$match_line" =~ ^[0-9]+$ ]] || die "evidence --match-line must be an integer"
+      (( match_line >= start && match_line <= end )) || die "evidence --match-line must fall within --lines"
+    fi
+  elif [[ -n "$match_line" ]]; then
+    die "evidence --match-line requires --lines"
+  fi
+
+  local match_line_sql="NULL"
+  if [[ -n "$match_line" ]]; then match_line_sql="$match_line"; fi
+
+  ensure_db
+  local case_id session_id now payload
+  case_id="$(case_exists_or_die "$slug")"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  db_exec <<SQL
+INSERT INTO evidence (case_id, tool, path, symbol, line_start, line_end, match_line, summary, body, payload_json, fingerprint, created_at)
+VALUES (
+  $case_id,
+  $(sql_quote "$tool"),
+  $(sql_quote "$path"),
+  $(sql_quote "$symbol"),
+  $line_start_sql,
+  $line_end_sql,
+  $match_line_sql,
+  $(sql_quote "$summary"),
+  $(sql_quote "$body"),
+  NULL,
+  NULL,
+  $(sql_quote "$now")
+);
+UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;
+SQL
+  payload="$(printf '{"tool":"%s","path":"%s","symbol":"%s","summary":"%s"}' \
+    "$(printf '%s' "$tool" | json_escape)" \
+    "$(printf '%s' "$path" | json_escape)" \
+    "$(printf '%s' "$symbol" | json_escape)" \
+    "$(printf '%s' "$summary" | json_escape)")"
+  append_event "$case_id" "$session_id" "evidence_add" "$payload" "$now"
+  echo "Added evidence to ${slug}"
+}
+
+cmd_evidence_import() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "evidence import requires <slug>"
+
+  local output="$DEFAULT_OUTPUT" input_path=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output) output="${2:-}"; shift 2 ;;
+      --input) input_path="${2:-}"; shift 2 ;;
+      *) die "Unknown option for evidence import: $1" ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+  has python3 || die 3 "python3 is required for evidence import"
+
+  ensure_db
+  local case_id session_id now payload_path err_file result_json rc=0 imported err_msg cleanup_payload=0
+  case_id="$(case_exists_or_die "$slug")"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  payload_path="$(materialize_import_payload_file "$input_path")"
+  [[ -z "$input_path" || "$input_path" == "-" ]] && cleanup_payload=1
+  err_file="$(mktemp)"
+  result_json="$(python3 - "$DB_FILE" "$case_id" "${session_id:-}" "$now" "$payload_path" 2>"$err_file" <<'PY'
+import hashlib
+import json
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+case_id = int(sys.argv[2])
+session_id = None if sys.argv[3] in ("", "NULL") else int(sys.argv[3])
+now = sys.argv[4]
+payload_path = sys.argv[5]
+
+try:
+    with open(payload_path, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+except json.JSONDecodeError as exc:
+    print(f"evidence import requires valid JSON: {exc}", file=sys.stderr)
+    sys.exit(2)
+except OSError as exc:
+    print(f"evidence import could not read payload: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+if payload.get("tool") != "fread":
+    print("evidence import requires fread JSON input", file=sys.stderr)
+    sys.exit(2)
+
+chunks = payload.get("chunks")
+if not isinstance(chunks, list):
+    print("evidence import requires fread JSON with a chunks array", file=sys.stderr)
+    sys.exit(2)
+
+conn = sqlite3.connect(db_path)
+conn.execute("PRAGMA foreign_keys=ON")
+imported = 0
+
+try:
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        path = chunk.get("path") or ""
+        start_line = chunk.get("start_line")
+        end_line = chunk.get("end_line")
+        match_line = chunk.get("match_line")
+        content_lines = chunk.get("content") or []
+        body = "\n".join(str(line) for line in content_lines)
+        if not body:
+            continue
+        summary = "Imported from fread chunk"
+        if isinstance(match_line, int) and match_line > 0:
+            summary = f"Imported from fread around line {match_line}"
+        payload_json = json.dumps(chunk, separators=(",", ":"))
+        fingerprint = hashlib.sha256(
+            f"{path}\0{start_line}\0{end_line}\0{match_line}\0{body}".encode("utf-8")
+        ).hexdigest()
+        conn.execute(
+            """
+            INSERT INTO evidence (
+              case_id, tool, path, symbol, line_start, line_end, match_line,
+              summary, body, payload_json, fingerprint, created_at
+            ) VALUES (?, 'fread', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (case_id, path, start_line, end_line, match_line, summary, body, payload_json, fingerprint, now),
+        )
+        imported += 1
+    if imported == 0:
+        print("evidence import found no chunks with content in fread JSON", file=sys.stderr)
+        sys.exit(2)
+
+    conn.execute("UPDATE cases SET updated_at = ? WHERE id = ?", (now, case_id))
+    event_payload = json.dumps({"source_tool": "fread", "imported_evidence": imported}, separators=(",", ":"))
+    conn.execute(
+        """
+        INSERT INTO events (case_id, session_id, event_type, payload_json, created_at)
+        VALUES (?, ?, 'evidence_import', ?, ?)
+        """,
+        (case_id, session_id, event_payload, now),
+    )
+    conn.commit()
+finally:
+    conn.close()
+
+json.dump({"imported": imported, "event_type": "evidence_import"}, sys.stdout, separators=(",", ":"))
+PY
+  )" || rc=$?
+  err_msg="$(cat "$err_file")"
+  rm -f "$err_file"
+  if (( cleanup_payload )); then
+    rm -f "$payload_path"
+  fi
+  (( rc == 0 )) || die "${err_msg:-evidence import failed}"
+
+  imported="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["imported"])' <<< "$result_json" 2>/dev/null || printf '0')"
+  if [[ "$output" == "json" ]]; then
+    printf '{"case":{"slug":"%s"},"imported":%s,"event":{"event_type":"evidence_import"}}\n' \
+      "$(printf '%s' "$slug" | json_escape)" \
+      "$imported"
+  else
+    echo "Imported ${imported} evidence entries into ${slug}"
+  fi
+}
+
+cmd_hypothesis_add() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "hypothesis add requires <slug>"
+
+  local body="" confidence=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --body) body="${2:-}"; shift 2 ;;
+      --confidence) confidence="${2:-}"; shift 2 ;;
+      *) die "Unknown option for hypothesis add: $1" ;;
+    esac
+  done
+  [[ -n "$body" ]] || die "hypothesis add requires --body"
+
+  ensure_db
+  local case_id session_id now payload
+  case_id="$(case_exists_or_die "$slug")"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  db_exec <<SQL
+INSERT INTO hypotheses (case_id, body, status, confidence, reason, created_at, updated_at)
+VALUES (
+  $case_id,
+  $(sql_quote "$body"),
+  'open',
+  $( [[ -n "$confidence" ]] && sql_quote "$confidence" || printf 'NULL' ),
+  NULL,
+  $(sql_quote "$now"),
+  $(sql_quote "$now")
+);
+UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;
+SQL
+  payload="$(printf '{"body":"%s","confidence":"%s"}' "$(printf '%s' "$body" | json_escape)" "$(printf '%s' "$confidence" | json_escape)")"
+  append_event "$case_id" "$session_id" "hypothesis_add" "$payload" "$now"
+  echo "Added hypothesis to ${slug}"
+}
+
+cmd_hypothesis_set() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "hypothesis set requires <slug>"
+
+  local hypothesis_id="" status="" reason="" confidence=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --id) hypothesis_id="${2:-}"; shift 2 ;;
+      --status) status="${2:-}"; shift 2 ;;
+      --reason) reason="${2:-}"; shift 2 ;;
+      --confidence) confidence="${2:-}"; shift 2 ;;
+      *) die "Unknown option for hypothesis set: $1" ;;
+    esac
+  done
+  [[ "$hypothesis_id" =~ ^[0-9]+$ ]] || die "hypothesis set requires --id"
+  is_valid_hypothesis_status "$status" || die "hypothesis set --status must be one of: open, active, validated, rejected"
+
+  ensure_db
+  local case_id session_id now count_sql update_confidence update_reason event_reason
+  case_id="$(case_exists_or_die "$slug")"
+  count_sql="$(db_query <<<"SELECT COUNT(*) FROM hypotheses WHERE id = $hypothesis_id AND case_id = $case_id;")"
+  [[ "$count_sql" == "1" ]] || die "hypothesis not found for case: $hypothesis_id"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  if [[ -n "$confidence" ]]; then
+    update_confidence=", confidence = $(sql_quote "$confidence")"
+  else
+    update_confidence=""
+  fi
+  if [[ -n "$reason" ]]; then
+    update_reason=", reason = $(sql_quote "$reason")"
+    event_reason=",\"reason\":\"$(printf '%s' "$reason" | json_escape)\""
+  else
+    update_reason=""
+    event_reason=""
+  fi
+  db_exec <<<"UPDATE hypotheses SET status = $(sql_quote "$status"), updated_at = $(sql_quote "$now")${update_reason}${update_confidence} WHERE id = $hypothesis_id AND case_id = $case_id;"
+  db_exec <<<"UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
+  append_event "$case_id" "$session_id" "hypothesis_set" "$(printf '{"id":%s,"status":"%s"%s%s}' "$hypothesis_id" "$(printf '%s' "$status" | json_escape)" "$event_reason" "$( [[ -n "$confidence" ]] && printf ',\"confidence\":\"%s\"' "$(printf '%s' "$confidence" | json_escape)" )")" "$now"
+  echo "Updated hypothesis ${hypothesis_id} for ${slug}"
+}
+
+cmd_reject() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "reject requires <slug>"
+
+  local target_id="" hypothesis_id="" reason=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --target-id) target_id="${2:-}"; shift 2 ;;
+      --hypothesis-id) hypothesis_id="${2:-}"; shift 2 ;;
+      --reason) reason="${2:-}"; shift 2 ;;
+      *) die "Unknown option for reject: $1" ;;
+    esac
+  done
+
+  local selectors=0
+  [[ -n "$target_id" ]] && selectors=$((selectors + 1))
+  [[ -n "$hypothesis_id" ]] && selectors=$((selectors + 1))
+  (( selectors == 1 )) || die "reject requires exactly one selector"
+
+  ensure_db
+  local case_id session_id now count_sql
+  case_id="$(case_exists_or_die "$slug")"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+
+  if [[ -n "$target_id" ]]; then
+    [[ "$target_id" =~ ^[0-9]+$ ]] || die "reject --target-id must be an integer"
+    count_sql="$(db_query <<<"SELECT COUNT(*) FROM targets WHERE id = $target_id AND case_id = $case_id;")"
+    [[ "$count_sql" == "1" ]] || die "target not found for case: $target_id"
+    db_exec <<<"UPDATE targets SET state = 'ruled_out', reason = $(sql_quote "$reason"), updated_at = $(sql_quote "$now") WHERE id = $target_id AND case_id = $case_id;"
+    append_event "$case_id" "$session_id" "target_rejected" "$(printf '{"target_id":%s,"reason":"%s"}' "$target_id" "$(printf '%s' "$reason" | json_escape)")" "$now"
+  else
+    [[ "$hypothesis_id" =~ ^[0-9]+$ ]] || die "reject --hypothesis-id must be an integer"
+    count_sql="$(db_query <<<"SELECT COUNT(*) FROM hypotheses WHERE id = $hypothesis_id AND case_id = $case_id;")"
+    [[ "$count_sql" == "1" ]] || die "hypothesis not found for case: $hypothesis_id"
+    db_exec <<<"UPDATE hypotheses SET status = 'rejected', reason = $(sql_quote "$reason"), updated_at = $(sql_quote "$now") WHERE id = $hypothesis_id AND case_id = $case_id;"
+    append_event "$case_id" "$session_id" "hypothesis_rejected" "$(printf '{"hypothesis_id":%s,"reason":"%s"}' "$hypothesis_id" "$(printf '%s' "$reason" | json_escape)")" "$now"
+  fi
+
+  db_exec <<<"UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
+  echo "Rejected item in ${slug}"
+}
+
+cmd_note() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "note requires <slug>"
+
+  local body=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --body)
+        body="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for note: $1"
+        ;;
+    esac
+  done
+  [[ -n "$body" ]] || die "note requires --body"
+
+  ensure_db
+  local case_id session_id now payload
+  case_id="$(case_id_for_slug "$slug")"
+  [[ -n "$case_id" ]] || die "case not found: $slug"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  payload="$(printf '{"body":"%s"}' "$(printf '%s' "$body" | json_escape)")"
+  append_event "$case_id" "$session_id" "note" "$payload" "$now"
+  db_exec <<<"UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
+  echo "Added note to ${slug}"
+}
+
+cmd_next() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "next requires <slug>"
+
+  local body="" output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --body)
+        body="${2:-}"
+        shift 2
+        ;;
+      -o|--output)
+        output="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for next: $1"
+        ;;
+    esac
+  done
+  [[ -n "$body" ]] || die "next requires --body"
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+  local case_id session_id now payload
+  case_id="$(case_id_for_slug "$slug")"
+  [[ -n "$case_id" ]] || die "case not found: $slug"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  db_exec <<<"UPDATE cases SET next_move = $(sql_quote "$body"), updated_at = $(sql_quote "$now") WHERE id = $case_id;"
+  payload="$(printf '{"next_move":"%s"}' "$(printf '%s' "$body" | json_escape)")"
+  append_event "$case_id" "$session_id" "next_move_set" "$payload" "$now"
+  if [[ "$output" == "json" ]]; then
+    status_json "$slug"
+  else
+    echo "Updated next move for ${slug}"
+    echo "Next: ${body}"
+  fi
+}
+
+cmd_handoff() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "handoff requires <slug>"
+  local output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        output="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for handoff: $1"
+        ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+  local case_id
+  case_id="$(case_id_for_slug "$slug")"
+  [[ -n "$case_id" ]] || die "case not found: $slug"
+
+  if [[ "$output" == "json" ]]; then
+    handoff_json "$slug"
+  else
+    cmd_status "$slug" --output pretty
+  fi
+}
+
+cmd_export() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "export requires <slug>"
+  local output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        output="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for export: $1"
+        ;;
+    esac
+  done
+  [[ "$output" == "json" ]] || die "export currently supports only -o json"
+
+  ensure_db
+  local case_id
+  case_id="$(case_id_for_slug "$slug")"
+  [[ -n "$case_id" ]] || die "case not found: $slug"
+  export_json "$slug"
+}
+
+main() {
+  local cmd="${1:---help}"
+  case "$cmd" in
+    --help|-h|help)
+      usage
+      ;;
+    --version|version)
+      echo "fcase ${VERSION}"
+      ;;
+    init)
+      shift
+      cmd_init "$@"
+      ;;
+    list)
+      shift
+      cmd_list "$@"
+      ;;
+    status)
+      shift
+      cmd_status "$@"
+      ;;
+    note)
+      shift
+      cmd_note "$@"
+      ;;
+    next)
+      shift
+      cmd_next "$@"
+      ;;
+    handoff)
+      shift
+      cmd_handoff "$@"
+      ;;
+    export)
+      shift
+      cmd_export "$@"
+      ;;
+    target)
+      shift
+      case "${1:-}" in
+        add)
+          shift
+          cmd_target_add "$@"
+          ;;
+        import)
+          shift
+          cmd_target_import "$@"
+          ;;
+        *)
+          die 2 "unknown target subcommand: ${1:-}"
+          ;;
+      esac
+      ;;
+    evidence)
+      shift
+      case "${1:-}" in
+        import)
+          shift
+          cmd_evidence_import "$@"
+          ;;
+        *)
+          cmd_evidence "$@"
+          ;;
+      esac
+      ;;
+    hypothesis)
+      shift
+      case "${1:-}" in
+        add)
+          shift
+          cmd_hypothesis_add "$@"
+          ;;
+        set)
+          shift
+          cmd_hypothesis_set "$@"
+          ;;
+        *)
+          die 2 "unknown hypothesis subcommand: ${1:-}"
+          ;;
+      esac
+      ;;
+    reject)
+      shift
+      cmd_reject "$@"
+      ;;
+    *)
+      die 2 "unknown or unimplemented subcommand: $cmd"
+      ;;
+  esac
+}
+
+main "$@"

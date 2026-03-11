@@ -27,8 +27,8 @@ run_test_suite() {
   echo -e "${BLUE}======================================${NC}"
   echo ""
 
-  if [[ ! -x "${test_script}" ]]; then
-    echo -e "${RED}Error: ${test_script} not found or not executable${NC}"
+  if [[ ! -f "${test_script}" ]]; then
+    echo -e "${RED}Error: ${test_script} not found${NC}"
     return 1
   fi
 
@@ -69,6 +69,15 @@ main() {
   else
     TOTAL_FAILED=$((TOTAL_FAILED + 1))
     failed_suites+=("fcontent")
+  fi
+
+  # Run fcase tests
+  echo ""
+  if run_test_suite "${SCRIPT_DIR}/test_fcase.sh" "fcase Test Suite"; then
+    TOTAL_PASSED=$((TOTAL_PASSED + 1))
+  else
+    TOTAL_FAILED=$((TOTAL_FAILED + 1))
+    failed_suites+=("fcase")
   fi
 
   # Run fmap tests

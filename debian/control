@@ -11,12 +11,12 @@ Rules-Requires-Root: no
 
 Package: fsuite
 Architecture: all
-Depends: ${misc:Depends}, bash (>= 4.0), coreutils, findutils, perl
-Recommends: tree, ripgrep, fd-find, python3, sqlite3
-Description: Filesystem reconnaissance toolkit for humans and AI agents
- fsuite provides a suite-level help command plus seven composable CLI
- tools that turn filesystem exploration into a clean, scriptable,
- agent-friendly pipeline:
+Depends: ${misc:Depends}, bash (>= 4.0), coreutils, findutils, perl, sqlite3
+Recommends: tree, ripgrep, fd-find, python3
+Description: Filesystem investigation toolkit for humans and AI agents
+ fsuite provides a suite-level help command plus eight composable CLI
+ tools that turn filesystem reconnaissance, continuity, and editing into
+ a clean, scriptable, agent-friendly pipeline:
  .
   * fsuite - Show the conceptual workflow and suite-level guidance
   * fsearch - Find files by name, extension, or glob pattern
@@ -24,9 +24,11 @@ Description: Filesystem reconnaissance toolkit for humans and AI agents
   * ftree - Visualize directory structure with smart defaults and recon mode
   * fmap - Extract structural skeleton of code files (code cartography)
   * fread - Read files with budgets, context windows, and diff-aware ranges
+  * fcase - Preserve investigation state and hand off the live case cleanly
   * fedit - Apply surgical text patches with batch mode, symbol shortcuts, and dry-run diffs
   * fmetrics - Analyze local telemetry and predict runtime
  .
  The reconnaissance tools output in multiple formats (pretty, paths,
- JSON) for both human and programmatic consumption. Includes telemetry
- analytics via fmetrics for performance tracking.
+ JSON) for both human and programmatic consumption. The continuity layer
+ keeps targets, evidence, and handoffs structured, while fmetrics
+ provides telemetry analytics for performance tracking.

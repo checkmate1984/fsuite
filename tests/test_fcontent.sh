@@ -67,6 +67,11 @@ def helper():
     pass
 EOF
 
+  cat > "${TEST_DIR}/code/flags.txt" <<'EOF'
+literal token: --test
+literal token: --helpful
+EOF
+
   cat > "${TEST_DIR}/node_modules/dep.js" <<'EOF'
 const DEP_ONLY_TOKEN = "from-node-modules";
 EOF
@@ -696,6 +701,41 @@ test_unknown_option() {
   fi
 }
 
+test_dash_prefixed_query_hint() {
+  local output rc=0
+  output=$("${FCONTENT}" --test "${TEST_DIR}" 2>&1) || rc=$?
+  if [[ $rc -ne 0 ]] \
+    && [[ "$output" =~ "Unknown option: --test" ]] \
+    && [[ "$output" =~ "Query starts with '-'. If you mean a literal search term, use:" ]] \
+    && [[ "$output" =~ "fcontent -o json -- '--test' /path" ]]; then
+    pass "Dash-prefixed literal query gets targeted hint"
+  else
+    fail "Should emit targeted hint for dash-prefixed literal query" "rc=$rc output=$output"
+  fi
+}
+
+test_literal_dash_query_with_double_dash() {
+  check_rg || return
+  local output
+  output=$("${FCONTENT}" -- '--test' "${TEST_DIR}" 2>&1)
+  if [[ "$output" =~ "--test" ]]; then
+    pass "Double-dash preserves dash-prefixed literal query"
+  else
+    fail "Double-dash should allow dash-prefixed literal query" "$output"
+  fi
+}
+
+test_unknown_option_typo_still_fails_clearly() {
+  local output rc=0
+  output=$("${FCONTENT}" --outpt json "ERROR" "${TEST_DIR}" 2>&1) || rc=$?
+  if [[ $rc -ne 0 ]] \
+    && [[ "$output" =~ "Unknown option: --outpt" ]]; then
+    pass "Unknown option typos still fail clearly"
+  else
+    fail "Unknown option typos should stay hard failures" "rc=$rc output=$output"
+  fi
+}
+
 # ============================================================================
 # Performance and Stress Tests
 # ============================================================================
@@ -896,6 +936,9 @@ main() {
   run_test "Invalid max-matches" test_invalid_max_matches
   run_test "Invalid max-files" test_invalid_max_files
   run_test "Unknown option" test_unknown_option
+  run_test "Dash-prefixed query hint" test_dash_prefixed_query_hint
+  run_test "Literal dash query with --" test_literal_dash_query_with_double_dash
+  run_test "Unknown option typo stays clear" test_unknown_option_typo_still_fails_clearly
 
   # Performance
   run_test "Deep directory structure" test_deep_directory_structure
