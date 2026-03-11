@@ -91,6 +91,7 @@ install_from_package() {
 verify_install() {
   local path_prefix="$PATH"
   local verify_home=""
+  local rc=0
   if [[ "$MODE" == "source" ]]; then
     path_prefix="${PREFIX}/bin:${path_prefix}"
     export PATH="$path_prefix"
@@ -103,8 +104,9 @@ verify_install() {
   done
 
   verify_home="$(mktemp -d)"
-  HOME="$verify_home" fcase list -o json >/dev/null
+  HOME="$verify_home" fcase list -o json >/dev/null || rc=$?
   rm -rf "$verify_home"
+  (( rc == 0 )) || return "$rc"
 }
 
 print_next_steps() {

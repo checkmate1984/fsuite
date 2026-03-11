@@ -434,15 +434,22 @@ test_complete_agent_workflow() {
   local content
   content=$("${FSEARCH}" --output paths "*.py" "${TEST_DIR}" | "${FCONTENT}" --output json "TODO" 2>&1)
 
-  local case_home
+  local case_home handoff rc=0
   case_home="$(mktemp -d)"
 
   # Step 5: Preserve investigation continuity
-  HOME="${case_home}" FSUITE_TELEMETRY=0 "${FCASE}" init agent-workflow --goal "Track TODO seam" >/dev/null 2>&1
-  HOME="${case_home}" FSUITE_TELEMETRY=0 "${FCASE}" next agent-workflow --body "Inspect mapped TODO candidates" >/dev/null 2>&1
-  local handoff
-  handoff=$(HOME="${case_home}" FSUITE_TELEMETRY=0 "${FCASE}" handoff agent-workflow -o json 2>&1)
+  handoff="$(
+    {
+      HOME="${case_home}" FSUITE_TELEMETRY=0 "${FCASE}" init agent-workflow --goal "Track TODO seam" >/dev/null 2>&1
+      HOME="${case_home}" FSUITE_TELEMETRY=0 "${FCASE}" next agent-workflow --body "Inspect mapped TODO candidates" >/dev/null 2>&1
+      HOME="${case_home}" FSUITE_TELEMETRY=0 "${FCASE}" handoff agent-workflow -o json 2>&1
+    }
+  )" || rc=$?
   rm -rf "${case_home}"
+  (( rc == 0 )) || {
+    fail "Complete workflow continuity step should succeed" "rc=$rc output=$handoff"
+    return
+  }
 
   if [[ "$recon" =~ \"mode\":\"recon\" ]] && \
      [[ "$structure" =~ \"mode\":\"tree\" ]] && \
@@ -625,7 +632,7 @@ main() {
   echo ""
 
   # Check if tools exist
-  if [[ ! -x "${FSEARCH}" ]] || [[ ! -x "${FCONTENT}" ]] || [[ ! -x "${FTREE}" ]]; then
+  if [[ ! -x "${FSEARCH}" ]] || [[ ! -x "${FCONTENT}" ]] || [[ ! -x "${FTREE}" ]] || [[ ! -x "${FCASE}" ]]; then
     echo -e "${RED}Error: One or more tools not found or not executable${NC}"
     exit 1
   fi

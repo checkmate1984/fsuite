@@ -241,6 +241,20 @@ test_evidence_rejects_invalid_line_range() {
   fi
 }
 
+test_event_payload_json_escapes_control_chars() {
+  run_fcase init control-bug --goal "Escape control chars" >/dev/null 2>&1 || true
+  local note_body payload
+  note_body=$'bad \b formfeed \f and unit \001 markers'
+  run_fcase note control-bug --body "$note_body" >/dev/null 2>&1 || true
+  payload=$(sqlite3 "${TEST_HOME}/.fsuite/fcase.db" "SELECT payload_json FROM events WHERE event_type = 'note' ORDER BY id DESC LIMIT 1;")
+
+  if python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert "body" in data' <<< "$payload" 2>/dev/null; then
+    pass "event payload JSON escapes control characters safely"
+  else
+    fail "event payload JSON should remain valid when note bodies contain control chars" "payload=$payload"
+  fi
+}
+
 test_target_import_ingests_fmap_json() {
   run_fcase init import-targets --goal "Import fmap targets" >/dev/null 2>&1 || true
   local fmap_json
@@ -298,6 +312,11 @@ main() {
   echo "Running tests..."
   echo ""
 
+  command -v python3 >/dev/null 2>&1 || {
+    echo "python3 is required for test_fcase.sh" >&2
+    exit 1
+  }
+
   setup
   trap teardown EXIT
 
@@ -318,6 +337,7 @@ main() {
   run_test test_reject_maps_to_hypothesis_rejected
   run_test test_reject_fails_without_selector
   run_test test_evidence_rejects_invalid_line_range
+  run_test test_event_payload_json_escapes_control_chars
   run_test test_target_import_ingests_fmap_json
   run_test test_evidence_import_ingests_fread_json
   run_test test_target_import_rejects_wrong_tool_json

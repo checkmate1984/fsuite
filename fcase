@@ -21,7 +21,16 @@ die() {
 has() { command -v "$1" >/dev/null 2>&1; }
 
 json_escape() {
-  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' -e ':a;N;$!ba;s/\n/\\n/g'
+  perl -CS -0pe '
+    s/\\/\\\\/g;
+    s/"/\\"/g;
+    s/\x08/\\b/g;
+    s/\x0c/\\f/g;
+    s/\n/\\n/g;
+    s/\r/\\r/g;
+    s/\t/\\t/g;
+    s/([\x00-\x07\x0b\x0e-\x1f])/sprintf("\\u%04x", ord($1))/ge;
+  '
 }
 
 sql_quote() {
@@ -729,11 +738,12 @@ cmd_target_add() {
   is_valid_target_state "$state" || die "target add --state must be one of: candidate, active, validated, ruled_out"
 
   ensure_db
-  local case_id session_id now payload rank_sql
+  local case_id session_id now payload rank_sql json_rank
   case_id="$(case_exists_or_die "$slug")"
   session_id="$(latest_session_id_for_case "$case_id")"
   now="$(now_utc)"
   if [[ -n "$rank" ]]; then rank_sql="$rank"; else rank_sql="NULL"; fi
+  if [[ "$rank_sql" == "NULL" ]]; then json_rank="null"; else json_rank="$rank_sql"; fi
   sqlite3 "$DB_FILE" <<SQL >/dev/null
 INSERT INTO targets (case_id, path, symbol, symbol_type, rank, reason, state, created_at, updated_at)
 VALUES (
@@ -753,7 +763,7 @@ SQL
     "$(printf '%s' "$path" | json_escape)" \
     "$(printf '%s' "$symbol" | json_escape)" \
     "$(printf '%s' "$symbol_type" | json_escape)" \
-    "${rank_sql/NULL/null}" \
+    "$json_rank" \
     "$(printf '%s' "$reason" | json_escape)" \
     "$(printf '%s' "$state" | json_escape)")"
   append_event "$case_id" "$session_id" "target_add" "$payload" "$now"
