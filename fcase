@@ -78,10 +78,32 @@ DESCRIPTION
 EOF
 }
 
-ensure_db() {
+db_query() {
+  local separator=""
+  if [[ "${1:-}" == "--separator" ]]; then
+    separator="${2:-}"
+    [[ -n "$separator" ]] || die "db_query requires a value for --separator"
+    shift 2
+  fi
+
   has sqlite3 || die 3 "sqlite3 is required"
   mkdir -p "$FCASE_DIR" 2>/dev/null || die "Cannot create $FCASE_DIR"
-  sqlite3 "$DB_FILE" <<'SQL' >/dev/null 2>&1
+
+  if [[ -n "$separator" ]]; then
+    { printf 'PRAGMA foreign_keys=ON;\n'; cat; } | sqlite3 -separator "$separator" "$DB_FILE"
+  else
+    { printf 'PRAGMA foreign_keys=ON;\n'; cat; } | sqlite3 "$DB_FILE"
+  fi
+}
+
+db_exec() {
+  has sqlite3 || die 3 "sqlite3 is required"
+  mkdir -p "$FCASE_DIR" 2>/dev/null || die "Cannot create $FCASE_DIR"
+  { printf 'PRAGMA foreign_keys=ON;\n'; cat; } | sqlite3 "$DB_FILE" >/dev/null
+}
+
+ensure_db() {
+  db_exec <<'SQL'
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA user_version=1;
@@ -159,12 +181,12 @@ SQL
 
 case_id_for_slug() {
   local slug="$1"
-  sqlite3 "$DB_FILE" "SELECT id FROM cases WHERE slug = $(sql_quote "$slug");"
+  db_query <<<"SELECT id FROM cases WHERE slug = $(sql_quote "$slug");"
 }
 
 latest_session_id_for_case() {
   local case_id="$1"
-  sqlite3 "$DB_FILE" "SELECT id FROM case_sessions WHERE case_id = $case_id ORDER BY id DESC LIMIT 1;"
+  db_query <<<"SELECT id FROM case_sessions WHERE case_id = $case_id ORDER BY id DESC LIMIT 1;"
 }
 
 case_exists_or_die() {
@@ -181,7 +203,7 @@ append_event() {
   local event_type="$3"
   local payload_json="$4"
   local created_at="$5"
-  sqlite3 "$DB_FILE" "INSERT INTO events (case_id, session_id, event_type, payload_json, created_at) VALUES ($case_id, ${session_id:-NULL}, $(sql_quote "$event_type"), $(sql_quote "$payload_json"), $(sql_quote "$created_at"));"
+  db_exec <<<"INSERT INTO events (case_id, session_id, event_type, payload_json, created_at) VALUES ($case_id, ${session_id:-NULL}, $(sql_quote "$event_type"), $(sql_quote "$payload_json"), $(sql_quote "$created_at"));"
 }
 
 is_valid_target_state() {
@@ -229,7 +251,7 @@ read_import_payload() {
 
 status_json() {
   local slug="$1"
-  sqlite3 "$DB_FILE" <<SQL
+  db_query <<SQL
 WITH target_case AS (
   SELECT id, slug, goal, status, priority, next_move, created_at, updated_at
   FROM cases
@@ -329,7 +351,7 @@ SQL
 
 handoff_json() {
   local slug="$1"
-  sqlite3 "$DB_FILE" <<SQL
+  db_query <<SQL
 WITH target_case AS (
   SELECT id, slug, goal, status, priority, next_move, created_at, updated_at
   FROM cases
@@ -406,7 +428,7 @@ SQL
 
 export_json() {
   local slug="$1"
-  sqlite3 "$DB_FILE" <<SQL
+  db_query <<SQL
 WITH target_case AS (
   SELECT id, slug, goal, status, priority, next_move, created_at, updated_at
   FROM cases
@@ -558,7 +580,7 @@ cmd_init() {
   escaped_goal="$(sql_quote "$goal")"
   escaped_priority="$(sql_quote "$priority")"
 
-  if ! sqlite3 "$DB_FILE" <<SQL >/dev/null 2>&1
+  if ! db_exec <<SQL
 PRAGMA foreign_keys=ON;
 BEGIN IMMEDIATE;
 INSERT INTO cases (slug, goal, status, priority, next_move, created_at, updated_at)
@@ -580,7 +602,7 @@ SQL
   fi
 
   if [[ "$output" == "json" ]]; then
-    sqlite3 "$DB_FILE" <<SQL
+    db_query <<SQL
 SELECT json_object(
   'case', (
     SELECT json_object(
@@ -647,7 +669,7 @@ cmd_list() {
 
   ensure_db
   if [[ "$output" == "json" ]]; then
-    sqlite3 "$DB_FILE" <<'SQL'
+    db_query <<'SQL'
 SELECT json_object(
   'cases',
   COALESCE((
@@ -671,9 +693,9 @@ SELECT json_object(
 SQL
   else
     local count
-    count="$(sqlite3 "$DB_FILE" 'SELECT COUNT(*) FROM cases;')"
+    count="$(db_query <<<'SELECT COUNT(*) FROM cases;')"
     echo "Cases: ${count}"
-    sqlite3 -separator ' | ' "$DB_FILE" "SELECT slug, status, priority, goal FROM cases ORDER BY updated_at DESC, id DESC;"
+    db_query --separator ' | ' <<<"SELECT slug, status, priority, goal FROM cases ORDER BY updated_at DESC, id DESC;"
   fi
 }
 
@@ -705,7 +727,7 @@ cmd_status() {
     status_json "$slug"
   else
     local details
-    details="$(sqlite3 -separator '|' "$DB_FILE" "SELECT slug, goal, status, priority, next_move, updated_at FROM cases WHERE slug = $(sql_quote "$slug");")"
+    details="$(db_query --separator '|' <<<"SELECT slug, goal, status, priority, next_move, updated_at FROM cases WHERE slug = $(sql_quote "$slug");")"
     IFS='|' read -r case_slug case_goal case_status case_priority case_next case_updated <<<"$details"
     echo "Case: ${case_slug}"
     echo "Goal: ${case_goal}"
@@ -744,7 +766,7 @@ cmd_target_add() {
   now="$(now_utc)"
   if [[ -n "$rank" ]]; then rank_sql="$rank"; else rank_sql="NULL"; fi
   if [[ "$rank_sql" == "NULL" ]]; then json_rank="null"; else json_rank="$rank_sql"; fi
-  sqlite3 "$DB_FILE" <<SQL >/dev/null
+  db_exec <<SQL
 INSERT INTO targets (case_id, path, symbol, symbol_type, rank, reason, state, created_at, updated_at)
 VALUES (
   $case_id,
@@ -931,7 +953,7 @@ cmd_evidence() {
   case_id="$(case_exists_or_die "$slug")"
   session_id="$(latest_session_id_for_case "$case_id")"
   now="$(now_utc)"
-  sqlite3 "$DB_FILE" <<SQL >/dev/null
+  db_exec <<SQL
 INSERT INTO evidence (case_id, tool, path, symbol, line_start, line_end, match_line, summary, body, payload_json, fingerprint, created_at)
 VALUES (
   $case_id,
@@ -1095,7 +1117,7 @@ cmd_hypothesis_add() {
   case_id="$(case_exists_or_die "$slug")"
   session_id="$(latest_session_id_for_case "$case_id")"
   now="$(now_utc)"
-  sqlite3 "$DB_FILE" <<SQL >/dev/null
+  db_exec <<SQL
 INSERT INTO hypotheses (case_id, body, status, confidence, reason, created_at, updated_at)
 VALUES (
   $case_id,
@@ -1134,7 +1156,7 @@ cmd_hypothesis_set() {
   ensure_db
   local case_id session_id now count_sql update_confidence
   case_id="$(case_exists_or_die "$slug")"
-  count_sql="$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM hypotheses WHERE id = $hypothesis_id AND case_id = $case_id;")"
+  count_sql="$(db_query <<<"SELECT COUNT(*) FROM hypotheses WHERE id = $hypothesis_id AND case_id = $case_id;")"
   [[ "$count_sql" == "1" ]] || die "hypothesis not found for case: $hypothesis_id"
   session_id="$(latest_session_id_for_case "$case_id")"
   now="$(now_utc)"
@@ -1143,8 +1165,8 @@ cmd_hypothesis_set() {
   else
     update_confidence=""
   fi
-  sqlite3 "$DB_FILE" "UPDATE hypotheses SET status = $(sql_quote "$status"), reason = $(sql_quote "$reason"), updated_at = $(sql_quote "$now")${update_confidence} WHERE id = $hypothesis_id AND case_id = $case_id;"
-  sqlite3 "$DB_FILE" "UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
+  db_exec <<<"UPDATE hypotheses SET status = $(sql_quote "$status"), reason = $(sql_quote "$reason"), updated_at = $(sql_quote "$now")${update_confidence} WHERE id = $hypothesis_id AND case_id = $case_id;"
+  db_exec <<<"UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
   append_event "$case_id" "$session_id" "hypothesis_set" "$(printf '{"id":%s,"status":"%s","reason":"%s","confidence":"%s"}' "$hypothesis_id" "$(printf '%s' "$status" | json_escape)" "$(printf '%s' "$reason" | json_escape)" "$(printf '%s' "$confidence" | json_escape)")" "$now"
   echo "Updated hypothesis ${hypothesis_id} for ${slug}"
 }
@@ -1177,19 +1199,19 @@ cmd_reject() {
 
   if [[ -n "$target_id" ]]; then
     [[ "$target_id" =~ ^[0-9]+$ ]] || die "reject --target-id must be an integer"
-    count_sql="$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM targets WHERE id = $target_id AND case_id = $case_id;")"
+    count_sql="$(db_query <<<"SELECT COUNT(*) FROM targets WHERE id = $target_id AND case_id = $case_id;")"
     [[ "$count_sql" == "1" ]] || die "target not found for case: $target_id"
-    sqlite3 "$DB_FILE" "UPDATE targets SET state = 'ruled_out', reason = $(sql_quote "$reason"), updated_at = $(sql_quote "$now") WHERE id = $target_id AND case_id = $case_id;"
+    db_exec <<<"UPDATE targets SET state = 'ruled_out', reason = $(sql_quote "$reason"), updated_at = $(sql_quote "$now") WHERE id = $target_id AND case_id = $case_id;"
     append_event "$case_id" "$session_id" "target_rejected" "$(printf '{"target_id":%s,"reason":"%s"}' "$target_id" "$(printf '%s' "$reason" | json_escape)")" "$now"
   else
     [[ "$hypothesis_id" =~ ^[0-9]+$ ]] || die "reject --hypothesis-id must be an integer"
-    count_sql="$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM hypotheses WHERE id = $hypothesis_id AND case_id = $case_id;")"
+    count_sql="$(db_query <<<"SELECT COUNT(*) FROM hypotheses WHERE id = $hypothesis_id AND case_id = $case_id;")"
     [[ "$count_sql" == "1" ]] || die "hypothesis not found for case: $hypothesis_id"
-    sqlite3 "$DB_FILE" "UPDATE hypotheses SET status = 'rejected', reason = $(sql_quote "$reason"), updated_at = $(sql_quote "$now") WHERE id = $hypothesis_id AND case_id = $case_id;"
+    db_exec <<<"UPDATE hypotheses SET status = 'rejected', reason = $(sql_quote "$reason"), updated_at = $(sql_quote "$now") WHERE id = $hypothesis_id AND case_id = $case_id;"
     append_event "$case_id" "$session_id" "hypothesis_rejected" "$(printf '{"hypothesis_id":%s,"reason":"%s"}' "$hypothesis_id" "$(printf '%s' "$reason" | json_escape)")" "$now"
   fi
 
-  sqlite3 "$DB_FILE" "UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
+  db_exec <<<"UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
   echo "Rejected item in ${slug}"
 }
 
@@ -1220,7 +1242,7 @@ cmd_note() {
   now="$(now_utc)"
   payload="$(printf '{"body":"%s"}' "$(printf '%s' "$body" | json_escape)")"
   append_event "$case_id" "$session_id" "note" "$payload" "$now"
-  sqlite3 "$DB_FILE" "UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
+  db_exec <<<"UPDATE cases SET updated_at = $(sql_quote "$now") WHERE id = $case_id;"
   echo "Added note to ${slug}"
 }
 
@@ -1254,7 +1276,7 @@ cmd_next() {
   [[ -n "$case_id" ]] || die "case not found: $slug"
   session_id="$(latest_session_id_for_case "$case_id")"
   now="$(now_utc)"
-  sqlite3 "$DB_FILE" "UPDATE cases SET next_move = $(sql_quote "$body"), updated_at = $(sql_quote "$now") WHERE id = $case_id;"
+  db_exec <<<"UPDATE cases SET next_move = $(sql_quote "$body"), updated_at = $(sql_quote "$now") WHERE id = $case_id;"
   payload="$(printf '{"next_move":"%s"}' "$(printf '%s' "$body" | json_escape)")"
   append_event "$case_id" "$session_id" "next_move_set" "$payload" "$now"
   if [[ "$output" == "json" ]]; then

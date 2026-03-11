@@ -92,6 +92,7 @@ verify_install() {
   local path_prefix="$PATH"
   local verify_home=""
   local rc=0
+  local verify_output=""
   if [[ "$MODE" == "source" ]]; then
     path_prefix="${PREFIX}/bin:${path_prefix}"
     export PATH="$path_prefix"
@@ -104,8 +105,20 @@ verify_install() {
   done
 
   verify_home="$(mktemp -d)"
-  HOME="$verify_home" fcase list -o json >/dev/null || rc=$?
+  if ! verify_output="$(sqlite3 ':memory:' 'SELECT 1;' 2>&1 >/dev/null)"; then
+    rm -rf "$verify_home"
+    echo "install.sh: sqlite3 must be functional for fcase verification: ${verify_output:-sqlite3 probe failed}" >&2
+    return 3
+  fi
+
+  HOME="$verify_home" fcase list -o json >/dev/null 2>"${verify_home}/fcase-verify.err" || rc=$?
+  if (( rc != 0 )); then
+    verify_output="$(cat "${verify_home}/fcase-verify.err" 2>/dev/null || true)"
+  fi
   rm -rf "$verify_home"
+  if (( rc != 0 )) && [[ -n "$verify_output" ]]; then
+    echo "install.sh: fcase verification failed: ${verify_output}" >&2
+  fi
   (( rc == 0 )) || return "$rc"
 }
 

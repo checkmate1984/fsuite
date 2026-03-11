@@ -137,6 +137,28 @@ test_installed_fcase_runs_case_commands() {
   fi
 }
 
+test_verify_install_surfaces_sqlite3_failures() {
+  local prefix="${TEST_ROOT}/verify-sqlite"
+  local shim_dir="${TEST_ROOT}/shim-bin"
+  mkdir -p "${shim_dir}"
+
+  cat > "${shim_dir}/sqlite3" <<'EOF'
+#!/usr/bin/env bash
+echo "sqlite3 shim failure" >&2
+exit 127
+EOF
+  chmod +x "${shim_dir}/sqlite3"
+
+  local output rc=0
+  output=$(PATH="${shim_dir}:$PATH" FSUITE_TELEMETRY=0 "${INSTALLER}" --prefix "$prefix" 2>&1) || rc=$?
+
+  if [[ $rc -ne 0 ]] && [[ "$output" == *"sqlite3 shim failure"* ]]; then
+    pass "Installer verification surfaces sqlite3 runtime failures"
+  else
+    fail "Installer verification should surface sqlite3 runtime failures" "rc=$rc output=$output"
+  fi
+}
+
 test_fsuite_help_explains_flow() {
   local prefix="${TEST_ROOT}/meta"
   FSUITE_TELEMETRY=0 "${INSTALLER}" --prefix "$prefix" >/dev/null 2>&1 || {
@@ -216,6 +238,7 @@ main() {
   run_test "Prefix install copies tools and assets" test_prefix_install_copies_tools_and_assets
   run_test "Installed tools report versions" test_prefix_install_versions_work
   run_test "Installed fcase runs real commands" test_installed_fcase_runs_case_commands
+  run_test "Installer surfaces sqlite3 verify failures" test_verify_install_surfaces_sqlite3_failures
   run_test "fsuite command explains flow" test_fsuite_help_explains_flow
   run_test "Installed fmetrics finds predict helper" test_installed_fmetrics_finds_predict_helper
   run_test "Debian packaging declares fcase runtime contract" test_debian_packaging_declares_fcase_runtime_contract

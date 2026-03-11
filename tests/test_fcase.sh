@@ -255,6 +255,27 @@ test_event_payload_json_escapes_control_chars() {
   fi
 }
 
+test_source_routes_db_access_through_fk_helpers() {
+  local rc=0
+  python3 - "${FCASE}" <<'PY' || rc=$?
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text()
+assert "db_query() {" in text
+assert "db_exec() {" in text
+assert text.count('sqlite3 "$DB_FILE"') == 2, text.count('sqlite3 "$DB_FILE"')
+assert text.count('PRAGMA foreign_keys=ON;') >= 3
+assert text.count('conn.execute("PRAGMA foreign_keys=ON")') >= 2
+PY
+
+  if [[ $rc -eq 0 ]]; then
+    pass "fcase routes DB access through foreign-key-aware helpers"
+  else
+    fail "fcase should route DB access through foreign-key-aware helpers"
+  fi
+}
+
 test_target_import_ingests_fmap_json() {
   run_fcase init import-targets --goal "Import fmap targets" >/dev/null 2>&1 || true
   local fmap_json
@@ -338,6 +359,7 @@ main() {
   run_test test_reject_fails_without_selector
   run_test test_evidence_rejects_invalid_line_range
   run_test test_event_payload_json_escapes_control_chars
+  run_test test_source_routes_db_access_through_fk_helpers
   run_test test_target_import_ingests_fmap_json
   run_test test_evidence_import_ingests_fread_json
   run_test test_target_import_rejects_wrong_tool_json
