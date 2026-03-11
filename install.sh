@@ -90,6 +90,7 @@ install_from_package() {
 
 verify_install() {
   local path_prefix="$PATH"
+  local verify_home=""
   if [[ "$MODE" == "source" ]]; then
     path_prefix="${PREFIX}/bin:${path_prefix}"
     export PATH="$path_prefix"
@@ -100,6 +101,10 @@ verify_install() {
   for tool in "${TOOLS[@]}"; do
     "${tool}" --version
   done
+
+  verify_home="$(mktemp -d)"
+  HOME="$verify_home" fcase list -o json >/dev/null
+  rm -rf "$verify_home"
 }
 
 print_next_steps() {
@@ -115,9 +120,19 @@ print_next_steps() {
     echo "  Package: ${PACKAGE_PATH}"
   fi
   echo
-  echo "Recommended optional dependencies:"
-  echo "  Debian/Ubuntu: sudo apt install tree ripgrep fd-find sqlite3 python3 perl"
-  echo "  macOS:         brew install tree ripgrep fd sqlite python3"
+  echo "Required runtime dependencies by tool:"
+  echo "  sqlite3  - required by fcase and fmetrics"
+  echo "  ripgrep  - required by fcontent"
+  echo "  tree     - required by ftree tree mode"
+  echo "  perl     - required by fread"
+  echo
+  echo "Recommended extras:"
+  echo "  fd-find  - faster backend for fsearch"
+  echo "  python3  - required for fmetrics predict and fcase imports"
+  echo
+  echo "Install suggestions:"
+  echo "  Debian/Ubuntu: sudo apt install sqlite3 ripgrep tree perl fd-find python3"
+  echo "  macOS:         brew install sqlite ripgrep tree python3"
 }
 
 while [[ $# -gt 0 ]]; do

@@ -27,8 +27,8 @@ run_test_suite() {
   echo -e "${BLUE}======================================${NC}"
   echo ""
 
-  if [[ ! -x "${test_script}" ]]; then
-    echo -e "${RED}Error: ${test_script} not found or not executable${NC}"
+  if [[ ! -f "${test_script}" ]]; then
+    echo -e "${RED}Error: ${test_script} not found${NC}"
     return 1
   fi
 

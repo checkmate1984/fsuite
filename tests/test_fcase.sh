@@ -241,6 +241,55 @@ test_evidence_rejects_invalid_line_range() {
   fi
 }
 
+test_target_import_ingests_fmap_json() {
+  run_fcase init import-targets --goal "Import fmap targets" >/dev/null 2>&1 || true
+  local fmap_json
+  fmap_json=$(cat <<'EOF'
+{"tool":"fmap","version":"2.1.0","mode":"single_file","path":"/repo/src/auth.py","files":[{"path":"/repo/src/auth.py","language":"python","symbol_count":2,"symbols":[{"line":10,"type":"function","indent":0,"text":"authenticate(user):"},{"line":24,"type":"class","indent":0,"text":"AuthHandler:"}]}]}
+EOF
+)
+
+  local output rc=0
+  output=$(printf '%s' "$fmap_json" | run_fcase target import import-targets 2>&1) || rc=$?
+  local status_output
+  status_output=$(run_fcase status import-targets -o json 2>&1 || true)
+
+  if [[ $rc -eq 0 ]] && python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); targets=data["targets"]; assert len(targets) == 2; assert any(t["path"] == "/repo/src/auth.py" and t["symbol_type"] == "function" and "line 10" in (t["reason"] or "") for t in targets); assert any(t["symbol_type"] == "class" for t in targets)' <<< "$status_output" 2>/dev/null; then
+    pass "target import ingests fmap JSON into structured targets"
+  else
+    fail "target import should ingest fmap JSON" "rc=$rc output=$output status=$status_output"
+  fi
+}
+
+test_evidence_import_ingests_fread_json() {
+  run_fcase init import-evidence --goal "Import fread evidence" >/dev/null 2>&1 || true
+  local fread_json
+  fread_json=$(cat <<'EOF'
+{"tool":"fread","version":"2.1.0","mode":"around","chunks":[{"path":"/repo/src/auth.py","start_line":40,"end_line":52,"match_line":44,"content":["40  def authenticate(user):","41      if not user:","44          return deny()"]}],"files":[{"path":"/repo/src/auth.py","status":"read"}],"warnings":[],"errors":[]}
+EOF
+)
+
+  local output rc=0
+  output=$(printf '%s' "$fread_json" | run_fcase evidence import import-evidence 2>&1) || rc=$?
+  local status_output
+  status_output=$(run_fcase status import-evidence -o json 2>&1 || true)
+
+  if [[ $rc -eq 0 ]] && python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); evidence=data["evidence"]; assert len(evidence) == 1; ev=evidence[0]; assert ev["tool"] == "fread"; assert ev["line_start"] == 40; assert ev["line_end"] == 52; assert ev["match_line"] == 44; assert "return deny()" in ev["body"]; assert ev["payload_json"] is not None' <<< "$status_output" 2>/dev/null; then
+    pass "evidence import ingests fread JSON into structured evidence"
+  else
+    fail "evidence import should ingest fread JSON" "rc=$rc output=$output status=$status_output"
+  fi
+}
+
+test_target_import_rejects_wrong_tool_json() {
+  run_fcase init bad-import --goal "Reject wrong import tool" >/dev/null 2>&1 || true
+  if printf '%s' '{"tool":"fread","chunks":[]}' | run_fcase target import bad-import >/dev/null 2>&1; then
+    fail "target import should reject non-fmap JSON"
+  else
+    pass "target import rejects mismatched tool JSON"
+  fi
+}
+
 main() {
   echo "======================================"
   echo "  fcase Test Suite"
@@ -269,6 +318,9 @@ main() {
   run_test test_reject_maps_to_hypothesis_rejected
   run_test test_reject_fails_without_selector
   run_test test_evidence_rejects_invalid_line_range
+  run_test test_target_import_ingests_fmap_json
+  run_test test_evidence_import_ingests_fread_json
+  run_test test_target_import_rejects_wrong_tool_json
 
   echo ""
   echo "======================================"

@@ -11,8 +11,8 @@ Rules-Requires-Root: no
 
 Package: fsuite
 Architecture: all
-Depends: ${misc:Depends}, bash (>= 4.0), coreutils, findutils, perl
-Recommends: tree, ripgrep, fd-find, python3, sqlite3
+Depends: ${misc:Depends}, bash (>= 4.0), coreutils, findutils, perl, sqlite3
+Recommends: tree, ripgrep, fd-find, python3
 Description: Filesystem investigation toolkit for humans and AI agents
  fsuite provides a suite-level help command plus eight composable CLI
  tools that turn filesystem reconnaissance, continuity, and editing into

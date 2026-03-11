@@ -43,6 +43,17 @@ USAGE
   fcase init <slug> --goal ... [--priority ...] [-o pretty|json]
   fcase list [-o pretty|json]
   fcase status <slug> [-o pretty|json]
+  fcase note <slug> --body ...
+  fcase next <slug> --body ... [-o pretty|json]
+  fcase handoff <slug> [-o pretty|json]
+  fcase export <slug> -o json
+  fcase target add <slug> --path ... [--symbol ... --symbol-type ... --rank ... --reason ... --state ...]
+  fcase target import <slug> [-o pretty|json] [--input <path|- >]
+  fcase evidence <slug> --tool ... [--path ... --symbol ... --lines <start:end> --match-line ... --summary ...] (--body ... | --body-file <path>)
+  fcase evidence import <slug> [-o pretty|json] [--input <path|- >]
+  fcase hypothesis add <slug> --body ... [--confidence ...]
+  fcase hypothesis set <slug> --id ... --status ... [--reason ... --confidence ...]
+  fcase reject <slug> (--target-id <id> | --hypothesis-id <id>) [--reason ...]
 
 DESCRIPTION
   fcase preserves investigation state once the seam is known:
@@ -53,6 +64,8 @@ DESCRIPTION
     next         Update the next best move
     handoff      Generate a concise handoff packet
     export       Export the full case envelope
+    target import    Import structured targets from fmap JSON
+    evidence import  Import structured evidence from fread JSON
 EOF
 }
 
@@ -185,6 +198,24 @@ parse_lines_range() {
   (( end > 0 )) || return 1
   (( start <= end )) || return 1
   printf '%s|%s' "$start" "$end"
+}
+
+read_import_payload() {
+  local input_path="${1:-}"
+  if [[ -n "$input_path" ]]; then
+    if [[ "$input_path" == "-" ]]; then
+      cat
+    else
+      [[ -f "$input_path" ]] || die "import input file not found: $input_path"
+      cat "$input_path"
+    fi
+    return 0
+  fi
+
+  if [[ -t 0 ]]; then
+    die "import requires piped JSON or --input <path|- >"
+  fi
+  cat
 }
 
 status_json() {
@@ -729,6 +760,113 @@ SQL
   echo "Added target to ${slug}"
 }
 
+cmd_target_import() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "target import requires <slug>"
+
+  local output="$DEFAULT_OUTPUT" input_path=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output) output="${2:-}"; shift 2 ;;
+      --input) input_path="${2:-}"; shift 2 ;;
+      *) die "Unknown option for target import: $1" ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+  has python3 || die 3 "python3 is required for target import"
+
+  ensure_db
+  local case_id session_id now input_json err_file result_json rc=0 imported err_msg
+  case_id="$(case_exists_or_die "$slug")"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  input_json="$(read_import_payload "$input_path")"
+  err_file="$(mktemp)"
+  result_json="$(IMPORT_JSON="$input_json" python3 - "$DB_FILE" "$case_id" "${session_id:-}" "$now" 2>"$err_file" <<'PY'
+import json
+import os
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+case_id = int(sys.argv[2])
+session_id = None if sys.argv[3] in ("", "NULL") else int(sys.argv[3])
+now = sys.argv[4]
+
+try:
+    payload = json.loads(os.environ.get("IMPORT_JSON", ""))
+except json.JSONDecodeError as exc:
+    print(f"target import requires valid JSON: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+if payload.get("tool") != "fmap":
+    print("target import requires fmap JSON input", file=sys.stderr)
+    sys.exit(2)
+
+files = payload.get("files")
+if not isinstance(files, list):
+    print("target import requires fmap JSON with a files array", file=sys.stderr)
+    sys.exit(2)
+
+conn = sqlite3.connect(db_path)
+conn.execute("PRAGMA foreign_keys=ON")
+imported = 0
+
+try:
+    for file_entry in files:
+        if not isinstance(file_entry, dict):
+            continue
+        path = file_entry.get("path") or payload.get("path") or ""
+        for symbol in file_entry.get("symbols") or []:
+            if not isinstance(symbol, dict):
+                continue
+            text = symbol.get("text") or ""
+            symbol_type = symbol.get("type") or ""
+            line = symbol.get("line")
+            reason = f"Imported from fmap line {line}" if isinstance(line, int) and line > 0 else "Imported from fmap"
+            conn.execute(
+                """
+                INSERT INTO targets (case_id, path, symbol, symbol_type, rank, reason, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, NULL, ?, 'candidate', ?, ?)
+                """,
+                (case_id, path, text, symbol_type, reason, now, now),
+            )
+            imported += 1
+    if imported == 0:
+        print("target import found no symbols in fmap JSON", file=sys.stderr)
+        sys.exit(2)
+
+    conn.execute("UPDATE cases SET updated_at = ? WHERE id = ?", (now, case_id))
+    event_payload = json.dumps({"source_tool": "fmap", "imported_targets": imported}, separators=(",", ":"))
+    conn.execute(
+        """
+        INSERT INTO events (case_id, session_id, event_type, payload_json, created_at)
+        VALUES (?, ?, 'target_import', ?, ?)
+        """,
+        (case_id, session_id, event_payload, now),
+    )
+    conn.commit()
+finally:
+    conn.close()
+
+json.dump({"imported": imported, "event_type": "target_import"}, sys.stdout, separators=(",", ":"))
+PY
+)" || rc=$?
+  err_msg="$(cat "$err_file")"
+  rm -f "$err_file"
+  (( rc == 0 )) || die "${err_msg:-target import failed}"
+
+  imported="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["imported"])' <<< "$result_json" 2>/dev/null || printf '0')"
+  if [[ "$output" == "json" ]]; then
+    printf '{"case":{"slug":"%s"},"imported":%s,"event":{"event_type":"target_import"}}\n' \
+      "$(printf '%s' "$slug" | json_escape)" \
+      "$imported"
+  else
+    echo "Imported ${imported} targets into ${slug}"
+  fi
+}
+
 cmd_evidence() {
   local slug="${1:-}"
   shift || true
@@ -808,6 +946,123 @@ SQL
     "$(printf '%s' "$summary" | json_escape)")"
   append_event "$case_id" "$session_id" "evidence_add" "$payload" "$now"
   echo "Added evidence to ${slug}"
+}
+
+cmd_evidence_import() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "evidence import requires <slug>"
+
+  local output="$DEFAULT_OUTPUT" input_path=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output) output="${2:-}"; shift 2 ;;
+      --input) input_path="${2:-}"; shift 2 ;;
+      *) die "Unknown option for evidence import: $1" ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+  has python3 || die 3 "python3 is required for evidence import"
+
+  ensure_db
+  local case_id session_id now input_json err_file result_json rc=0 imported err_msg
+  case_id="$(case_exists_or_die "$slug")"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+  input_json="$(read_import_payload "$input_path")"
+  err_file="$(mktemp)"
+  result_json="$(IMPORT_JSON="$input_json" python3 - "$DB_FILE" "$case_id" "${session_id:-}" "$now" 2>"$err_file" <<'PY'
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+case_id = int(sys.argv[2])
+session_id = None if sys.argv[3] in ("", "NULL") else int(sys.argv[3])
+now = sys.argv[4]
+
+try:
+    payload = json.loads(os.environ.get("IMPORT_JSON", ""))
+except json.JSONDecodeError as exc:
+    print(f"evidence import requires valid JSON: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+if payload.get("tool") != "fread":
+    print("evidence import requires fread JSON input", file=sys.stderr)
+    sys.exit(2)
+
+chunks = payload.get("chunks")
+if not isinstance(chunks, list):
+    print("evidence import requires fread JSON with a chunks array", file=sys.stderr)
+    sys.exit(2)
+
+conn = sqlite3.connect(db_path)
+conn.execute("PRAGMA foreign_keys=ON")
+imported = 0
+
+try:
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        path = chunk.get("path") or ""
+        start_line = chunk.get("start_line")
+        end_line = chunk.get("end_line")
+        match_line = chunk.get("match_line")
+        content_lines = chunk.get("content") or []
+        body = "\n".join(str(line) for line in content_lines)
+        if not body:
+            continue
+        summary = "Imported from fread chunk"
+        if isinstance(match_line, int) and match_line > 0:
+            summary = f"Imported from fread around line {match_line}"
+        payload_json = json.dumps(chunk, separators=(",", ":"))
+        fingerprint = hashlib.sha256(
+            f"{path}\0{start_line}\0{end_line}\0{match_line}\0{body}".encode("utf-8")
+        ).hexdigest()
+        conn.execute(
+            """
+            INSERT INTO evidence (
+              case_id, tool, path, symbol, line_start, line_end, match_line,
+              summary, body, payload_json, fingerprint, created_at
+            ) VALUES (?, 'fread', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (case_id, path, start_line, end_line, match_line, summary, body, payload_json, fingerprint, now),
+        )
+        imported += 1
+    if imported == 0:
+        print("evidence import found no chunks with content in fread JSON", file=sys.stderr)
+        sys.exit(2)
+
+    conn.execute("UPDATE cases SET updated_at = ? WHERE id = ?", (now, case_id))
+    event_payload = json.dumps({"source_tool": "fread", "imported_evidence": imported}, separators=(",", ":"))
+    conn.execute(
+        """
+        INSERT INTO events (case_id, session_id, event_type, payload_json, created_at)
+        VALUES (?, ?, 'evidence_import', ?, ?)
+        """,
+        (case_id, session_id, event_payload, now),
+    )
+    conn.commit()
+finally:
+    conn.close()
+
+json.dump({"imported": imported, "event_type": "evidence_import"}, sys.stdout, separators=(",", ":"))
+PY
+)" || rc=$?
+  err_msg="$(cat "$err_file")"
+  rm -f "$err_file"
+  (( rc == 0 )) || die "${err_msg:-evidence import failed}"
+
+  imported="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["imported"])' <<< "$result_json" 2>/dev/null || printf '0')"
+  if [[ "$output" == "json" ]]; then
+    printf '{"case":{"slug":"%s"},"imported":%s,"event":{"event_type":"evidence_import"}}\n' \
+      "$(printf '%s' "$slug" | json_escape)" \
+      "$imported"
+  else
+    echo "Imported ${imported} evidence entries into ${slug}"
+  fi
 }
 
 cmd_hypothesis_add() {
@@ -1099,6 +1354,10 @@ main() {
           shift
           cmd_target_add "$@"
           ;;
+        import)
+          shift
+          cmd_target_import "$@"
+          ;;
         *)
           die 2 "unknown target subcommand: ${1:-}"
           ;;
@@ -1106,7 +1365,15 @@ main() {
       ;;
     evidence)
       shift
-      cmd_evidence "$@"
+      case "${1:-}" in
+        import)
+          shift
+          cmd_evidence_import "$@"
+          ;;
+        *)
+          cmd_evidence "$@"
+          ;;
+      esac
       ;;
     hypothesis)
       shift

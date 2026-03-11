@@ -190,6 +190,7 @@ Examples
   # Preserve continuity before editing or handing off
   fcase init auth-seam --goal "Trace authenticate flow"
   fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 --summary "Authenticate branch" --body "..."
+  fread -o json /project/src/auth.py --around "def authenticate" -A 20 | fcase evidence import auth-seam
   fcase next auth-seam --body "Patch denial branch after reviewing symbol map"
 
   # Preview and apply a patch

@@ -103,7 +103,7 @@ BEFORE fsuite:
   Spawn Explore agent -> 10-15 internal tool calls -> still blind on structure
 
 AFTER fsuite:
-  ftree --snapshot -o json  ->  fsearch -o paths  ->  fmap -o json  ->  fread -o json  ->  fcase status -o json  ->  fedit -o json
+  ftree --snapshot -o json  ->  fsearch -o paths  ->  fmap -o json  ->  fread -o json  ->  fcase init auth-seam --goal "Trace authenticate flow"  ->  fedit -o json
   6-7 calls. Structural context, bounded reads, durable continuity, and previewable edits. Still dramatically fewer tool invocations.
 ```
 
@@ -111,7 +111,7 @@ And once those reads are happening in the real world:
 
 ```text
 AFTER execution:
-  ... -> fcontent -o json (only if exact text confirmation is needed) -> fcase handoff -o json -> fedit -o json -> fmetrics import -> fmetrics stats / predict
+  ... -> fcontent -o json (only if exact text confirmation is needed) -> fcase handoff auth-seam -o json -> fedit -o json -> fmetrics import -> fmetrics stats / predict
   Search inside the narrowed set, preserve what matters, patch surgically, then measure what actually happened and plan the next pass.
 ```
 
@@ -675,6 +675,7 @@ fcase <subcommand> [options]
 - Fast current-state reads for `status` and `handoff`
 - Typed targets, evidence, and hypotheses instead of ad hoc notes
 - Append-only events for history without making handoff reconstruct the world
+- Explicit imports from `fmap` and `fread` JSON when continuity should start from existing proof
 - Pretty or JSON output for human and agent use
 
 **Examples:**
@@ -689,6 +690,12 @@ fcase target add auth-seam --path /project/src/auth.py --symbol authenticate --s
 # Preserve proof from a targeted read
 fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 \
   --summary "Authenticate branch" --body "return deny() is bypassed in the false branch"
+
+# Import structured targets straight from fmap
+fmap -o json /project/src/auth.py | fcase target import auth-seam
+
+# Import structured evidence straight from fread
+fread -o json /project/src/auth.py --around "def authenticate" -B 5 -A 20 | fcase evidence import auth-seam
 
 # Keep the next best move current
 fcase next auth-seam --body "Patch denial branch after reviewing symbol map"
@@ -1168,6 +1175,8 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 --summary "Authenticate branch" --body "..."` | Store structured proof from a read or search |
 | `fcase hypothesis add auth-seam --body "Cleanup bug lives in tool cancellation"` | Track an open explanation |
 | `fcase reject auth-seam --hypothesis-id 1 --reason "Process survives normal completion too"` | Reject one hypothesis explicitly |
+| `fmap -o json /project/src/auth.py \| fcase target import auth-seam` | Import mapped symbols as structured targets |
+| `fread -o json /project/src/auth.py --around "def authenticate" -A 20 \| fcase evidence import auth-seam` | Import bounded reads as structured evidence |
 | `fcase next auth-seam --body "Patch denial branch after reviewing symbol map"` | Update the next best move |
 | `fcase handoff auth-seam -o json` | Emit a concise handoff packet for the next agent |
 | `fcase export auth-seam -o json` | Export the full portable case envelope |
@@ -1403,6 +1412,8 @@ These are designed for AI agents, CI pipelines, cron jobs, and automation script
 | `hypothesis add <slug>` | `--body`, `--confidence` | Add a hypothesis |
 | `hypothesis set <slug>` | `--id`, `--status`, `--reason`, `--confidence` | Update a hypothesis state |
 | `reject <slug>` | `--target-id` or `--hypothesis-id`, `--reason` | Typed alias for ruling out a target or rejecting a hypothesis |
+| `target import <slug>` | `--input <path|- >`, `-o json` | Import structured targets from `fmap -o json` |
+| `evidence import <slug>` | `--input <path|- >`, `-o json` | Import structured evidence from `fread -o json` |
 | `next <slug>` | `--body`, `-o json` | Update the next best move |
 | `handoff <slug>` | `-o json` | Emit a concise handoff packet |
 | `export <slug>` | `-o json` | Export the full case envelope |
@@ -1589,13 +1600,16 @@ This installs into `~/.local/bin` and `~/.local/share/fsuite`.
 ### Alternate: manual symlink install
 
 ```bash
-chmod +x fsearch fcontent ftree fmap fread fedit fmetrics
+chmod +x fsuite fsearch fcontent ftree fmap fread fcase fedit fmetrics
+
+sudo ln -s "$(pwd)/fsuite" /usr/local/bin/fsuite
 
 sudo ln -s "$(pwd)/fsearch" /usr/local/bin/fsearch
 sudo ln -s "$(pwd)/fcontent" /usr/local/bin/fcontent
 sudo ln -s "$(pwd)/ftree" /usr/local/bin/ftree
 sudo ln -s "$(pwd)/fmap" /usr/local/bin/fmap
 sudo ln -s "$(pwd)/fread" /usr/local/bin/fread
+sudo ln -s "$(pwd)/fcase" /usr/local/bin/fcase
 sudo ln -s "$(pwd)/fedit" /usr/local/bin/fedit
 sudo ln -s "$(pwd)/fmetrics" /usr/local/bin/fmetrics
 ```
