@@ -220,6 +220,8 @@ NOTES
   - For filenames/paths, use fsearch.
   - Quote your query if it contains spaces:
       fcontent "fatal error" /path
+  - If your literal query starts with '-', terminate options first:
+      fcontent -o json -- '--test' /path
 
 HEADLESS / AI AGENT USAGE
   Best outputs for agents:
@@ -251,6 +253,13 @@ EOF
 # Minimal JSON escape for strings
 json_escape() {
   sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' -e ':a;N;$!ba;s/\n/\\n/g'
+}
+
+dash_query_hint() {
+  cat <<'EOF'
+Query starts with '-'. If you mean a literal search term, use:
+  fcontent -o json -- '--test' /path
+EOF
 }
 
 # -------------------------
@@ -300,11 +309,16 @@ while [[ $# -gt 0 ]]; do
     --project-name)
       [[ -n "${2:-}" ]] || die "Missing value for --project-name"
       _TELEM_PROJECT_NAME="$2"; shift 2 ;;
+    --)
+      shift
+      POSITIONAL+=("$@")
+      break ;;
     --install-hints) INSTALL_HINTS=1; shift ;;
     --self-check) SELF_CHECK=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --version) echo "fcontent $VERSION"; exit 0 ;;
-    -*) die "Unknown option: $1 (try --help)" ;;
+    -*) die "Unknown option: $1 (try --help)
+$(dash_query_hint)" ;;
     *) POSITIONAL+=("$1"); shift ;;
   esac
 done
