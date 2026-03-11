@@ -4,6 +4,34 @@
 set -euo pipefail
 
 VERSION="0.1.0"
+FCASE_DIR="$HOME/.fsuite"
+DB_FILE="$FCASE_DIR/fcase.db"
+DEFAULT_OUTPUT="pretty"
+
+die() {
+  local code=1
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    code="$1"
+    shift
+  fi
+  echo "fcase: $*" >&2
+  exit "$code"
+}
+
+has() { command -v "$1" >/dev/null 2>&1; }
+
+json_escape() {
+  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' -e ':a;N;$!ba;s/\n/\\n/g'
+}
+
+sql_quote() {
+  local value="${1//\'/\'\'}"
+  printf "'%s'" "$value"
+}
+
+now_utc() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
 
 usage() {
   cat <<'EOF'
@@ -12,9 +40,9 @@ fcase — continuity and handoff ledger for fsuite investigations
 USAGE
   fcase --help
   fcase --version
-  fcase init <slug> --goal ...
-  fcase list
-  fcase status <slug>
+  fcase init <slug> --goal ... [--priority ...] [-o pretty|json]
+  fcase list [-o pretty|json]
+  fcase status <slug> [-o pretty|json]
 
 DESCRIPTION
   fcase preserves investigation state once the seam is known:
@@ -28,16 +56,414 @@ DESCRIPTION
 EOF
 }
 
-case "${1:---help}" in
-  --help|-h|help)
-    usage
-    ;;
-  --version|version)
-    echo "fcase ${VERSION}"
-    ;;
-  *)
-    echo "fcase: unknown or unimplemented subcommand: $1" >&2
-    usage >&2
-    exit 2
-    ;;
-esac
+ensure_db() {
+  has sqlite3 || die 3 "sqlite3 is required"
+  mkdir -p "$FCASE_DIR" 2>/dev/null || die "Cannot create $FCASE_DIR"
+  sqlite3 "$DB_FILE" <<'SQL' >/dev/null 2>&1
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+PRAGMA user_version=1;
+
+CREATE TABLE IF NOT EXISTS cases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug TEXT NOT NULL UNIQUE,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  priority TEXT NOT NULL DEFAULT 'normal',
+  next_move TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS case_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  actor TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS targets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  symbol TEXT,
+  symbol_type TEXT,
+  rank INTEGER,
+  reason TEXT,
+  state TEXT NOT NULL DEFAULT 'candidate',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  tool TEXT NOT NULL,
+  path TEXT,
+  symbol TEXT,
+  line_start INTEGER,
+  line_end INTEGER,
+  match_line INTEGER,
+  summary TEXT,
+  body TEXT NOT NULL,
+  payload_json TEXT,
+  fingerprint TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hypotheses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  confidence TEXT,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+  session_id INTEGER REFERENCES case_sessions(id) ON DELETE SET NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT,
+  created_at TEXT NOT NULL
+);
+SQL
+}
+
+case_id_for_slug() {
+  local slug="$1"
+  sqlite3 "$DB_FILE" "SELECT id FROM cases WHERE slug = $(sql_quote "$slug");"
+}
+
+status_json() {
+  local slug="$1"
+  sqlite3 "$DB_FILE" <<SQL
+WITH target_case AS (
+  SELECT id, slug, goal, status, priority, next_move, created_at, updated_at
+  FROM cases
+  WHERE slug = $(sql_quote "$slug")
+)
+SELECT json_object(
+  'case', (
+    SELECT json_object(
+      'id', id,
+      'slug', slug,
+      'goal', goal,
+      'status', status,
+      'priority', priority,
+      'next_move', next_move,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ) FROM target_case
+  ),
+  'active_session', (
+    SELECT json_object(
+      'id', id,
+      'actor', actor,
+      'started_at', started_at,
+      'ended_at', ended_at,
+      'summary', summary
+    )
+    FROM case_sessions
+    WHERE case_id = (SELECT id FROM target_case)
+    ORDER BY id DESC
+    LIMIT 1
+  ),
+  'targets', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'path', path,
+      'symbol', symbol,
+      'symbol_type', symbol_type,
+      'rank', rank,
+      'reason', reason,
+      'state', state,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ))
+    FROM targets
+    WHERE case_id = (SELECT id FROM target_case)
+  ), json('[]')),
+  'evidence', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'tool', tool,
+      'path', path,
+      'symbol', symbol,
+      'line_start', line_start,
+      'line_end', line_end,
+      'match_line', match_line,
+      'summary', summary,
+      'body', body,
+      'payload_json', payload_json,
+      'fingerprint', fingerprint,
+      'created_at', created_at
+    ))
+    FROM evidence
+    WHERE case_id = (SELECT id FROM target_case)
+  ), json('[]')),
+  'hypotheses', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'body', body,
+      'status', status,
+      'confidence', confidence,
+      'reason', reason,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ))
+    FROM hypotheses
+    WHERE case_id = (SELECT id FROM target_case)
+  ), json('[]')),
+  'recent_events', COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'session_id', session_id,
+      'event_type', event_type,
+      'payload_json', payload_json,
+      'created_at', created_at
+    ))
+    FROM (
+      SELECT id, session_id, event_type, payload_json, created_at
+      FROM events
+      WHERE case_id = (SELECT id FROM target_case)
+      ORDER BY id DESC
+      LIMIT 10
+    )
+  ), json('[]'))
+);
+SQL
+}
+
+cmd_init() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "init requires <slug>"
+
+  local goal=""
+  local priority="normal"
+  local output="$DEFAULT_OUTPUT"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --goal)
+        goal="${2:-}"
+        shift 2
+        ;;
+      --priority)
+        priority="${2:-}"
+        shift 2
+        ;;
+      -o|--output)
+        output="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for init: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$goal" ]] || die "init requires --goal"
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+
+  local now actor escaped_slug escaped_goal escaped_priority
+  now="$(now_utc)"
+  actor="${USER:-unknown}"
+  escaped_slug="$(sql_quote "$slug")"
+  escaped_goal="$(sql_quote "$goal")"
+  escaped_priority="$(sql_quote "$priority")"
+
+  if ! sqlite3 "$DB_FILE" <<SQL >/dev/null 2>&1
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
+INSERT INTO cases (slug, goal, status, priority, next_move, created_at, updated_at)
+VALUES (${escaped_slug}, ${escaped_goal}, 'open', ${escaped_priority}, '', $(sql_quote "$now"), $(sql_quote "$now"));
+INSERT INTO case_sessions (case_id, started_at, ended_at, actor, summary)
+VALUES (last_insert_rowid(), $(sql_quote "$now"), NULL, $(sql_quote "$actor"), '');
+INSERT INTO events (case_id, session_id, event_type, payload_json, created_at)
+VALUES (
+  (SELECT id FROM cases WHERE slug = ${escaped_slug}),
+  (SELECT id FROM case_sessions WHERE case_id = (SELECT id FROM cases WHERE slug = ${escaped_slug}) ORDER BY id DESC LIMIT 1),
+  'case_init',
+  json_object('slug', ${escaped_slug}, 'goal', ${escaped_goal}, 'priority', ${escaped_priority}),
+  $(sql_quote "$now")
+);
+COMMIT;
+SQL
+  then
+    die "failed to create case (slug may already exist)"
+  fi
+
+  if [[ "$output" == "json" ]]; then
+    sqlite3 "$DB_FILE" <<SQL
+SELECT json_object(
+  'case', (
+    SELECT json_object(
+      'id', id,
+      'slug', slug,
+      'goal', goal,
+      'status', status,
+      'priority', priority,
+      'next_move', next_move,
+      'created_at', created_at,
+      'updated_at', updated_at
+    )
+    FROM cases
+    WHERE slug = ${escaped_slug}
+  ),
+  'session', (
+    SELECT json_object(
+      'id', id,
+      'actor', actor,
+      'started_at', started_at,
+      'ended_at', ended_at,
+      'summary', summary
+    )
+    FROM case_sessions
+    WHERE case_id = (SELECT id FROM cases WHERE slug = ${escaped_slug})
+    ORDER BY id DESC
+    LIMIT 1
+  ),
+  'event', (
+    SELECT json_object(
+      'id', id,
+      'event_type', event_type,
+      'payload_json', payload_json,
+      'created_at', created_at
+    )
+    FROM events
+    WHERE case_id = (SELECT id FROM cases WHERE slug = ${escaped_slug})
+    ORDER BY id DESC
+    LIMIT 1
+  )
+);
+SQL
+  else
+    echo "Created case: ${slug}"
+    echo "Goal: ${goal}"
+    echo "Priority: ${priority}"
+  fi
+}
+
+cmd_list() {
+  local output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        output="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for list: $1"
+        ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+  if [[ "$output" == "json" ]]; then
+    sqlite3 "$DB_FILE" <<'SQL'
+SELECT json_object(
+  'cases',
+  COALESCE((
+    SELECT json_group_array(json_object(
+      'id', id,
+      'slug', slug,
+      'goal', goal,
+      'status', status,
+      'priority', priority,
+      'next_move', next_move,
+      'created_at', created_at,
+      'updated_at', updated_at
+    ))
+    FROM (
+      SELECT id, slug, goal, status, priority, next_move, created_at, updated_at
+      FROM cases
+      ORDER BY updated_at DESC, id DESC
+    )
+  ), json('[]'))
+);
+SQL
+  else
+    local count
+    count="$(sqlite3 "$DB_FILE" 'SELECT COUNT(*) FROM cases;')"
+    echo "Cases: ${count}"
+    sqlite3 -separator ' | ' "$DB_FILE" "SELECT slug, status, priority, goal FROM cases ORDER BY updated_at DESC, id DESC;"
+  fi
+}
+
+cmd_status() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "status requires <slug>"
+
+  local output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        output="${2:-}"
+        shift 2
+        ;;
+      *)
+        die "Unknown option for status: $1"
+        ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+  local case_id
+  case_id="$(case_id_for_slug "$slug")"
+  [[ -n "$case_id" ]] || die "case not found: $slug"
+
+  if [[ "$output" == "json" ]]; then
+    status_json "$slug"
+  else
+    local details
+    details="$(sqlite3 -separator '|' "$DB_FILE" "SELECT slug, goal, status, priority, next_move, updated_at FROM cases WHERE slug = $(sql_quote "$slug");")"
+    IFS='|' read -r case_slug case_goal case_status case_priority case_next case_updated <<<"$details"
+    echo "Case: ${case_slug}"
+    echo "Goal: ${case_goal}"
+    echo "Status: ${case_status}"
+    echo "Priority: ${case_priority}"
+    echo "Next: ${case_next}"
+    echo "Updated: ${case_updated}"
+  fi
+}
+
+main() {
+  local cmd="${1:---help}"
+  case "$cmd" in
+    --help|-h|help)
+      usage
+      ;;
+    --version|version)
+      echo "fcase ${VERSION}"
+      ;;
+    init)
+      shift
+      cmd_init "$@"
+      ;;
+    list)
+      shift
+      cmd_list "$@"
+      ;;
+    status)
+      shift
+      cmd_status "$@"
+      ;;
+    *)
+      die 2 "unknown or unimplemented subcommand: $cmd"
+      ;;
+  esac
+}
+
+main "$@"

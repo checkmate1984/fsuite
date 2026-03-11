@@ -88,6 +88,39 @@ test_list_shows_case() {
   fi
 }
 
+test_init_bootstraps_database() {
+  run_fcase init auth-bug --goal "Find auth failure root cause" >/dev/null 2>&1 || true
+  local db_path="${TEST_HOME}/.fsuite/fcase.db"
+  if [[ -f "${db_path}" ]]; then
+    pass "init bootstraps the fcase database"
+  else
+    fail "init should create the fcase database" "Missing: ${db_path}"
+  fi
+}
+
+test_status_shows_core_case_state() {
+  run_fcase init auth-bug --goal "Find auth failure root cause" --priority high >/dev/null 2>&1 || true
+  local output rc=0
+  output=$(run_fcase status auth-bug -o json 2>&1) || rc=$?
+  if [[ $rc -eq 0 ]] && python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert data["case"]["slug"] == "auth-bug"; assert data["case"]["priority"] == "high"; assert isinstance(data["targets"], list); assert isinstance(data["evidence"], list); assert isinstance(data["hypotheses"], list); assert isinstance(data["recent_events"], list); assert data["active_session"]["ended_at"] is None' <<< "$output" 2>/dev/null; then
+    pass "status shows core case state"
+  else
+    fail "status should show core case state" "rc=$rc output=$output"
+  fi
+}
+
+test_init_rejects_duplicate_slug() {
+  if ! run_fcase init duplicate-bug --goal "Find duplicate rejection" >/dev/null 2>&1; then
+    fail "duplicate slug test requires a successful initial init"
+    return
+  fi
+  if run_fcase init duplicate-bug --goal "Duplicate" >/dev/null 2>&1; then
+    fail "duplicate slug should fail"
+  else
+    pass "duplicate slug is rejected"
+  fi
+}
+
 main() {
   echo "======================================"
   echo "  fcase Test Suite"
@@ -103,6 +136,9 @@ main() {
   run_test test_version
   run_test test_init_creates_case
   run_test test_list_shows_case
+  run_test test_init_bootstraps_database
+  run_test test_status_shows_core_case_state
+  run_test test_init_rejects_duplicate_slug
 
   echo ""
   echo "======================================"
