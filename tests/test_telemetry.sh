@@ -814,7 +814,9 @@ test_v16_predict_helper_pretty_preserves_ftree_mixed_contract() {
 }
 
 test_v16_predict_json_fallback_survives_broken_python3() {
-  if ! command -v sqlite3 >/dev/null 2>&1; then
+  local sqlite3_bin
+  sqlite3_bin="$(command -v sqlite3 2>/dev/null || true)"
+  if [[ -z "$sqlite3_bin" ]]; then
     pass "predict fallback test skipped (sqlite3 not available)"
     return 0
   fi
@@ -823,14 +825,8 @@ test_v16_predict_json_fallback_survives_broken_python3() {
 
   local shim_dir="${TEST_DIR}/shim-bin"
   mkdir -p "${shim_dir}"
-  cat > "${shim_dir}/python3" <<'SH'
-#!/bin/sh
-exit 127
-SH
-  cat > "${shim_dir}/sqlite3" <<'SH'
-#!/bin/sh
-exec /usr/bin/python3 /home/player3vsgpt/.local/bin/sqlite3 "$@"
-SH
+  printf '%s\n' '#!/bin/sh' 'exit 127' > "${shim_dir}/python3"
+  printf '%s\n' '#!/bin/sh' "PATH=/usr/bin:/bin exec \"${sqlite3_bin}\" \"\$@\"" > "${shim_dir}/sqlite3"
   chmod +x "${shim_dir}/python3" "${shim_dir}/sqlite3"
 
   local target_dir="${TEST_DIR}/predict_target_broken_python"
