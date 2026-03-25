@@ -1,3 +1,14 @@
+fsuite (2.1.2-1) unstable; urgency=medium
+
+  * fix(fcase): preserve clean JSON/stdout while enabling SQLite timeout
+    behavior when the sqlite frontend supports it
+  * fix(fcase): avoid busy-timeout result leakage in shim-based sqlite
+    environments that printed 5000 ahead of JSON payloads
+  * fix(fcase): restore healthy command behavior for structured imports and
+    current-state JSON reads
+
+ -- Chess Williams <chess.w.williams@gmail.com>  Wed, 25 Mar 2026 05:20:00 -0500
+
 fsuite (2.1.1-1) unstable; urgency=medium
 
   * feat(fmap): add Markdown language support (.md, .markdown, .mdx)

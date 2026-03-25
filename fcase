@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="2.1.2"
 FCASE_DIR="$HOME/.fsuite"
 DB_FILE="$FCASE_DIR/fcase.db"
 DEFAULT_OUTPUT="pretty"

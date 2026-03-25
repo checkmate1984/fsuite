@@ -890,7 +890,7 @@ The filesystem tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fedit`) 
 ```json
 {
   "tool": "fcase",
-  "version": "0.1.0",
+  "version": "2.1.2",
   "case": {
     "slug": "auth-seam",
     "goal": "Trace authenticate flow",
@@ -1745,6 +1745,15 @@ For harnesses that read repo instructions, point them at [AGENTS.md](AGENTS.md).
 ---
 
 ## Changelog
+
+### v2.1.2
+
+Hotfix release for the `fcase` SQLite busy-timeout regression that slipped into `v2.1.1`.
+
+- **fix(fcase):** preserve clean JSON/stdout contracts while still enabling SQLite timeout behavior when the sqlite frontend supports it
+- **fix(fcase):** avoid `PRAGMA busy_timeout=5000` result leakage in shim-based sqlite environments that printed `5000` ahead of JSON payloads
+- **fix(fcase):** restore healthy `fcase` command behavior for `init`, `status`, `next`, `note`, `handoff`, `export`, and structured imports
+- **test:** full suite restored green, including `25/25` `fcase` tests and `10/10` passing test suites overall
 
 ### v2.1.1
 
