@@ -2206,6 +2206,93 @@ test_markdown_name_query() {
   fi
 }
 
+test_markdown_setext_only_file() {
+  # Bug 1: setext-only files must produce symbols even with no ATX headings
+  local tmpfile="${TEST_DIR}/src/setext-only.md"
+  cat > "$tmpfile" <<'STEOF'
+Setext Title
+============
+
+Setext Subtitle
+---------------
+STEOF
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FMAP}" -o json "$tmpfile" 2>&1)
+  local count
+  count=$(printf '%s' "$output" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('total_symbols',0))" 2>/dev/null) || count=0
+  if [[ "$count" -ge 2 ]]; then
+    pass "Markdown setext-only file produces symbols ($count)"
+  else
+    fail "Markdown setext-only file produces 0 symbols" "Got: $output"
+  fi
+}
+
+test_markdown_setext_h2_is_class() {
+  # Bug 2: setext H2 (---) should be class, not function
+  local output
+  output=$(FSUITE_TELEMETRY=3 "${FMAP}" "${TEST_DIR}/src/guide.md" 2>&1)
+  # "Setext Heading H2" must appear as class:, not function:
+  if echo "$output" | grep -q "class:.*Setext Heading H2"; then
+    pass "Markdown setext H2 (---) classified as class"
+  else
+    fail "Markdown setext H2 (---) NOT classified as class" "Got: $(echo "$output" | grep -i setext)"
+  fi
+}
+
+test_markdown_trailing_hash_stripped() {
+  # Bug 3: ## Title ## must resolve name to "Title" not "Title ##"
+  local tmpfile="${TEST_DIR}/src/trailing-hash.md"
+  cat > "$tmpfile" <<'THEOF'
+## Title With Hashes ##
+
+### Sub With Hashes ###
+THEOF
+  local output match_kind
+  output=$(FSUITE_TELEMETRY=0 "${FMAP}" -o json --name "Title With Hashes" "$tmpfile" 2>&1)
+  # Must be an EXACT match, not substring — proves trailing # was stripped
+  match_kind=$(printf '%s' "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+m = d.get('matches', [])
+print(m[0]['match_kind'] if m else 'none')
+" 2>/dev/null) || match_kind="error"
+  if [[ "$match_kind" == "exact" ]]; then
+    pass "Markdown trailing # stripped — exact name match"
+  else
+    fail "Markdown trailing # NOT stripped — match_kind=$match_kind (expected exact)" "Got: $output"
+  fi
+}
+
+test_markdown_inline_links_in_prose() {
+  # Bug 4: links mid-line (not at line start) must be detected
+  local tmpfile="${TEST_DIR}/src/inline-links.md"
+  cat > "$tmpfile" <<'ILEOF'
+# Title
+
+Paragraph with [inline](./a.md) link in the middle.
+
+Check [this out](https://example.com) for more.
+
+[line-start link](https://foo.com)
+ILEOF
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FMAP}" -o json "$tmpfile" 2>&1)
+  local import_count
+  import_count=$(printf '%s' "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+f = d['files']
+if not f: print(0); sys.exit()
+count = sum(1 for s in f[0]['symbols'] if s['type'] == 'import')
+print(count)
+" 2>/dev/null) || import_count=0
+  if [[ "$import_count" -ge 3 ]]; then
+    pass "Markdown inline links in prose detected ($import_count imports)"
+  else
+    fail "Markdown inline links in prose NOT detected" "Only $import_count imports found. Got: $output"
+  fi
+}
+
 # ============================================================================
 # Pipeline Test
 # ============================================================================
@@ -2396,6 +2483,10 @@ main() {
     run_test "Markdown exact parse" test_markdown_exact_parse
     run_test "Force lang markdown" test_force_lang_markdown
     run_test "Markdown name query" test_markdown_name_query
+    run_test "Markdown setext-only file" test_markdown_setext_only_file
+    run_test "Markdown setext H2 is class" test_markdown_setext_h2_is_class
+    run_test "Markdown trailing # stripped" test_markdown_trailing_hash_stripped
+    run_test "Markdown inline links in prose" test_markdown_inline_links_in_prose
 
     # New language validation
     run_test "Invalid --lang lists new langs" test_bad_lang_lists_new_languages

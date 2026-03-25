@@ -759,7 +759,7 @@ extract_symbols() {
       patterns=(
         "class:^[[:space:]]{0,3}#{1,2}[[:space:]]"
         "function:^[[:space:]]{0,3}#{3,6}[[:space:]]"
-        "import:^\[.*\]\([^)]+\)"
+        "import:\[[^]]+\]\([^)]+\)"
         "constant:^[[:space:]]{0,3}\`\`\`"
         "constant:^[[:space:]]{0,3}~~~"
       )
@@ -795,8 +795,10 @@ extract_symbols() {
       printf '%s\t%s\t%s\t%s\n' "$lineno" "$sym_type" "$indent" "$text" >> "$_tmp_raw"
     done < <(grep -n -E -I "$regex" -- "$file" 2>/dev/null || true)
   done
-  # --- Markdown: suppress symbols inside fenced code blocks and frontmatter ---
-  if [[ "$lang" == "markdown" ]] && [[ -s "$_tmp_raw" ]]; then
+  # --- Markdown: suppress symbols inside fences/frontmatter, detect setext headings ---
+  # Always run for markdown: setext headings are detected here, not by grep
+  if [[ "$lang" == "markdown" ]]; then
+    touch "$_tmp_raw"  # Ensure file exists even if grep found nothing
     local _tmp_filtered
     _tmp_filtered="$(mktemp)"
 
@@ -843,7 +845,7 @@ extract_symbols() {
       next
     }
     /^[[:space:]]{0,3}-{2,}[[:space:]]*$/ && prev_text != "" && !in_fence {
-      setext_lines[n_setext] = (NR - 1) "\tfunction\t0\t" prev_text
+      setext_lines[n_setext] = (NR - 1) "\tclass\t0\t" prev_text
       n_setext++
       next
     }
@@ -889,7 +891,14 @@ extract_symbol_name() {
       if [[ "$trimmed" =~ ^(#{1,6})[[:space:]]+(.*) ]]; then
         local _md_title="${BASH_REMATCH[2]}"
         # Strip optional trailing # and whitespace (CommonMark ATX)
-        _md_title="${_md_title%%+([[:space:]])+(#)}"
+        # Regex stored in var to avoid bash parsing # as comment
+        local _re_trail_hash='^(.*[^[:space:]#])[[:space:]]+#+ *$'
+        local _re_trail_hash2='^(.*[^#])#+$'
+        if [[ "$_md_title" =~ $_re_trail_hash ]]; then
+          _md_title="${BASH_REMATCH[1]}"
+        elif [[ "$_md_title" =~ $_re_trail_hash2 ]]; then
+          _md_title="${BASH_REMATCH[1]}"
+        fi
         _md_title="${_md_title%"${_md_title##*[![:space:]]}"}"
         printf '%s\n' "$_md_title"
         return 0
@@ -935,7 +944,13 @@ extract_symbol_name() {
       # Markdown headings: "## Title ##" → "Title"
       if [[ "$trimmed" =~ ^(#{1,6})[[:space:]]+(.*) ]]; then
         local _md_title="${BASH_REMATCH[2]}"
-        _md_title="${_md_title%%+([[:space:]])+(#)}"
+        local _re_trail_hash='^(.*[^[:space:]#])[[:space:]]+#+ *$'
+        local _re_trail_hash2='^(.*[^#])#+$'
+        if [[ "$_md_title" =~ $_re_trail_hash ]]; then
+          _md_title="${BASH_REMATCH[1]}"
+        elif [[ "$_md_title" =~ $_re_trail_hash2 ]]; then
+          _md_title="${BASH_REMATCH[1]}"
+        fi
         _md_title="${_md_title%"${_md_title##*[![:space:]]}"}"
         printf '%s\n' "$_md_title"
         return 0
