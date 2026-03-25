@@ -2354,6 +2354,38 @@ print(m[0]['match_kind'] if m else 'none')
   fi
 }
 
+test_markdown_multiline_setext() {
+  # Bug 7: multiline setext headings must capture the full paragraph, not just the last line
+  # CommonMark: "Foo\nbar\n===" → heading text is "Foo bar", not just "bar"
+  local tmpfile="${TEST_DIR}/src/multiline-setext.md"
+  cat > "$tmpfile" <<'MSEOF'
+Foo
+bar
+===
+
+Single line
+-----------
+MSEOF
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FMAP}" -o json "$tmpfile" 2>&1)
+  # The first heading must contain "Foo" (not just "bar")
+  local has_foo
+  has_foo=$(printf '%s' "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+f = d.get('files', [])
+if not f: print('no'); sys.exit()
+syms = f[0]['symbols']
+has = any('Foo' in s['text'] for s in syms)
+print('yes' if has else 'no')
+" 2>/dev/null) || has_foo="error"
+  if [[ "$has_foo" == "yes" ]]; then
+    pass "Markdown multiline setext captures full paragraph"
+  else
+    fail "Markdown multiline setext only captured last line" "Got: $output"
+  fi
+}
+
 # ============================================================================
 # Pipeline Test
 # ============================================================================
@@ -2550,6 +2582,7 @@ main() {
     run_test "Markdown inline links in prose" test_markdown_inline_links_in_prose
     run_test "Markdown setext rejects non-paragraph" test_markdown_setext_rejects_non_paragraph
     run_test "Markdown trailing # no-space preserved" test_markdown_trailing_hash_no_space_preserved
+    run_test "Markdown multiline setext" test_markdown_multiline_setext
 
     # New language validation
     run_test "Invalid --lang lists new langs" test_bad_lang_lists_new_languages

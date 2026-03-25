@@ -838,32 +838,43 @@ extract_symbols() {
     in_fence { suppress[NR] = 1; n_suppress++; next }
 
     # Setext headings: current line is ===+ or ---+ (not in fence),
-    # and previous line was paragraph text (not list, blockquote, ATX, HTML, blank)
-    # CommonMark: setext underline only applies after paragraph content
-    /^[[:space:]]{0,3}=+[[:space:]]*$/ && prev_is_para && !in_fence {
-      setext_lines[n_setext] = (NR - 1) "\tclass\t0\t" prev_text
+    # and we have accumulated paragraph text above it.
+    # CommonMark: the full paragraph becomes the heading, not just the last line.
+    /^[[:space:]]{0,3}=+[[:space:]]*$/ && para_len > 0 && !in_fence {
+      setext_lines[n_setext] = para_start "\tclass\t0\t" para_buf
       n_setext++
-      prev_is_para = 0; prev_text = ""
+      para_len = 0; para_buf = ""; para_start = 0
       next
     }
-    /^[[:space:]]{0,3}-{2,}[[:space:]]*$/ && prev_is_para && !in_fence {
-      setext_lines[n_setext] = (NR - 1) "\tclass\t0\t" prev_text
+    /^[[:space:]]{0,3}-{2,}[[:space:]]*$/ && para_len > 0 && !in_fence {
+      setext_lines[n_setext] = para_start "\tclass\t0\t" para_buf
       n_setext++
-      prev_is_para = 0; prev_text = ""
+      para_len = 0; para_buf = ""; para_start = 0
       next
     }
     {
-      prev_text = $0
       # Determine if this line is paragraph content
       # NOT paragraph: blank, list item (- * + or 1.), blockquote (>),
       # ATX heading (#), HTML (<), thematic break (--- *** ___), fenced code
-      prev_is_para = 1
-      if ($0 ~ /^[[:space:]]*$/) prev_is_para = 0
-      else if ($0 ~ /^[[:space:]]{0,3}[-*+][[:space:]]/) prev_is_para = 0
-      else if ($0 ~ /^[[:space:]]{0,3}[0-9]+[.)][[:space:]]/) prev_is_para = 0
-      else if ($0 ~ /^[[:space:]]{0,3}>/) prev_is_para = 0
-      else if ($0 ~ /^[[:space:]]{0,3}#/) prev_is_para = 0
-      else if ($0 ~ /^[[:space:]]{0,3}</) prev_is_para = 0
+      is_para = 1
+      if ($0 ~ /^[[:space:]]*$/) is_para = 0
+      else if ($0 ~ /^[[:space:]]{0,3}[-*+][[:space:]]/) is_para = 0
+      else if ($0 ~ /^[[:space:]]{0,3}[0-9]+[.)][[:space:]]/) is_para = 0
+      else if ($0 ~ /^[[:space:]]{0,3}>/) is_para = 0
+      else if ($0 ~ /^[[:space:]]{0,3}#/) is_para = 0
+      else if ($0 ~ /^[[:space:]]{0,3}</) is_para = 0
+
+      if (is_para) {
+        if (para_len == 0) {
+          para_buf = $0; para_start = NR
+        } else {
+          para_buf = para_buf " " $0
+        }
+        para_len++
+      } else {
+        # Non-paragraph line resets the accumulator
+        para_len = 0; para_buf = ""; para_start = 0
+      }
     }
     END {
       # Filter raw symbols: remove suppressed lines
