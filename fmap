@@ -759,7 +759,8 @@ extract_symbols() {
       patterns=(
         "class:^[[:space:]]{0,3}#{1,2}[[:space:]]"
         "function:^[[:space:]]{0,3}#{3,6}[[:space:]]"
-        "import:\[[^]]+\]\([^)]+\)"
+        "import:(^|[^!])\[[^]]+\]\([^)]+\)"
+        "import:^[[:space:]]{0,3}\[[^]]+\]:[[:space:]]"
         "constant:^[[:space:]]{0,3}\`\`\`"
         "constant:^[[:space:]]{0,3}~~~"
       )

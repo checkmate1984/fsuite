@@ -2386,6 +2386,65 @@ print('yes' if has else 'no')
   fi
 }
 
+test_markdown_image_not_import() {
+  # Images ![alt](src) should NOT be classified as import
+  local tmpfile="${TEST_DIR}/src/img-link.md"
+  cat > "$tmpfile" <<'IMEOF'
+# Title
+
+![logo](./logo.png)
+
+![banner](https://example.com/banner.jpg)
+
+[real link](https://example.com)
+IMEOF
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FMAP}" -o json "$tmpfile" 2>&1)
+  local has_image
+  has_image=$(printf '%s' "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+f = d.get('files', [])
+if not f: print('no'); sys.exit()
+has = any('logo' in s['text'] or 'banner' in s['text'] for s in f[0]['symbols'] if s['type'] == 'import')
+print('yes' if has else 'no')
+" 2>/dev/null) || has_image="error"
+  if [[ "$has_image" == "no" ]]; then
+    pass "Markdown images excluded from imports"
+  else
+    fail "Markdown images leaked as imports" "Got: $output"
+  fi
+}
+
+test_markdown_reference_links() {
+  # Reference-style link definitions [ref]: url should be detected as imports
+  local tmpfile="${TEST_DIR}/src/ref-links.md"
+  cat > "$tmpfile" <<'RLEOF'
+# Title
+
+See [guide][g] for details.
+
+[g]: ./guide.md
+[docs]: https://docs.example.com "Documentation"
+RLEOF
+  local output
+  output=$(FSUITE_TELEMETRY=0 "${FMAP}" -o json "$tmpfile" 2>&1)
+  local import_count
+  import_count=$(printf '%s' "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+f = d.get('files', [])
+if not f: print(0); sys.exit()
+count = sum(1 for s in f[0]['symbols'] if s['type'] == 'import')
+print(count)
+" 2>/dev/null) || import_count=0
+  if [[ "$import_count" -ge 2 ]]; then
+    pass "Markdown reference link definitions detected ($import_count imports)"
+  else
+    fail "Markdown reference link definitions not detected" "Only $import_count imports. Got: $output"
+  fi
+}
+
 # ============================================================================
 # Pipeline Test
 # ============================================================================
@@ -2583,6 +2642,8 @@ main() {
     run_test "Markdown setext rejects non-paragraph" test_markdown_setext_rejects_non_paragraph
     run_test "Markdown trailing # no-space preserved" test_markdown_trailing_hash_no_space_preserved
     run_test "Markdown multiline setext" test_markdown_multiline_setext
+    run_test "Markdown images not imports" test_markdown_image_not_import
+    run_test "Markdown reference links" test_markdown_reference_links
 
     # New language validation
     run_test "Invalid --lang lists new langs" test_bad_lang_lists_new_languages
