@@ -1015,7 +1015,266 @@ cmd_export() {
 }
 
 cmd_verify() {
-  die 2 "not yet implemented"
+  local slug="" replay_id_flag="" output="pretty"
+
+  while (( $# > 0 )); do
+    case "$1" in
+      --replay-id)
+        [[ $# -ge 2 ]] || die 2 "--replay-id requires a value"
+        replay_id_flag="$2"
+        shift 2
+        ;;
+      --replay-id=*)
+        replay_id_flag="${1#--replay-id=}"
+        shift
+        ;;
+      -o)
+        [[ $# -ge 2 ]] || die 2 "-o requires a value"
+        output="$2"
+        shift 2
+        ;;
+      -o=*)
+        output="${1#-o=}"
+        shift
+        ;;
+      -*)
+        die 2 "unknown option: $1"
+        ;;
+      *)
+        if [[ -z "$slug" ]]; then
+          slug="$1"
+        else
+          die 2 "unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$slug" ]] || die 2 "case slug required"
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die 2 "invalid output format: $output"
+
+  db_exists || die "no fcase.db found"
+
+  local case_id
+  case_id="$(case_exists_or_die "$slug")"
+
+  # Resolve replay_id using same priority as show/export
+  local replay_id
+  if [[ -n "$replay_id_flag" ]]; then
+    local check
+    check="$(db_query <<<"SELECT id FROM replays WHERE id=$replay_id_flag AND case_id=$case_id;")"
+    [[ -n "$check" ]] || die "replay $replay_id_flag not found for case '$slug'"
+    replay_id="$replay_id_flag"
+  else
+    local canonical_id
+    canonical_id="$(db_query <<<"SELECT id FROM replays WHERE case_id=$case_id AND status='canonical' LIMIT 1;")"
+    if [[ -n "$canonical_id" ]]; then
+      replay_id="$canonical_id"
+    else
+      local draft_id
+      draft_id="$(db_query <<<"SELECT id FROM replays WHERE case_id=$case_id AND status='draft' ORDER BY id DESC LIMIT 1;")"
+      if [[ -n "$draft_id" ]]; then
+        replay_id="$draft_id"
+      else
+        die "no active replay found for case '$slug'; use --replay-id N to view an archived replay"
+      fi
+    fi
+  fi
+
+  # Query steps (pipe-delimited)
+  local steps_rows
+  steps_rows="$(db_query --separator '|' <<<"SELECT id, order_num, tool, argv_json, cwd, mode FROM replay_steps WHERE replay_id=$replay_id ORDER BY order_num;")"
+
+  # Query all links for steps of this replay
+  local links_rows
+  links_rows="$(db_query --separator '|' <<<"SELECT step_id, link_type, link_ref FROM replay_step_links WHERE step_id IN (SELECT id FROM replay_steps WHERE replay_id=$replay_id) ORDER BY step_id, id;")"
+
+  # Run all checks via python3, then emit results
+  local verify_result
+  verify_result="$(python3 -c "
+import sys, json, os, subprocess
+
+steps_raw  = sys.argv[1]
+links_raw  = sys.argv[2]
+db_file    = sys.argv[3]
+output_fmt = sys.argv[4]
+
+def sqlite_query(db, sql):
+    try:
+        r = subprocess.run(['sqlite3', db, sql], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except Exception:
+        return ''
+
+# Parse links into dict: step_id -> list of {type, ref}
+links_by_step = {}
+if links_raw.strip():
+    for line in links_raw.strip().splitlines():
+        lparts = line.split('|', 2)
+        if len(lparts) == 3:
+            lstep_id, ltype, lref = lparts
+            links_by_step.setdefault(lstep_id, []).append({'type': ltype, 'ref': lref})
+
+step_results = []
+
+if steps_raw.strip():
+    for line in steps_raw.strip().splitlines():
+        sparts = line.split('|', 5)
+        while len(sparts) < 6:
+            sparts.append('')
+        s_id, s_order, s_tool, s_argv_json, s_cwd, s_mode = sparts
+
+        issues = []
+        status = 'pass'
+
+        # Check 1: tool binary exists in PATH
+        tool_name = s_tool.strip()
+        found = False
+        if tool_name:
+            path_dirs = os.environ.get('PATH', '').split(':')
+            for d in path_dirs:
+                if d and os.path.isfile(os.path.join(d, tool_name)) and os.access(os.path.join(d, tool_name), os.X_OK):
+                    found = True
+                    break
+        if not found:
+            issues.append(f'tool {tool_name!r} not found in PATH')
+            status = 'fail'
+
+        # Check 2: cwd directory still exists
+        cwd = s_cwd.strip()
+        if cwd and not os.path.isdir(cwd):
+            issues.append(f'cwd {cwd} does not exist')
+            if status == 'pass':
+                status = 'warn'
+
+        # Check 3: absolute path arguments exist
+        try:
+            argv = json.loads(s_argv_json) if s_argv_json.strip() else []
+        except Exception:
+            argv = []
+        for arg in argv:
+            if isinstance(arg, str) and arg.startswith('/'):
+                if not os.path.exists(arg):
+                    issues.append(f'path argument {arg} does not exist')
+                    if status == 'pass':
+                        status = 'warn'
+
+        # Check 4: mode reclassification
+        # Re-derive mode from tool+argv and compare to stored mode
+        stored_mode = s_mode.strip()
+        tool_mode_default = {
+            'ftree': 'read_only',
+            'fsearch': 'read_only',
+            'fcontent': 'read_only',
+            'fmap': 'read_only',
+            'fread': 'read_only',
+            'fmetrics': 'read_only',
+            'fedit': 'read_only',
+        }
+        fcase_subcommand_mode = {
+            'status': 'read_only',
+            'handoff': 'read_only',
+            'export': 'read_only',
+            'list': 'read_only',
+            'init': 'mutating',
+            'note': 'mutating',
+            'next': 'mutating',
+            'target': 'mutating',
+            'evidence': 'mutating',
+            'hypothesis': 'mutating',
+            'reject': 'mutating',
+        }
+        def derived_mode(tool, args):
+            if tool == 'fedit':
+                if '--apply' in args:
+                    return 'mutating'
+                return 'read_only'
+            elif tool == 'fcase':
+                subcmd = ''
+                for a in args:
+                    if not a.startswith('-'):
+                        subcmd = a
+                        break
+                if subcmd and subcmd in fcase_subcommand_mode:
+                    return fcase_subcommand_mode[subcmd]
+                return 'unknown'
+            else:
+                return tool_mode_default.get(tool, 'unknown')
+
+        rederived = derived_mode(tool_name, argv)
+        if rederived != stored_mode:
+            issues.append(f'mode mismatch: stored={stored_mode!r} derived={rederived!r}')
+            if status == 'pass':
+                status = 'warn'
+
+        # Check 5: link references exist in DB
+        for lnk in links_by_step.get(s_id, []):
+            ltype = lnk['type']
+            lref  = lnk['ref']
+            table_map = {
+                'evidence':   'evidence',
+                'target':     'targets',
+                'hypothesis': 'hypotheses',
+            }
+            tbl = table_map.get(ltype)
+            if tbl:
+                exists = sqlite_query(db_file, f'SELECT 1 FROM {tbl} WHERE id={lref};')
+                if not exists:
+                    issues.append(f'link {ltype}:{lref} not found in DB')
+                    if status == 'pass':
+                        status = 'warn'
+
+        step_results.append({
+            'order': int(s_order),
+            'tool': tool_name,
+            'status': status,
+            'issues': '; '.join(issues),
+        })
+
+# Compute overall status
+overall = 'pass'
+for sr in step_results:
+    if sr['status'] == 'fail':
+        overall = 'fail'
+        break
+    elif sr['status'] == 'warn' and overall == 'pass':
+        overall = 'warn'
+
+if output_fmt == 'json':
+    print(json.dumps({'overall': overall, 'steps': step_results}, indent=2))
+else:
+    for sr in step_results:
+        s = sr['status'].upper()
+        if sr['issues']:
+            print(f\"Step {sr['order']}: {sr['tool']} — {s}: {sr['issues']}\")
+        else:
+            print(f\"Step {sr['order']}: {sr['tool']} — {s}\")
+    print(f'Overall: {overall.upper()}')
+" "$steps_rows" "$links_rows" "$DB_FILE" "$output")"
+
+  echo "$verify_result"
+
+  # Exit code reflects overall result
+  local overall_status
+  if [[ "$output" == "json" ]]; then
+    overall_status="$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d['overall'])" "$verify_result" 2>/dev/null || echo "fail")"
+  else
+    overall_status="$(python3 -c "
+import sys
+for line in sys.argv[1].splitlines():
+    if line.startswith('Overall:'):
+        print(line.split(':', 1)[1].strip().lower())
+        break
+" "$verify_result" 2>/dev/null || echo "fail")"
+  fi
+
+  case "$overall_status" in
+    pass)    exit 0 ;;
+    warn)    exit 1 ;;
+    fail)    exit 2 ;;
+    *)       exit 2 ;;
+  esac
 }
 
 cmd_promote() {
