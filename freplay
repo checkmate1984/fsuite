@@ -636,16 +636,382 @@ COMMIT;"
   exit "$child_rc"
 }
 
-cmd_show() {
-  die 2 "not yet implemented"
+cmd_list() {
+  local slug="" output="pretty"
+
+  while (( $# > 0 )); do
+    case "$1" in
+      -o)
+        [[ $# -ge 2 ]] || die 2 "-o requires a value"
+        output="$2"
+        shift 2
+        ;;
+      -o=*)
+        output="${1#-o=}"
+        shift
+        ;;
+      -*)
+        die 2 "unknown option: $1"
+        ;;
+      *)
+        if [[ -z "$slug" ]]; then
+          slug="$1"
+        else
+          die 2 "unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$slug" ]] || die 2 "case slug required"
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die 2 "invalid output format: $output"
+
+  db_exists || die "no fcase.db found"
+
+  local case_id
+  case_id="$(case_exists_or_die "$slug")"
+
+  # Query replays ordered by id DESC, pipe-delimited
+  local rows
+  rows="$(db_query --separator '|' <<<"SELECT id, status, origin, (SELECT COUNT(*) FROM replay_steps WHERE replay_id=replays.id), created_at, label FROM replays WHERE case_id=$case_id ORDER BY id DESC;")"
+
+  if [[ "$output" == "json" ]]; then
+    python3 -c "
+import sys, json
+
+rows_raw = sys.argv[1]
+replays = []
+if rows_raw.strip():
+    for line in rows_raw.strip().splitlines():
+        parts = line.split('|', 5)
+        if len(parts) < 6:
+            parts += [''] * (6 - len(parts))
+        replay_id, status, origin, step_count, created_at, label = parts
+        replays.append({
+            'id': int(replay_id),
+            'status': status,
+            'origin': origin,
+            'step_count': int(step_count) if step_count.isdigit() else 0,
+            'created_at': created_at,
+            'label': label,
+        })
+print(json.dumps({'replays': replays}, indent=2))
+" "$rows"
+  else
+    # Pretty: header + rows
+    printf '%-6s  %-10s  %-10s  %-6s  %-20s  %s\n' 'ID' 'STATUS' 'ORIGIN' 'STEPS' 'CREATED_AT' 'LABEL'
+    printf '%-6s  %-10s  %-10s  %-6s  %-20s  %s\n' '------' '----------' '----------' '------' '--------------------' '-----'
+    if [[ -n "$rows" ]]; then
+      while IFS='|' read -r rid rstatus rorigin rcount rcreated rlabel; do
+        printf '%-6s  %-10s  %-10s  %-6s  %-20s  %s\n' "$rid" "$rstatus" "$rorigin" "$rcount" "$rcreated" "$rlabel"
+      done <<<"$rows"
+    fi
+  fi
 }
 
-cmd_list() {
-  die 2 "not yet implemented"
+# ---------------------------------------------------------------------------
+# _emit_replay — shared output formatter for show/export
+# ---------------------------------------------------------------------------
+
+_emit_replay() {
+  local replay_id="$1"
+  local slug="$2"
+  local case_id="$3"
+  local output="$4"
+
+  # Query replay metadata (pipe-delimited)
+  local replay_row
+  replay_row="$(db_query --separator '|' <<<"SELECT id, status, origin, fsuite_version, created_at, actor, label FROM replays WHERE id=$replay_id AND case_id=$case_id;")"
+  [[ -n "$replay_row" ]] || die "replay $replay_id not found for case '$slug'"
+
+  # Query case goal
+  local case_goal
+  case_goal="$(db_query <<<"SELECT goal FROM cases WHERE id=$case_id;")"
+
+  # Query steps (pipe-delimited, all columns needed)
+  local steps_rows
+  steps_rows="$(db_query --separator '|' <<<"SELECT id, order_num, tool, argv_json, cwd, mode, purpose, provenance, exit_code, duration_ms, started_at, result_summary, error_excerpt FROM replay_steps WHERE replay_id=$replay_id ORDER BY order_num;")"
+
+  # Query all links for steps of this replay, pipe-delimited
+  local links_rows
+  links_rows="$(db_query --separator '|' <<<"SELECT step_id, link_type, link_ref FROM replay_step_links WHERE step_id IN (SELECT id FROM replay_steps WHERE replay_id=$replay_id) ORDER BY step_id, id;")"
+
+  if [[ "$output" == "json" ]]; then
+    python3 -c "
+import sys, json
+
+def parse_null(v):
+    return None if v == '' else v
+
+replay_row   = sys.argv[1]
+case_goal    = sys.argv[2]
+slug         = sys.argv[3]
+steps_raw    = sys.argv[4]
+links_raw    = sys.argv[5]
+
+# Parse replay row
+rparts = replay_row.split('|', 6)
+while len(rparts) < 7:
+    rparts.append('')
+r_id, r_status, r_origin, r_fsuite_ver, r_created_at, r_actor, r_label = rparts
+
+# Parse links into dict: step_id -> list of {type, ref}
+links_by_step = {}
+if links_raw.strip():
+    for line in links_raw.strip().splitlines():
+        lparts = line.split('|', 2)
+        if len(lparts) == 3:
+            lstep_id, ltype, lref = lparts
+            links_by_step.setdefault(lstep_id, []).append({'type': ltype, 'ref': lref})
+
+# Parse steps
+steps = []
+if steps_raw.strip():
+    for line in steps_raw.strip().splitlines():
+        # Split into 13 parts (last field may contain | if result_summary/error has pipes — unlikely but safe with maxsplit)
+        sparts = line.split('|', 12)
+        while len(sparts) < 13:
+            sparts.append('')
+        s_id, s_order, s_tool, s_argv_json, s_cwd, s_mode, s_purpose, s_provenance, s_exit_code, s_duration_ms, s_started_at, s_result_summary, s_error_excerpt = sparts
+
+        # Parse argv_json (already a JSON array in DB)
+        try:
+            argv = json.loads(s_argv_json)
+        except Exception:
+            argv = [s_argv_json] if s_argv_json else []
+
+        step = {
+            'order': int(s_order),
+            'tool': s_tool,
+            'argv': argv,
+            'cwd': s_cwd,
+            'mode': s_mode,
+            'purpose': parse_null(s_purpose),
+            'provenance': s_provenance,
+            'exit_code': int(s_exit_code) if s_exit_code else 0,
+            'duration_ms': int(s_duration_ms) if s_duration_ms else 0,
+            'started_at': s_started_at,
+            'result_summary': parse_null(s_result_summary),
+            'error_excerpt': parse_null(s_error_excerpt),
+            'links': links_by_step.get(s_id, []),
+        }
+        steps.append(step)
+
+envelope = {
+    'version': '1.0',
+    'tool': 'freplay',
+    'case_slug': slug,
+    'case_goal': case_goal,
+    'replay_id': int(r_id),
+    'replay_status': r_status,
+    'replay_origin': r_origin,
+    'fsuite_version': r_fsuite_ver,
+    'created_at': r_created_at,
+    'actor': r_actor,
+    'step_count': len(steps),
+    'steps': steps,
+}
+print(json.dumps(envelope, indent=2))
+" "$replay_row" "$case_goal" "$slug" "$steps_rows" "$links_rows"
+  else
+    # Pretty output
+    python3 -c "
+import sys, json
+
+def parse_null(v):
+    return None if v == '' else v
+
+replay_row   = sys.argv[1]
+case_goal    = sys.argv[2]
+slug         = sys.argv[3]
+steps_raw    = sys.argv[4]
+
+rparts = replay_row.split('|', 6)
+while len(rparts) < 7:
+    rparts.append('')
+r_id, r_status, r_origin, r_fsuite_ver, r_created_at, r_actor, r_label = rparts
+
+print(f'Replay #{r_id}  [{r_status}]  {slug}')
+print(f'  goal:    {case_goal}')
+print(f'  origin:  {r_origin}  version: {r_fsuite_ver}  actor: {r_actor}')
+print(f'  created: {r_created_at}')
+if r_label:
+    print(f'  label:   {r_label}')
+print()
+
+if steps_raw.strip():
+    for line in steps_raw.strip().splitlines():
+        sparts = line.split('|', 12)
+        while len(sparts) < 13:
+            sparts.append('')
+        s_id, s_order, s_tool, s_argv_json, s_cwd, s_mode, s_purpose, s_provenance, s_exit_code, s_duration_ms, s_started_at, s_result_summary, s_error_excerpt = sparts
+        try:
+            argv = json.loads(s_argv_json)
+        except Exception:
+            argv = []
+        argv_str = ' '.join(argv)
+        purpose_str = f'  purpose: {s_purpose}' if s_purpose else ''
+        result_str = f'  result:  {s_result_summary}' if s_result_summary else ''
+        error_str = f'  error:   {s_error_excerpt}' if s_error_excerpt else ''
+        print(f'  Step {s_order}: {s_tool} {argv_str}')
+        print(f'    mode={s_mode}  exit={s_exit_code}  duration={s_duration_ms}ms  cwd={s_cwd}')
+        if purpose_str:
+            print(f'   {purpose_str}')
+        if result_str:
+            print(f'   {result_str}')
+        if error_str:
+            print(f'   {error_str}')
+        print()
+else:
+    print('  (no steps recorded)')
+" "$replay_row" "$case_goal" "$slug" "$steps_rows"
+  fi
+}
+
+cmd_show() {
+  local slug="" replay_id_flag="" output="pretty"
+
+  while (( $# > 0 )); do
+    case "$1" in
+      --replay-id)
+        [[ $# -ge 2 ]] || die 2 "--replay-id requires a value"
+        replay_id_flag="$2"
+        shift 2
+        ;;
+      --replay-id=*)
+        replay_id_flag="${1#--replay-id=}"
+        shift
+        ;;
+      -o)
+        [[ $# -ge 2 ]] || die 2 "-o requires a value"
+        output="$2"
+        shift 2
+        ;;
+      -o=*)
+        output="${1#-o=}"
+        shift
+        ;;
+      -*)
+        die 2 "unknown option: $1"
+        ;;
+      *)
+        if [[ -z "$slug" ]]; then
+          slug="$1"
+        else
+          die 2 "unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$slug" ]] || die 2 "case slug required"
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die 2 "invalid output format: $output"
+
+  db_exists || die "no fcase.db found"
+
+  local case_id
+  case_id="$(case_exists_or_die "$slug")"
+
+  # Resolve replay_id using priority rules
+  local replay_id
+  if [[ -n "$replay_id_flag" ]]; then
+    # Priority 1: explicit --replay-id
+    local check
+    check="$(db_query <<<"SELECT id FROM replays WHERE id=$replay_id_flag AND case_id=$case_id;")"
+    [[ -n "$check" ]] || die "replay $replay_id_flag not found for case '$slug'"
+    replay_id="$replay_id_flag"
+  else
+    # Priority 2: canonical replay
+    local canonical_id
+    canonical_id="$(db_query <<<"SELECT id FROM replays WHERE case_id=$case_id AND status='canonical' LIMIT 1;")"
+    if [[ -n "$canonical_id" ]]; then
+      replay_id="$canonical_id"
+    else
+      # Priority 3: newest draft (highest id)
+      local draft_id
+      draft_id="$(db_query <<<"SELECT id FROM replays WHERE case_id=$case_id AND status='draft' ORDER BY id DESC LIMIT 1;")"
+      if [[ -n "$draft_id" ]]; then
+        replay_id="$draft_id"
+      else
+        # Priority 4: no active replay (only archived or none)
+        die "no active replay found for case '$slug'; use --replay-id N to view an archived replay"
+      fi
+    fi
+  fi
+
+  _emit_replay "$replay_id" "$slug" "$case_id" "$output"
 }
 
 cmd_export() {
-  die 2 "not yet implemented"
+  local slug="" replay_id_flag="" output="json"
+
+  while (( $# > 0 )); do
+    case "$1" in
+      --replay-id)
+        [[ $# -ge 2 ]] || die 2 "--replay-id requires a value"
+        replay_id_flag="$2"
+        shift 2
+        ;;
+      --replay-id=*)
+        replay_id_flag="${1#--replay-id=}"
+        shift
+        ;;
+      -o)
+        [[ $# -ge 2 ]] || die 2 "-o requires a value"
+        output="$2"
+        shift 2
+        ;;
+      -o=*)
+        output="${1#-o=}"
+        shift
+        ;;
+      -*)
+        die 2 "unknown option: $1"
+        ;;
+      *)
+        if [[ -z "$slug" ]]; then
+          slug="$1"
+        else
+          die 2 "unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$slug" ]] || die 2 "case slug required"
+
+  db_exists || die "no fcase.db found"
+
+  local case_id
+  case_id="$(case_exists_or_die "$slug")"
+
+  # Resolve replay_id using same priority as show
+  local replay_id
+  if [[ -n "$replay_id_flag" ]]; then
+    local check
+    check="$(db_query <<<"SELECT id FROM replays WHERE id=$replay_id_flag AND case_id=$case_id;")"
+    [[ -n "$check" ]] || die "replay $replay_id_flag not found for case '$slug'"
+    replay_id="$replay_id_flag"
+  else
+    local canonical_id
+    canonical_id="$(db_query <<<"SELECT id FROM replays WHERE case_id=$case_id AND status='canonical' LIMIT 1;")"
+    if [[ -n "$canonical_id" ]]; then
+      replay_id="$canonical_id"
+    else
+      local draft_id
+      draft_id="$(db_query <<<"SELECT id FROM replays WHERE case_id=$case_id AND status='draft' ORDER BY id DESC LIMIT 1;")"
+      if [[ -n "$draft_id" ]]; then
+        replay_id="$draft_id"
+      else
+        die "no active replay found for case '$slug'; use --replay-id N to view an archived replay"
+      fi
+    fi
+  fi
+
+  _emit_replay "$replay_id" "$slug" "$case_id" "$output"
 }
 
 cmd_verify() {
