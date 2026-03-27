@@ -285,16 +285,24 @@ test_event_payload_json_escapes_control_chars() {
 
 test_source_routes_db_access_through_fk_helpers() {
   local rc=0
-  python3 - "${FCASE}" <<'PY' || rc=$?
+  local db_module="${FCASE%/*}/_fsuite_db.sh"
+  python3 - "${FCASE}" "${db_module}" <<'PY' || rc=$?
 from pathlib import Path
 import sys
 
-text = Path(sys.argv[1]).read_text()
-assert "db_query() {" in text
-assert "db_exec() {" in text
-assert 'sqlite3 "$DB_FILE"' in text
-assert text.count('PRAGMA foreign_keys=ON;') >= 1
-assert text.count('conn.execute("PRAGMA foreign_keys=ON")') >= 1
+fcase_text = Path(sys.argv[1]).read_text()
+db_text = Path(sys.argv[2]).read_text()
+# After extraction, db helpers live in the sourced _fsuite_db.sh module
+assert "db_query() {" in db_text, "db_query not in _fsuite_db.sh"
+assert "db_exec() {" in db_text, "db_exec not in _fsuite_db.sh"
+assert 'sqlite3 "$DB_FILE"' in db_text, "sqlite3 call not in _fsuite_db.sh"
+assert db_text.count('PRAGMA foreign_keys=ON;') >= 1, "no FK pragma in _fsuite_db.sh"
+# fcase sources the DB module
+assert '_fsuite_db.sh' in fcase_text, "fcase does not source _fsuite_db.sh"
+# fcase still has FK pragmas in its inline SQL + Python import blocks
+combined = fcase_text + db_text
+assert combined.count('PRAGMA foreign_keys=ON;') >= 1
+assert combined.count('conn.execute("PRAGMA foreign_keys=ON")') >= 1
 PY
 
   if [[ $rc -eq 0 ]]; then
