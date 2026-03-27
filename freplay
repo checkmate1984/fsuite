@@ -68,7 +68,6 @@ declare -A TOOL_MODE_DEFAULT=(
   [fcontent]="read_only"
   [fmap]="read_only"
   [fread]="read_only"
-  [fmetrics]="read_only"
   [fedit]="read_only"
 )
 
@@ -132,6 +131,7 @@ NOTES
   The following tools are excluded from recording:
     freplay, fmetrics
   fedit is classified read_only by default; mutating when --apply is present.
+  verify exit codes: 0=pass, 1=warn, 2=fail.
 EOF
 }
 
@@ -256,25 +256,25 @@ get_or_create_draft_replay() {
   # Single atomic operation: BEGIN IMMEDIATE acquires the write lock,
   # preventing concurrent processes from creating duplicate drafts.
   # INSERT ... WHERE NOT EXISTS creates a draft only if none exist.
-  local output
-  output="$(sqlite3 "$DB_FILE" <<SQL
-.timeout ${SQLITE_BUSY_TIMEOUT_MS}
-PRAGMA foreign_keys=ON;
+  local sql_result
+  sql_result="$({
+    emit_db_session_prefix
+    cat <<SQL
 BEGIN IMMEDIATE;
 
 -- Atomically create draft if none exists (lock is held)
 INSERT INTO replays (case_id, status, origin, fsuite_version, actor, created_at, updated_at)
 SELECT $case_id, 'draft', 'recorded', $version_q, $actor_q, $now_q, $now_q
 WHERE NOT EXISTS (SELECT 1 FROM replays WHERE case_id=$case_id AND status='draft');
-
--- Return all draft ids (1 row if 0-or-1 existed, >1 if pre-existing duplicates)
-SELECT id FROM replays WHERE case_id=$case_id AND status='draft' ORDER BY id ASC;
 COMMIT;
 SQL
-  )" || die "DB error during draft resolution"
+  } | sqlite3 "$DB_FILE" 2>&1)" || die "DB error during draft resolution: $sql_result"
 
-  # Parse result lines
+  # Query draft ids after the atomic create step. The write lock above guarantees
+  # we did not create duplicates while deciding whether to insert.
   local ids=()
+  local output
+  output="$(db_query <<<"SELECT id FROM replays WHERE case_id=$case_id AND status='draft' ORDER BY id ASC;")"
   while IFS= read -r line; do
     [[ -n "$line" ]] && ids+=("$line")
   done <<< "$output"

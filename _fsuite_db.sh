@@ -128,6 +128,9 @@ ensure_db() {
   has sqlite3 || die 3 "sqlite3 is required"
   mkdir -p "$FCASE_DIR" 2>/dev/null || die "Cannot create $FCASE_DIR"
 
+  # Keep WAL enabled even for pre-existing DBs or externally created files.
+  sqlite3 "$DB_FILE" 'PRAGMA journal_mode=WAL;' >/dev/null 2>&1 || true
+
   local current_version=0
   if [[ -f "$DB_FILE" ]]; then
     current_version="$(sqlite3 "$DB_FILE" 'PRAGMA user_version;' 2>/dev/null || echo 0)"
@@ -136,7 +139,6 @@ ensure_db() {
   # --- Migration to version 1: fcase core tables ---
   if (( current_version < 1 )); then
     db_exec <<'SQL'
-PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS cases (
