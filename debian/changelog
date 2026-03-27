@@ -1,3 +1,13 @@
+fsuite (2.2.0-1) unstable; urgency=medium
+
+  * feat(freplay): new tool — derivation replay ledger for fsuite investigations
+  * feat(freplay): record, show, list, export, verify, promote, archive commands
+  * refactor(fcase): extract shared DB module into _fsuite_db.sh
+  * feat(_fsuite_db): version-aware schema migration (user_version 1->2)
+  * feat(fsuite): add freplay to tool listing, flow, and examples (9 tools)
+
+ -- Chess Williams <chess.w.williams@gmail.com>  Thu, 27 Mar 2026 08:30:00 -0500
+
 fsuite (2.1.2-1) unstable; urgency=medium
 
   * fix(fcase): preserve clean JSON/stdout while enabling SQLite timeout

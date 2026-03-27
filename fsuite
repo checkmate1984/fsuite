@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-VERSION="2.1.2"
+VERSION="2.2.0"
 
 usage() {
   cat <<'EOF'
@@ -20,8 +20,8 @@ USAGE
   fsuite usage
 
 DESCRIPTION
-  fsuite is the suite-level guide for the eight operational tools:
-    ftree, fsearch, fcontent, fmap, fread, fcase, fedit, fmetrics
+  fsuite is the suite-level guide for the nine operational tools:
+    ftree, fsearch, fcontent, fmap, fread, fcase, fedit, fmetrics, freplay
 
   Use fsuite when you want the conceptual flow, tool roles, and headless
   operating pattern without digging through the README first.
@@ -36,7 +36,7 @@ print_help() {
   cat <<EOF
 fsuite ${VERSION}
 
-Eight operational tools. One composable sensor suite.
+Nine operational tools. One composable sensor suite.
 
   ftree     Scout the project once
   fsearch   Find candidate files
@@ -46,11 +46,12 @@ Eight operational tools. One composable sensor suite.
   fcase     Preserve investigation state and hand off cleanly
   fedit     Preview and apply surgical patches
   fmetrics  Measure what happened and predict the next run
+  freplay   Record and replay derivation paths for investigations
 
 Canonical agent flow
 
-  ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> fmetrics
-  Scout    Narrowing             Bridge   Read     Preserve  Change    Measure
+  ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> freplay -> fmetrics
+  Scout    Narrowing             Bridge   Read     Preserve  Change    Replay     Measure
 
 First-contact mindset
 
@@ -120,6 +121,11 @@ Tool roles
 
   fmetrics
     Telemetry import, stats, and prediction.
+
+  freplay
+    Derivation replay ledger. Records exact fsuite command paths during
+    investigations so another agent can reproduce the derivation without
+    improvising. Shares fcase.db for case-linked provenance.
 EOF
 }
 
@@ -148,7 +154,10 @@ Recommended workflow
   7. fedit
      Preview and apply a surgical change only after inspected context.
 
-  8. fmetrics
+  8. freplay
+     Record derivation paths during investigations for reproducibility.
+
+  9. fmetrics
      Measure runtime history and import telemetry if needed.
 
 Strong combinations:
@@ -157,6 +166,7 @@ Strong combinations:
   - fsearch -> fcontent -o paths -> fmap
   - fmap + fread
   - fmap + fread + fcase
+  - freplay record + fcase (derivation provenance)
 
 Mindset:
   - heuristic, not rigid rule
@@ -164,7 +174,7 @@ Mindset:
   - use -o json and -o paths aggressively
 
 Heuristic, not rigid rule:
-  ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> fmetrics
+  ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> freplay -> fmetrics
 EOF
 }
 
@@ -196,6 +206,13 @@ Examples
   # Preview and apply a patch
   fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()"
   fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()" --apply
+
+  # Record derivation steps
+  freplay record auth-seam --purpose "map gateway symbols" -- fmap -o json src/gateway
+  freplay record auth-seam --link evidence:71 -- fread src/auth.ts --symbol authenticate
+  freplay show auth-seam -o json
+  freplay verify auth-seam
+  freplay promote auth-seam 1
 
   # Measure and inspect
   fmetrics import
