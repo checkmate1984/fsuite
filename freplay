@@ -1143,6 +1143,10 @@ if steps_raw.strip():
                 return False
             if a.lower() in _non_path_keywords:
                 return False
+            # Glob patterns are not paths
+            if '*' in a or '?' in a or '[' in a:
+                return False
+            # Contains directory separator — almost certainly a path
             if '/' in a:
                 return True
             # Has file extension (e.g. app.ts, lib.py)
@@ -1150,10 +1154,8 @@ if steps_raw.strip():
                 parts = a.rsplit('.', 1)
                 if len(parts) == 2 and 0 < len(parts[1]) <= 5:
                     return True
-            # Bare name that could be a directory (only check if cwd exists
-            # and the parent dir of the resolved path exists)
-            if cwd and os.path.isdir(cwd) and a and not a.startswith('.'):
-                return True
+            # Bare names without / or extension are NOT treated as paths.
+            # Too many false positives (symbol names, case slugs, subcommands).
             return False
 
         for arg in argv:
