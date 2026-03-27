@@ -246,21 +246,43 @@ derive_mode() {
 
 get_or_create_draft_replay() {
   local case_id="$1"
-  local draft_count draft_id now
+  local now actor version_q now_q actor_q
+  now="$(now_utc)"
+  actor="$(whoami 2>/dev/null || echo unknown)"
+  version_q="$(sql_quote "$VERSION")"
+  now_q="$(sql_quote "$now")"
+  actor_q="$(sql_quote "$actor")"
 
-  draft_count="$(db_query <<<"SELECT COUNT(*) FROM replays WHERE case_id=$case_id AND status='draft';")"
+  # Single atomic operation: BEGIN IMMEDIATE acquires the write lock,
+  # preventing concurrent processes from creating duplicate drafts.
+  # INSERT ... WHERE NOT EXISTS creates a draft only if none exist.
+  local output
+  output="$(sqlite3 "$DB_FILE" <<SQL
+.timeout ${SQLITE_BUSY_TIMEOUT_MS}
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
 
-  if (( draft_count == 0 )); then
-    now="$(now_utc)"
-    db_exec <<SQL
+-- Atomically create draft if none exists (lock is held)
 INSERT INTO replays (case_id, status, origin, fsuite_version, actor, created_at, updated_at)
-  VALUES ($case_id, 'draft', 'recorded', $(sql_quote "$VERSION"), $(sql_quote "$(whoami)"), $(sql_quote "$now"), $(sql_quote "$now"));
+SELECT $case_id, 'draft', 'recorded', $version_q, $actor_q, $now_q, $now_q
+WHERE NOT EXISTS (SELECT 1 FROM replays WHERE case_id=$case_id AND status='draft');
+
+-- Return all draft ids (1 row if 0-or-1 existed, >1 if pre-existing duplicates)
+SELECT id FROM replays WHERE case_id=$case_id AND status='draft' ORDER BY id ASC;
+COMMIT;
 SQL
-    draft_id="$(db_query <<<"SELECT id FROM replays WHERE case_id=$case_id AND status='draft' ORDER BY id DESC LIMIT 1;")"
-    echo "$draft_id"
-  elif (( draft_count == 1 )); then
-    draft_id="$(db_query <<<"SELECT id FROM replays WHERE case_id=$case_id AND status='draft' LIMIT 1;")"
-    echo "$draft_id"
+  )" || die "DB error during draft resolution"
+
+  # Parse result lines
+  local ids=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && ids+=("$line")
+  done <<< "$output"
+
+  if (( ${#ids[@]} == 0 )); then
+    die "failed to create or find draft replay"
+  elif (( ${#ids[@]} == 1 )); then
+    printf '%s' "${ids[0]}"
   else
     die "multiple draft replays exist for this case; use --replay-id N or --new to disambiguate"
   fi
@@ -1103,17 +1125,50 @@ if steps_raw.strip():
             if status == 'pass':
                 status = 'warn'
 
-        # Check 3: absolute path arguments exist
+        # Check 3: path arguments exist (absolute and relative)
         try:
             argv = json.loads(s_argv_json) if s_argv_json.strip() else []
         except Exception:
             argv = []
+
+        # Known non-path value keywords (output formats, flags, etc.)
+        _non_path_keywords = {
+            'json', 'pretty', 'status', 'true', 'false', 'yes', 'no',
+            'read_only', 'mutating', 'unknown', 'open', 'closed',
+            'draft', 'canonical', 'archived',
+        }
+
+        def looks_like_path(a):
+            if not isinstance(a, str) or a.startswith('-'):
+                return False
+            if a.lower() in _non_path_keywords:
+                return False
+            if '/' in a:
+                return True
+            # Has file extension (e.g. app.ts, lib.py)
+            if '.' in a and not a.startswith('.'):
+                parts = a.rsplit('.', 1)
+                if len(parts) == 2 and 0 < len(parts[1]) <= 5:
+                    return True
+            # Bare name that could be a directory (only check if cwd exists
+            # and the parent dir of the resolved path exists)
+            if cwd and os.path.isdir(cwd) and a and not a.startswith('.'):
+                return True
+            return False
+
         for arg in argv:
-            if isinstance(arg, str) and arg.startswith('/'):
-                if not os.path.exists(arg):
-                    issues.append(f'path argument {arg} does not exist')
-                    if status == 'pass':
-                        status = 'warn'
+            if not looks_like_path(arg):
+                continue
+            if arg.startswith('/'):
+                check_path = arg
+            elif cwd and os.path.isdir(cwd):
+                check_path = os.path.join(cwd, arg)
+            else:
+                continue
+            if not os.path.exists(check_path):
+                issues.append(f'path argument {arg} does not exist')
+                if status == 'pass':
+                    status = 'warn'
 
         # Check 4: mode reclassification
         # Re-derive mode from tool+argv and compare to stored mode
