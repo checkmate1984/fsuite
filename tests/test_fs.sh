@@ -142,7 +142,12 @@ result=$(run_engine '{"query": "renderTool", "path": "/tmp"}')
 chain=$(echo "$result" | python3 -c "import sys,json; print(','.join(json.load(sys.stdin)['selected_chain']))")
 assert_eq "symbol (no scope) → [fcontent,fmap]" "fcontent,fmap" "$chain"
 
-# file intent with scope → ["fsearch"] (scope is the glob itself for file intent)
+# file intent with scope → ["fsearch"] (file intent always uses fsearch)
+result=$(run_engine '{"query": "*.py", "path": "/tmp", "intent": "file", "scope": "*.py"}')
+chain=$(echo "$result" | python3 -c "import sys,json; print(','.join(json.load(sys.stdin)['selected_chain']))")
+assert_eq "file (with scope) → [fsearch]" "fsearch" "$chain"
+
+# content intent with scope → ["fsearch", "fcontent"]
 result=$(run_engine '{"query": "authenticate", "path": "/tmp", "intent": "content", "scope": "*.py"}')
 chain=$(echo "$result" | python3 -c "import sys,json; print(','.join(json.load(sys.stdin)['selected_chain']))")
 assert_eq "content (with scope) → [fsearch,fcontent]" "fsearch,fcontent" "$chain"
@@ -242,7 +247,7 @@ else
   echo -e "${RED}✗${NC} empty query should return error"
 fi
 
-# Missing path
+# Missing path defaults to "."
 result=$(run_engine '{"query": "test"}')
 has_error=$(echo "$result" | python3 -c "
 import sys, json
@@ -250,18 +255,51 @@ data = json.load(sys.stdin)
 print('yes' if 'error' in data else 'no')
 " 2>/dev/null || echo "no")
 TESTS_RUN=$((TESTS_RUN + 1))
-if [[ "$has_error" == "yes" ]]; then
+if [[ "$has_error" == "no" ]]; then
   TESTS_PASSED=$((TESTS_PASSED + 1))
-  echo -e "${GREEN}✓${NC} missing path returns error"
+  echo -e "${GREEN}✓${NC} missing path defaults to '.' (no error)"
 else
   TESTS_FAILED=$((TESTS_FAILED + 1))
-  echo -e "${RED}✗${NC} missing path should return error"
+  echo -e "${RED}✗${NC} missing path should default to '.', not error"
 fi
+assert_json_field "missing path → path is '.'" "$result" "path" "."
 
 # Filename-shaped query (word.ext) → file
 result=$(run_engine '{"query": "config.yaml", "path": "/tmp"}')
 assert_json_field "config.yaml → file intent" "$result" "resolved_intent" "file"
 assert_json_field "config.yaml → high confidence" "$result" "route_confidence" "high"
+
+# Scope field present when scope is provided
+result=$(run_engine '{"query": "test", "path": "/tmp", "scope": "*.py"}')
+has_scope=$(echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print('yes' if 'scope' in data else 'no')
+" 2>/dev/null || echo "no")
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$has_scope" == "yes" ]]; then
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+  echo -e "${GREEN}✓${NC} scope field present when scope provided"
+else
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  echo -e "${RED}✗${NC} scope field should be present when scope provided"
+fi
+
+# Scope field absent when scope is not provided
+result=$(run_engine '{"query": "test", "path": "/tmp"}')
+has_scope=$(echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print('yes' if 'scope' in data else 'no')
+" 2>/dev/null || echo "no")
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$has_scope" == "no" ]]; then
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+  echo -e "${GREEN}✓${NC} scope field absent when scope not provided"
+else
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  echo -e "${RED}✗${NC} scope field should be absent when scope not provided"
+fi
 
 # ============================================================================
 # Results

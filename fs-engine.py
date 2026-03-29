@@ -16,6 +16,7 @@ import re
 import subprocess
 import time
 import shutil
+from datetime import datetime, timezone
 
 # ── Budget Constants ─────────────────────────────────────────────────────────
 
@@ -79,7 +80,7 @@ def classify_intent(query, explicit_intent=None):
 
     # 1. Explicit override bypasses all heuristics
     if explicit_intent:
-        return (explicit_intent, "high", f"explicit intent override: {explicit_intent}")
+        return (explicit_intent, "high", f"explicit intent={explicit_intent}")
 
     q = query.strip()
 
@@ -256,15 +257,17 @@ def run_fmap(file_list):
 # ── Hit Shaping ──────────────────────────────────────────────────────────────
 
 def shape_file_hits(paths):
-    """Shape file search results: path + size_bytes."""
+    """Shape file search results: path + size_bytes + modified."""
     hits = []
     for p in paths:
-        size = -1
+        hit = {"file": p, "size_bytes": -1}
         try:
-            size = os.path.getsize(p)
+            stat = os.stat(p)
+            hit["size_bytes"] = stat.st_size
+            hit["modified"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
         except OSError:
             pass
-        hits.append({"file": p, "size_bytes": size})
+        hits.append(hit)
     return hits
 
 
@@ -325,6 +328,24 @@ def shape_content_hits(fcontent_result):
     ]
 
 
+_DEFINITION_PREFIXES = (
+    "def ", "function ", "class ", "const ", "let ", "var ",
+    "export ", "pub fn ", "fn ",
+)
+
+
+def _is_definition(text, symbol_names):
+    """Heuristic: text looks like a definition if it starts with a def keyword
+    and contains one of the known symbol names."""
+    stripped = text.strip()
+    if not any(stripped.startswith(pfx) for pfx in _DEFINITION_PREFIXES):
+        return False
+    for name in symbol_names:
+        if name in stripped:
+            return True
+    return False
+
+
 def shape_symbol_hits(content_hits, fmap_result):
     """Merge content hits with fmap symbol data."""
     if not content_hits:
@@ -348,7 +369,24 @@ def shape_symbol_hits(content_hits, fmap_result):
     merged = []
     for hit in content_hits:
         entry = dict(hit)
-        entry["symbols"] = symbol_map.get(hit["file"], [])
+        file_symbols = symbol_map.get(hit["file"], [])
+        entry["symbols"] = file_symbols
+
+        # Collect symbol names for definition heuristic
+        sym_names = []
+        for sym in file_symbols:
+            if isinstance(sym, dict):
+                sym_names.append(sym.get("name", ""))
+            else:
+                sym_names.append(str(sym))
+
+        # Annotate matches with type if they look like definitions
+        if "matches" in entry:
+            for match in entry["matches"]:
+                text = match.get("text", "")
+                if _is_definition(text, sym_names):
+                    match["type"] = "definition"
+
         merged.append(entry)
     return merged
 
@@ -394,15 +432,13 @@ def orchestrate(request):
     start_time = time.time()
 
     query = request.get("query", "").strip()
-    path = request.get("path", "")
+    path = request.get("path") or "."
     scope = request.get("scope", None)
     explicit_intent = request.get("intent", None)
 
     # ── Validation ───────────────────────────────────────────────────────
     if not query:
         return {"error": "query is required", "query": query}
-    if not path:
-        return {"error": "path is required", "query": query}
 
     # ── Classify ─────────────────────────────────────────────────────────
     resolved_intent, confidence, reason = classify_intent(query, explicit_intent)
@@ -432,7 +468,7 @@ def orchestrate(request):
             if timed_out:
                 truncated = True
                 break
-            if resolved_intent == "file" and not scope:
+            if resolved_intent == "file":
                 hits = shape_file_hits(file_list)
 
         elif tool_name == "fcontent":
