@@ -31,12 +31,36 @@ def extract_strings(data, min_length=6):
     return results
 
 
-def filter_strings(strings, needle, ignore_case=False):
-    """Filter extracted strings to those containing needle."""
-    if ignore_case:
-        needle_lower = needle.lower()
-        return [s for s in strings if needle_lower in s["text"].lower()]
-    return [s for s in strings if needle in s["text"]]
+def filter_strings(strings, needle, ignore_case=False, context=200):
+    """Filter extracted strings to those containing needle.
+    
+    Long strings are trimmed to a window of `context` chars around each match
+    so results stay usable on real binaries (where a single printable run
+    can be 50KB+).
+    """
+    results = []
+    needle_cmp = needle.lower() if ignore_case else needle
+    for s in strings:
+        text = s["text"]
+        text_cmp = text.lower() if ignore_case else text
+        idx = text_cmp.find(needle_cmp)
+        if idx == -1:
+            continue
+        # Short string — return as-is
+        if len(text) <= context * 2 + len(needle):
+            results.append(s)
+            continue
+        # Long string — trim to window around match
+        win_start = max(0, idx - context)
+        win_end = min(len(text), idx + len(needle) + context)
+        trimmed = text[win_start:win_end]
+        results.append({
+            "offset": s["offset"] + win_start,
+            "length": win_end - win_start,
+            "text": trimmed,
+            "trimmed_from": s["length"],
+        })
+    return results
 
 
 def scan_pattern(data, pattern, context=300, ignore_case=False):
