@@ -562,7 +562,7 @@ async function cli(tool, args, renderAs) {
 }
 
 // ─── Server ──────────────────────────────────────────────────────
-const server = new McpServer({ name: "fsuite", version: "1.0.0" });
+const server = new McpServer({ name: "fsuite", version: "2.2.0" });
 
 // ─── ftree ───────────────────────────────────────────────────────
 server.registerTool(
@@ -651,12 +651,11 @@ server.registerTool(
     inputSchema: z.object({
       query: z.string().describe("Literal string to search for"),
       path: z.string().optional().describe("Directory to search (recursive). Default: cwd"),
-      output: z.enum(["json", "paths", "pretty"]).default("json").describe("Output format"),
       max_matches: z.number().optional().describe("Limit matched lines (default 200)"),
       case_insensitive: z.boolean().optional().describe("Case-insensitive search"),
     }),
   },
-  async ({ query, path, output, max_matches, case_insensitive }) => {
+  async ({ query, path, max_matches, case_insensitive }) => {
     const args = [query];
     if (path) args.push(path);
     // Always get JSON from CLI — MCP renderer handles pretty formatting with syntax highlighting
@@ -811,6 +810,44 @@ server.registerTool(
     const args = [action];
     if (tool) args.push("--tool", tool);
     return cli("fmetrics", args);
+  }
+);
+
+// ─── Start
+// ─── fprobe ─────────────────────────────────────────────────────
+server.registerTool(
+  "fprobe",
+  {
+    title: "fprobe",
+    description:
+      "Binary/opaque file reconnaissance. Extracts printable strings, scans for literal " +
+      "byte patterns with context, and reads raw byte windows at known offsets. Works on " +
+      "compiled binaries, SEA bundles, packed assets — anything with embedded text.",
+    inputSchema: z.object({
+      action: z.enum(["strings", "scan", "window"]).describe("Subcommand"),
+      file: z.string().describe("File to probe"),
+      filter: z.string().optional().describe("Filter strings to those containing this literal (strings mode)"),
+      pattern: z.string().optional().describe("Literal pattern to find (scan mode)"),
+      context: z.number().optional().describe("Bytes of context around match (scan mode, default 300)"),
+      offset: z.number().optional().describe("Byte offset to read from (window mode)"),
+      before: z.number().optional().describe("Bytes before offset (window mode, default 0)"),
+      after: z.number().optional().describe("Bytes after offset (window mode, default 200)"),
+      decode: z.enum(["printable", "utf8", "hex"]).optional().describe("Decode mode (window mode, default printable)"),
+      ignore_case: z.boolean().optional().describe("Case-insensitive matching"),
+    }),
+  },
+  async ({ action, file, filter, pattern, context, offset, before, after, decode, ignore_case }) => {
+    const args = [action, file];
+    if (action === "strings" && filter) args.push("--filter", filter);
+    if (action === "scan" && pattern) args.push("--pattern", pattern);
+    if (context) args.push("--context", String(context));
+    if (offset !== undefined) args.push("--offset", String(offset));
+    if (before !== undefined) args.push("--before", String(before));
+    if (after !== undefined) args.push("--after", String(after));
+    if (decode) args.push("--decode", decode);
+    if (ignore_case) args.push("--ignore-case");
+    args.push("-o", "json");
+    return cli("fprobe", args);
   }
 );
 

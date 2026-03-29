@@ -1,6 +1,6 @@
 # fsuite Test Suite
 
-Comprehensive test suite for the fsuite CLI tools (fsearch, fcontent, ftree).
+Comprehensive test suite for all ten fsuite CLI tools: fsearch, fcontent, ftree, fmap, fread, fedit, fcase, freplay, fmetrics, fprobe.
 
 ## Test Files
 
@@ -76,7 +76,7 @@ Comprehensive test suite for the fsuite CLI tools (fsearch, fcontent, ftree).
 ### Master Test Runner
 
 1. **run_all_tests.sh** - Master script that runs all test suites
-   - Runs all six test suites in sequence
+- Runs all ten test suites in sequence (fsearch, fcontent, ftree, fmap, fread, fedit, fcase, freplay, fprobe, install)
    - Provides unified summary
    - Returns appropriate exit codes
 ## Running the Tests
