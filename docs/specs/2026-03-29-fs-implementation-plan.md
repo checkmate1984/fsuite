@@ -899,13 +899,15 @@ server.registerTool(
     }),
   },
   async ({ query, path, scope, intent }) => {
+    // fs bypasses cli() — cli() wraps in { content }, but we need raw JSON
+    // for structuredContent. Use run() + resolveTool() directly.
     const args = ["-o", "json", query];
     if (path) args.push("--path", path);
     if (scope) args.push("--scope", scope);
     if (intent) args.push("--intent", intent);
-    const raw = await cli(resolveTool("fs"), args);
+    const { stdout } = await run(resolveTool("fs"), args, EXEC_OPTS);
     try {
-      const parsed = JSON.parse(raw);
+      const parsed = JSON.parse(stdout);
       // Build human-readable summary
       const chain = parsed.selected_chain?.join(" → ") || "?";
       const hitCount = parsed.hits?.length || 0;

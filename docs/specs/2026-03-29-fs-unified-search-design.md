@@ -240,8 +240,9 @@ Agents can use `route_confidence: "low"` as a signal to override with explicit `
 fs is registered as a new tool alongside all existing primitives. Existing tools are NOT removed.
 
 **structuredContent + outputSchema:** Binary analysis of Claude Code v2.1.87 confirms the client
-fully supports `structuredContent` with `outputSchema` validation. If a tool declares `outputSchema`
-but omits `structuredContent`, Claude Code throws an error. The client propagates structured data
+fully supports `structuredContent` with `outputSchema` validation. Observed behavior (v2.1.87,
+not an SDK guarantee): if a tool declares `outputSchema` but omits `structuredContent`, Claude
+Code throws an error. The client propagates structured data
 through `mcpMeta` for typed rendering. Since the fs engine already outputs JSON, we return both
 `content` (human-readable text summary) and `structuredContent` (the full JSON result) from v1.
 
@@ -279,13 +280,14 @@ server.registerTool("fs", {
     }).nullable(),
   }),
 }, async ({ query, path, scope, intent }) => {
+  // fs bypasses cli() because cli() wraps in { content } and we need raw JSON
+  // for structuredContent. Use run() + resolveTool() directly (same primitives cli() uses).
   const args = ["-o", "json", query];
   if (path) args.push("--path", path);
   if (scope) args.push("--scope", scope);
   if (intent) args.push("--intent", intent);
-  const raw = await cli(resolveTool("fs"), args);  // uses existing cli() helper
-  const parsed = JSON.parse(raw);
-  // Build human-readable summary inline (no new helper needed)
+  const { stdout } = await run(resolveTool("fs"), args, EXEC_OPTS);
+  const parsed = JSON.parse(stdout);
   const chain = parsed.selected_chain?.join(" → ") || "?";
   const hitCount = parsed.hits?.length || 0;
   const summary = `${parsed.resolved_intent} (${parsed.route_confidence}) via ${chain}\n` +
