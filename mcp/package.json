@@ -1,0 +1,20 @@
+{
+  "name": "fsuite-mcp",
+  "version": "2.3.0",
+  "description": "MCP adapter for fsuite CLI tools",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "highlight.js": "^11.11.1"
+  },
+  "bin": {
+    "fsuite-mcp": "./index.js"
+  }
+}

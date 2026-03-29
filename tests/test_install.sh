@@ -70,8 +70,13 @@ test_prefix_install_copies_tools_and_assets() {
     "${prefix}/bin/fcase" \
     "${prefix}/bin/fedit" \
     "${prefix}/bin/fmetrics" \
+    "${prefix}/bin/freplay" \
+    "${prefix}/bin/fprobe" \
+    "${prefix}/bin/fs" \
     "${prefix}/share/fsuite/_fsuite_common.sh" \
-    "${prefix}/share/fsuite/fmetrics-predict.py"; do
+    "${prefix}/share/fsuite/fmetrics-predict.py" \
+    "${prefix}/share/fsuite/fs-engine.py" \
+"${prefix}/share/fsuite/fprobe-engine.py"; do
     [[ -e "$path" ]] || missing=1
   done
 
@@ -100,6 +105,9 @@ test_prefix_install_versions_work() {
     FSUITE_TELEMETRY=0 "${prefix}/bin/fcase" --version
     FSUITE_TELEMETRY=0 "${prefix}/bin/fedit" --version
     FSUITE_TELEMETRY=0 "${prefix}/bin/fmetrics" --version
+    FSUITE_TELEMETRY=0 "${prefix}/bin/freplay" --version
+    FSUITE_TELEMETRY=0 "${prefix}/bin/fprobe" --version
+    FSUITE_TELEMETRY=0 FSUITE_SHARE_DIR="${prefix}/share/fsuite" "${prefix}/bin/fs" --version
   )
 
   if [[ "$output" =~ fsuite\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
@@ -110,7 +118,10 @@ test_prefix_install_versions_work() {
      [[ "$output" =~ fread\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
      [[ "$output" =~ fcase\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
      [[ "$output" =~ fedit\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
-     [[ "$output" =~ fmetrics\ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+     [[ "$output" =~ fmetrics\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
+     [[ "$output" =~ freplay\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
+     [[ "$output" =~ fprobe\ [0-9]+\.[0-9]+\.[0-9]+ ]] && \
+     [[ "$output" =~ fs\ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
     pass "Installed tools report versions from the prefix"
   else
     fail "Installed tools should be executable from the prefix" "Got: $output"
@@ -170,7 +181,7 @@ test_fsuite_help_explains_flow() {
   output=$(FSUITE_TELEMETRY=0 "${prefix}/bin/fsuite" 2>&1)
 
   if [[ "$output" == *"Canonical agent flow"* ]] && \
-     [[ "$output" == *"ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> fmetrics"* ]] && \
+     [[ "$output" == *"ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> freplay -> fmetrics"* ]] && \
      [[ "$output" == *"Composable sensor suite"* ]] && \
      [[ "$output" == *"Literal search is a strength here, not a fallback."* ]] && \
      [[ "$output" == *"fcase     Preserve investigation state and hand off cleanly"* ]]; then
@@ -214,7 +225,11 @@ test_debian_packaging_declares_fcase_runtime_contract() {
 
   if [[ "$control" == *"Depends: "* ]] && \
      [[ "$control" == *"sqlite3"* ]] && \
-     [[ "$rules" == *"install -D -m 755 fcase "* ]]; then
+     [[ "$rules" == *"install -D -m 755 fcase "* ]] && \
+[[ "$rules" == *"fprobe"* ]] && \
+[[ "$rules" == *"fs "* ]] && \
+[[ "$rules" == *"fprobe-engine.py"* ]] && \
+[[ "$rules" == *"fs-engine.py"* ]]; then
     pass "Debian packaging declares fcase runtime dependency and install path"
   else
     fail "Debian packaging should include sqlite3 and install fcase" "control=$control rules=$rules"

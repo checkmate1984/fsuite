@@ -69,6 +69,8 @@ declare -A TOOL_MODE_DEFAULT=(
   [fmap]="read_only"
   [fread]="read_only"
   [fedit]="read_only"
+  [fprobe]="read_only"
+  [fs]="read_only"
 )
 
 # Mode classification per fcase subcommand (subcommand → mode).
@@ -177,7 +179,7 @@ cmd_self_check() {
 is_fsuite_tool() {
   local tool_basename="$1"
   case "$tool_basename" in
-    ftree|fsearch|fcontent|fmap|fread|fcase|fedit|fsuite|fmetrics|freplay) return 0 ;;
+    ftree|fsearch|fcontent|fmap|fread|fcase|fedit|fsuite|fmetrics|freplay|fprobe|fs) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1076,6 +1078,7 @@ steps_raw  = sys.argv[1]
 links_raw  = sys.argv[2]
 db_file    = sys.argv[3]
 output_fmt = sys.argv[4]
+script_dir = sys.argv[5]
 
 def sqlite_query(db, sql):
     try:
@@ -1114,6 +1117,10 @@ if steps_raw.strip():
                 if d and os.path.isfile(os.path.join(d, tool_name)) and os.access(os.path.join(d, tool_name), os.X_OK):
                     found = True
                     break
+            if not found and script_dir:
+                sibling_tool = os.path.join(script_dir, tool_name)
+                if os.path.isfile(sibling_tool) and os.access(sibling_tool, os.X_OK):
+                    found = True
         if not found:
             issues.append(f'tool {tool_name!r} not found in PATH')
             status = 'fail'
@@ -1263,7 +1270,7 @@ else:
         else:
             print(f\"Step {sr['order']}: {sr['tool']} — {s}\")
     print(f'Overall: {overall.upper()}')
-" "$steps_rows" "$links_rows" "$DB_FILE" "$output")"
+" "$steps_rows" "$links_rows" "$DB_FILE" "$output" "$_FSUITE_SCRIPT_DIR")"
 
   echo "$verify_result"
 

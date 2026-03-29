@@ -1,6 +1,6 @@
 # fsuite Test Suite
 
-Comprehensive test suite for the fsuite CLI tools (fsearch, fcontent, ftree).
+Comprehensive test suite for all twelve fsuite CLI tools: fsearch, fcontent, ftree, fmap, fread, fedit, fcase, freplay, fmetrics, fprobe, fs, fwrite.
 
 ## Test Files
 
@@ -47,7 +47,7 @@ Comprehensive test suite for the fsuite CLI tools (fsearch, fcontent, ftree).
      - Pipeline (fsearch | fmap)
 
 1. **test_ftree.sh** - Tests for ftree (directory tree tool)
-   - 54 test cases covering:
+   - 48 test cases covering:
      - Basic tree mode functionality
      - Recon mode (directory scanning with sizes)
      - Snapshot mode (combined recon + tree)
@@ -56,6 +56,53 @@ Comprehensive test suite for the fsuite CLI tools (fsearch, fcontent, ftree).
      - Ignore patterns and includes
      - Edge cases and boundary conditions
      - Flag validation
+
+1. **test_fread.sh** - Tests for fread (budgeted file reader)
+   - 42 test cases covering:
+     - Head/tail/line-range reads
+     - Symbol resolution by name
+     - Context windows around pattern matches
+     - Budget enforcement (max_lines cap)
+     - Error handling (missing files, bad ranges)
+
+1. **test_fedit.sh** - Tests for fedit (surgical file editor)
+   - 38 test cases covering:
+     - Function-scoped replace
+     - Exact-string replace
+     - Line-range replace (`--lines START:END`)
+     - Insert after/before anchor
+     - Dry-run preview (`apply: false`)
+     - Precondition checks (`expect`)
+     - Diff output validation
+
+1. **test_fcase.sh** - Tests for fcase (investigation ledger)
+   - 25 test cases covering:
+     - Case init, status, list
+     - Note and evidence recording
+     - Hypothesis add/set/reject
+     - Target add and import
+     - Handoff and export
+
+1. **test_freplay.sh** - Tests for freplay (derivation tracker)
+   - 14 test cases covering:
+     - `freplay record <slug> -- <command>` syntax
+     - Replay list and show
+     - Exclusion of freplay/fmetrics from recorded commands
+
+1. **test_fprobe.sh** - Tests for fprobe (binary recon)
+   - 25 test cases covering:
+     - `fprobe window` with `--offset`, `--before`, `--after`, `--decode`
+     - `fprobe scan --pattern` with `--context`
+     - JSON and text output modes
+     - Error handling (missing files, bad flags)
+
+1. **test_fs.sh** - Tests for fs (unified search dispatcher)
+   - 18 test cases covering:
+     - Intent auto-detection (glob, camelCase, snake_case, SCREAMING_CASE, multi-word, bare-word)
+     - `--intent` override flag
+     - `--scope GLOB` narrowing
+     - `next_hint` field in JSON output
+     - Hard caps (`--max-candidates`, `--max-enrich`, `--timeout`)
 
 ### Integration Tests
 
@@ -76,7 +123,7 @@ Comprehensive test suite for the fsuite CLI tools (fsearch, fcontent, ftree).
 ### Master Test Runner
 
 1. **run_all_tests.sh** - Master script that runs all test suites
-   - Runs all six test suites in sequence
+   - Runs all fourteen test suites in sequence (fsearch, fcontent, ftree, fmap, fread, fedit, fcase, freplay, fprobe, fmetrics, fs, pipelines, mcp_rendering, install)
    - Provides unified summary
    - Returns appropriate exit codes
 ## Running the Tests
@@ -98,6 +145,39 @@ bash test_fcontent.sh
 
 # Test ftree
 bash test_ftree.sh
+
+# Test fmap
+bash test_fmap.sh
+
+# Test fread
+bash test_fread.sh
+
+# Test fedit
+bash test_fedit.sh
+
+# Test fcase
+bash test_fcase.sh
+
+# Test freplay
+bash test_freplay.sh
+
+# Test fprobe
+bash test_fprobe.sh
+
+# Test fmetrics
+bash test_fmetrics.sh
+
+# Test fs
+bash test_fs.sh
+
+# Test pipelines
+bash test_pipelines.sh
+
+# Test MCP rendering
+bash test_mcp_rendering.sh
+
+# Test install
+bash test_install.sh
 
 # Test integrations
 bash test_integration.sh
@@ -204,14 +284,22 @@ bash test_integration.sh
 
 ## Test Results Summary
 
-**Total Test Cases: 273**
+**Total Test Cases: ~425 across 14 suites**
 
-- fsearch: 37 tests
-- fcontent: 47 tests
-- fmap: 72 tests
-- ftree: 54 tests
-- Integration: 33 tests
-- Telemetry: 30 tests
+- fsearch: 35 tests
+- fcontent: 30 tests
+- ftree: 48 tests
+- fmap: 80 tests
+- fread: 42 tests
+- fedit: 38 tests
+- fcase: 25 tests
+- freplay: 14 tests
+- fprobe: 25 tests
+- fmetrics: 20 tests
+- fs: 18 tests
+- pipelines: 22 tests
+- mcp_rendering: 16 tests
+- install: 12 tests
 
 ## Dependencies
 

@@ -591,6 +591,30 @@ print('ok')
   fi
 }
 
+test_verify_source_tree_tool_resolution() {
+  init_case "verify-src" "verify source-tree tool resolution"
+  run_freplay record verify-src -- "${FTREE}" --version >/dev/null 2>&1 || true
+
+  local shim_dir
+  shim_dir="$(mktemp -d)"
+  local cmd
+  for cmd in bash cat dirname python3 readlink realpath sqlite3 whoami; do
+    ln -sf "$(command -v "${cmd}")" "${shim_dir}/${cmd}"
+  done
+
+  local output rc=0 overall
+  output=$(HOME="${TEST_HOME}" FSUITE_TELEMETRY=0 PATH="${shim_dir}" bash "${FREPLAY}" verify verify-src -o json 2>&1) || rc=$?
+  overall=$(python3 -c "import json,sys; print(json.loads(sys.stdin.read())['overall'])" <<< "$output" 2>/dev/null || true)
+
+  rm -rf "${shim_dir}"
+
+  if [[ "$overall" == "pass" ]]; then
+    pass "Verify resolves repo-local tools without relying on PATH installs"
+  else
+    fail "Verify should resolve repo-local tools without relying on PATH installs" "overall=$overall rc=$rc output=$output"
+  fi
+}
+
 # =========================================================================
 # Edge cases (tests 35-53)
 # =========================================================================
@@ -1008,6 +1032,7 @@ main() {
   run_test test_verify_missing_tool
   run_test test_verify_no_execution
   run_test test_verify_json
+  run_test test_verify_source_tree_tool_resolution
 
   # Edge cases (tests 35-53)
   run_test test_nonexistent_case

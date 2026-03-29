@@ -150,6 +150,9 @@ REPLACE_FILE_MODE=0
 REPLACE_TEXT=""
 AFTER_TEXT=""
 BEFORE_TEXT=""
+LINES_RANGE=""
+LINES_START=""
+LINES_END=""
 SYMBOL_NAME=""
 SYMBOL_TYPE=""
 SHORTCUT_SYMBOL=""
@@ -1519,6 +1522,12 @@ parse_args() {
         _TELEM_FLAGS+=" --replace"
         shift 2
         ;;
+      --lines)
+        [[ -n "${2:-}" ]] || { ERROR_CODE="invalid_args"; die "Missing value for --lines (use START:END)"; }
+        LINES_RANGE="$2"
+        _TELEM_FLAGS+=" --lines"
+        shift 2
+        ;;
       --with)
         [[ "${2+x}" ]] || { ERROR_CODE="invalid_args"; die "Missing value for --with"; }
         WITH_TEXT="$2"
@@ -1821,6 +1830,21 @@ validate_args() {
     return 0
   fi
 
+  # --- Line-range mode: --lines START:END --with TEXT ---
+  if [[ -n "$LINES_RANGE" ]]; then
+    MODE="lines"
+    if ! [[ "$LINES_RANGE" =~ ^([0-9]+):([0-9]+)$ ]]; then
+      ERROR_CODE="invalid_args"
+      die "--lines must be START:END (e.g. 71:73)"
+    fi
+    LINES_START="${BASH_REMATCH[1]}"
+    LINES_END="${BASH_REMATCH[2]}"
+    (( LINES_START >= 1 )) || { ERROR_CODE="invalid_args"; die "--lines START must be >= 1 (lines are 1-indexed)"; }
+    (( LINES_START <= LINES_END )) || { ERROR_CODE="invalid_args"; die "--lines START must be <= END"; }
+    (( WITH_SET == 1 )) || { ERROR_CODE="invalid_args"; die "--lines requires --with"; }
+    return 0
+  fi
+
   MODE="patch"
   local op_count=0
   [[ -n "$REPLACE_TEXT" ]] && op_count=$((op_count + 1))
@@ -1861,6 +1885,16 @@ process_edit() {
         ;;
       patch)
         build_patch_candidate "$original_file" "$candidate_file" || op_rc=$?
+        ;;
+      lines)
+        local original_content
+        original_content=$(cat "$original_file")
+        splice_line_range "$original_file" "$LINES_START" "$LINES_END" "$(normalized_payload_file "$original_content")" "$candidate_file" || {
+          op_rc=$?
+          ERROR_CODE="lines_out_of_range"
+          ERROR_DETAIL="Line range ${LINES_START}:${LINES_END} could not be applied"
+        }
+        ANCHORS_MATCHED=1
         ;;
       *)
         ERROR_CODE="invalid_args"

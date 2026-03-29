@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# fprobe — binary/opaque file reconnaissance for fsuite.
+# Read-only sensor for compiled bundles, SEA binaries, and packed assets.
+#
+# Subcommands:
+#   strings  Extract printable strings, optionally filtered
+#   scan     Find literal patterns with byte-offset context
+#   window   Read a byte window at a known offset
+#
+# Architecture: Bash entrypoint + Python engine (fprobe-engine.py)
+# The engine does byte-safe mmap reads; this layer handles CLI UX and formatting.
+
+set -euo pipefail
+
+VERSION="2.2.0"
+
+# ── Locate engine ────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
+ENGINE="${SCRIPT_DIR}/fprobe-engine.py"
+
+if [[ ! -f "$ENGINE" ]]; then
+  # Try installed location
+  for candidate in \
+    "${FSUITE_SHARE_DIR:-/nonexistent}/fprobe-engine.py" \
+    "${SCRIPT_DIR}/../share/fsuite/fprobe-engine.py" \
+    "/usr/local/share/fsuite/fprobe-engine.py" \
+    "/usr/share/fsuite/fprobe-engine.py"; do
+    if [[ -f "$candidate" ]]; then
+      ENGINE="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ ! -f "$ENGINE" ]]; then
+  echo "fprobe: error: fprobe-engine.py not found" >&2
+  exit 1
+fi
+
+# ── Helpers ──────────────────────────────────────────────────────
+die() { echo "fprobe: $*" >&2; exit 1; }
+
+usage() {
+cat <<'EOF'
+fprobe — binary/opaque file reconnaissance
+
+USAGE
+  fprobe strings <file> [--filter <literal>] [--ignore-case] [-o pretty|json]
+  fprobe scan    <file> --pattern <literal> [--context N] [--ignore-case] [-o pretty|json]
+  fprobe window  <file> --offset N [--before N] [--after N] [--decode printable|utf8|hex] [-o pretty|json]
+
+  fprobe --version
+  fprobe --help
+
+DESCRIPTION
+  Read-only reconnaissance for opaque files — compiled binaries, SEA bundles,
+  packed assets. Finds markers, inspects byte neighborhoods, extracts strings.
+
+  strings   Extract printable ASCII runs (≥6 chars). --filter narrows to matches.
+  scan      Find literal byte patterns. Returns offset + surrounding context.
+  window    Read raw bytes at a known offset. Decode as printable, utf8, or hex.
+
+OUTPUT MODES
+  -o pretty   Human-readable (default for terminal)
+  -o json     Machine-readable JSON (default when piped)
+
+EXAMPLES
+  fprobe strings claude-binary --filter "renderTool"
+  fprobe scan claude-binary --pattern "userFacingName" --context 500
+  fprobe window claude-binary --offset 112202147 --before 200 --after 3000
+  fprobe window claude-binary --offset 0 --after 16 --decode hex
+EOF
+}
+
+# ── Detect output mode ───────────────────────────────────────────
+OUTPUT_MODE=""
+
+detect_output_mode() {
+  if [[ -n "$OUTPUT_MODE" ]]; then return; fi
+  if [[ -t 1 ]]; then
+    OUTPUT_MODE="pretty"
+  else
+    OUTPUT_MODE="json"
+  fi
+}
+
+# ── Pretty formatters ───────────────────────────────────────────
+DIM=$'\033[2m'
+UNDIM=$'\033[22m'
+BOLD=$'\033[1m'
+CYAN=$'\033[36m'
+YELLOW=$'\033[33m'
+GREEN=$'\033[32m'
+NC=$'\033[0m'
+
+pretty_strings() {
+  # Input: JSON array from engine
+  local json_data="$1"
+  local count
+  count=$(echo "$json_data" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>&1) || {
+    echo "fprobe: error parsing strings output: $count" >&2
+    return 1
+  }
+
+  if [[ "$count" == "0" ]]; then
+    echo "${DIM}0 matches${UNDIM}"
+    return
+  fi
+
+  echo "${DIM}${count} strings${UNDIM}"
+  echo "$json_data" | python3 -c "
+import sys, json
+for s in json.load(sys.stdin):
+    offset = s['offset']
+    text = s['text']
+    # Truncate long strings for display
+    if len(text) > 120:
+        text = text[:117] + '...'
+    print(f'  \033[2m{offset:>10}\033[22m  {text}')
+" || { echo "fprobe: error rendering strings output" >&2; return 1; }
+}
+
+pretty_scan() {
+  local json_data="$1"
+  local count
+  count=$(echo "$json_data" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>&1) || {
+    echo "fprobe: error parsing scan output: $count" >&2
+    return 1
+  }
+
+  if [[ "$count" == "0" ]]; then
+    echo "${DIM}0 matches${UNDIM}"
+    return
+  fi
+
+  echo "${DIM}${count} matches${UNDIM}"
+  echo "$json_data" | python3 -c "
+import sys, json
+for i, m in enumerate(json.load(sys.stdin)):
+    offset = m['offset']
+    text = m['text']
+    print(f'')
+    print(f'\033[1m=== match {i+1} at offset {offset} ===\033[22m')
+    print(text)
+" || { echo "fprobe: error rendering scan output" >&2; return 1; }
+}
+
+pretty_window() {
+  local json_data="$1"
+  echo "$json_data" | python3 -c "
+import sys, json
+w = json.load(sys.stdin)
+if 'error' in w and w['error']:
+    print(f\"fprobe: {w['error']}\")
+    sys.exit(0)
+offset = w.get('offset', 0)
+start = w.get('start', 0)
+end = w.get('end', 0)
+decode = w.get('decode', 'printable')
+size = w.get('file_size', 0)
+print(f'\033[2moffset {offset} | bytes {start}..{end} | file {size}B | {decode}\033[22m')
+print(w.get('text', ''))
+" || { echo "fprobe: error rendering window output" >&2; return 1; }
+}
+
+# ── Main dispatch ────────────────────────────────────────────────
+
+# Parse top-level flags
+if [[ $# -eq 0 ]]; then
+  usage >&2
+  exit 1
+fi
+
+case "${1:-}" in
+  --version) echo "fprobe ${VERSION}"; exit 0 ;;
+  --help|-h) usage; exit 0 ;;
+  help)      usage; exit 0 ;;
+esac
+
+SUBCMD="$1"
+shift
+
+case "$SUBCMD" in
+  strings|scan|window) ;;
+  *) die "unknown subcommand: $SUBCMD (use strings, scan, or window)" ;;
+esac
+
+# ── Pre-parse -o flag; pass remaining args to engine ─────────────
+OUTPUT_MODE=""
+ENGINE_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o)
+      [[ $# -ge 2 ]] || die "-o requires argument"
+      OUTPUT_MODE="$2"
+      shift 2
+      ;;
+    *)
+      ENGINE_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+detect_output_mode
+
+# ── Run engine ───────────────────────────────────────────────────
+_stderr_tmp=$(mktemp)
+json_output=$(python3 "$ENGINE" "$SUBCMD" ${ENGINE_ARGS[@]+"${ENGINE_ARGS[@]}"} 2>"$_stderr_tmp") || {
+  rc=$?
+  cat "$_stderr_tmp" >&2
+  rm -f "$_stderr_tmp"
+  exit $rc
+}
+rm -f "$_stderr_tmp"
+
+# ── Format output ────────────────────────────────────────────────
+if [[ "$OUTPUT_MODE" == "json" ]]; then
+  echo "$json_output"
+else
+  case "$SUBCMD" in
+    strings) pretty_strings "$json_output" ;;
+    scan)    pretty_scan "$json_output" ;;
+    window)  pretty_window "$json_output" ;;
+  esac
+fi

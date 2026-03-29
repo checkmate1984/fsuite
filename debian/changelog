@@ -1,3 +1,9 @@
+fsuite (2.3.0-1) unstable; urgency=medium
+
+* New tools: fprobe (binary recon), fs (unified search). fedit --lines mode. MCP dev mode. Pixel-perfect rendering.
+
+-- Chess Williams <chess.w.williams@gmail.com>  Sat, 29 Mar 2026 14:00:00 -0500
+
 fsuite (2.2.0-1) unstable; urgency=medium
 
   * feat(freplay): new tool — derivation replay ledger for fsuite investigations

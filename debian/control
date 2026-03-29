@@ -14,20 +14,22 @@ Architecture: all
 Depends: ${misc:Depends}, bash (>= 4.0), coreutils, findutils, perl, sqlite3
 Recommends: tree, ripgrep, fd-find, python3
 Description: Filesystem investigation toolkit for humans and AI agents
- fsuite provides a suite-level help command plus nine composable CLI
+ fsuite provides a suite-level help command plus twelve composable CLI
  tools that turn filesystem reconnaissance, continuity, and editing into
  a clean, scriptable, agent-friendly pipeline:
  .
-  * fsuite - Show the conceptual workflow and suite-level guidance
-  * fsearch - Find files by name, extension, or glob pattern
-  * fcontent - Search inside files for text (powered by ripgrep)
-  * ftree - Visualize directory structure with smart defaults and recon mode
-  * fmap - Extract structural skeleton of code files (code cartography)
-  * fread - Read files with budgets, context windows, and diff-aware ranges
-  * fcase - Preserve investigation state and hand off the live case cleanly
-  * fedit - Apply surgical text patches with batch mode, symbol shortcuts, and dry-run diffs
-  * freplay - Record and replay derivation paths for investigation reproducibility
-  * fmetrics - Analyze local telemetry and predict runtime
+ * ftree - Visualize directory structure with smart defaults and recon mode
+ * fmap - Extract structural skeleton of code files (code cartography)
+ * fread - Read files with budgets, context windows, and diff-aware ranges
+ * fcontent - Search inside files for text (powered by ripgrep)
+ * fsearch - Find files by name, extension, or glob pattern
+ * fedit - Apply surgical text patches with batch mode, symbol shortcuts, and dry-run diffs
+ * fwrite - Create or replace files with atomic writes
+ * fcase - Preserve investigation state and hand off the live case cleanly
+ * freplay - Record and replay derivation paths for investigation reproducibility
+ * fprobe - Binary recon and file introspection
+ * fs - Unified filesystem search across content and structure
+ * fmetrics - Analyze local telemetry and predict runtime
  .
  The reconnaissance tools output in multiple formats (pretty, paths,
  JSON) for both human and programmatic consumption. The continuity layer

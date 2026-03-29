@@ -16,23 +16,37 @@
 
 ---
 
-**A suite-level guide plus eight operational tools for filesystem reconnaissance, continuity, patching, and analytics.**
+**A suite-level guide plus twelve operational tools for filesystem reconnaissance, continuity, patching, replay, binary analysis, and analytics.**
 
-`fsuite` provides one suite-level guide command plus eight operational tools that turn filesystem exploration into a clean, scriptable, agent-friendly investigation workflow:
+`fsuite` provides one suite-level guide command plus twelve operational tools that turn filesystem exploration into a clean, scriptable, agent-friendly investigation workflow:
 
 | Tool | Purpose |
 |------|---------|
 | **`fsuite`** | Print the suite-level conceptual flow, tool roles, and headless usage guidance |
+| **`fs`** | Unified search entry point — classifies query intent and auto-routes to `fsearch`, `fcontent`, or `fmap` |
+| **`ftree`** | Visualize directory structure with smart defaults and recon mode |
 | **`fsearch`** | Find files by name, extension, or glob pattern |
 | **`fcontent`** | Search _inside_ files for text (powered by ripgrep) |
-| **`ftree`** | Visualize directory structure with smart defaults and recon mode |
 | **`fmap`** | Extract structural skeleton from code (code cartography) |
 | **`fread`** | Read files with budgets, ranges, context windows, and diff-aware input |
 | **`fcase`** | Preserve investigation state, evidence, and handoffs once the seam is known |
 | **`fedit`** | Apply surgical text patches with dry-run diffs, preconditions, and symbol scoping |
+| **`fwrite`** | Write or overwrite files from agent output — MCP-native, safe atomic writes (MCP adapter only) |
+| **`freplay`** | Deterministic replay of recorded investigation command sequences |
+| **`fprobe`** | Binary and opaque-file reconnaissance — strings, scan, and byte-window reads |
 | **`fmetrics`** | Analyze telemetry, history, and predicted runtime |
 
-The first five operational tools are reconnaissance drones. `fcase` is the continuity ledger. `fedit` is the surgical patch arm. `fmetrics` is the flight recorder and analyst. Together they cover **scout -> find/search -> map -> read -> preserve -> edit -> measure**. The `fsuite` command is the suite-level explainer that teaches that flow to humans and agents on first contact.
+The first reconnaissance tools are the sensor layer. `fs` is the unified entry point that accepts a raw query, classifies intent (path pattern, literal content, or structural symbol), and builds the right tool chain automatically — removing the decision overhead from the agent's first move. `fcase` is the continuity ledger. `fedit` is the surgical patch arm. `fwrite` is the safe write surface exposed through the MCP adapter. `freplay` is the investigation playback engine. `fprobe` is the binary sensor. `fmetrics` is the flight recorder and analyst. Together they cover **scout -> find/search -> map -> read -> preserve -> edit -> replay -> probe -> measure**. The `fsuite` command is the suite-level explainer that teaches that flow to humans and agents on first contact.
+
+The flow an agent should internalize:
+
+```text
+fs -> ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> freplay -> fmetrics
+                                                                    ^
+                                                                fprobe (binary/opaque files)
+```
+
+`fs` auto-routes the opening move. `fprobe` branches off the main pipeline whenever the target is a compiled binary, packed asset, or SEA bundle. Everything else flows left to right.
 
 Works with **Claude Code**, **Codex**, **OpenCode**, and any shell-capable agent harness that can call local binaries.
 
@@ -41,8 +55,11 @@ Works with **Claude Code**, **Codex**, **OpenCode**, and any shell-capable agent
 | `./install.sh --user` | Fast local install without sudo | Recommended |
 | Debian package | Linux release installs | Available |
 | Source + manual symlink | Power users and repo hacking | Available |
+| MCP adapter (`mcp/`) | Native tool calls in Claude Code / Codex / OpenCode — exposes all tools as first-class MCP calls | Available |
 | Homebrew tap | macOS-native package install | Roadmap |
 | npm wrapper | Installer/distribution wrapper, not a rewrite | Roadmap |
+
+The MCP adapter (`mcp/index.js`) is a stateless Node.js dispatcher built on `@modelcontextprotocol/sdk`. It uses `execFile` — never `exec` — so arguments are array elements, not shell strings. Add it to your Claude Code or Codex harness config to make every fsuite tool show up as a native tool call alongside `Read`, `Edit`, and `Grep`.
 
 ## Contents
 
@@ -52,21 +69,32 @@ Works with **Claude Code**, **Codex**, **OpenCode**, and any shell-capable agent
 - [fsuite Help](#fsuite-help)
 - [Fast Paths](#fast-paths-copypaste)
 - [Tools](#tools)
-  - [fsearch](#fsearch--filename--path-search)
-  - [fcontent](#fcontent--file-content-search)
-  - [ftree](#ftree--directory-structure-visualization)
-  - [fmap](#fmap--code-cartography)
-  - [fread](#fread--budgeted-file-reading)
-  - [fcase](#fcase--continuity--handoff-ledger)
-  - [fedit](#fedit--surgical-patching)
-  - [fmetrics](#fmetrics--telemetry-analytics)
+  - [fs — unified entry point](#fs--unified-entry-point)
+  - [fsearch — filename / path search](#fsearch--filename--path-search)
+  - [fcontent — file content search](#fcontent--file-content-search)
+  - [ftree — directory structure visualization](#ftree--directory-structure-visualization)
+  - [fmap — code cartography](#fmap--code-cartography)
+  - [fread — budgeted file reading](#fread--budgeted-file-reading)
+  - [fcase — continuity / handoff ledger](#fcase--continuity--handoff-ledger)
+  - [fedit — surgical patching](#fedit--surgical-patching)
+  - [fwrite — safe atomic writes (MCP adapter)](#fwrite--safe-atomic-writes-mcp-adapter)
+  - [freplay — deterministic investigation replay](#freplay--deterministic-investigation-replay)
+  - [fprobe — binary / opaque file reconnaissance](#fprobe--binary--opaque-file-reconnaissance)
+  - [fmetrics — telemetry analytics](#fmetrics--telemetry-analytics)
+- [Chain Combinations](#chain-combinations)
+- [MCP Adapter](#mcp-adapter)
+- [Dev Mode](#dev-mode)
+- [Binary Patching](#binary-patching)
+- [Language Support](#language-support)
 - [Output Formats](#output-formats)
 - [Agent / Headless Usage](#agent--headless-usage)
 - [Cheat Sheet](#cheat-sheet)
 - [Quick Reference — Flags](#quick-reference--flags)
 - [Optional Dependencies](#optional-dependencies)
+- [Telemetry](#telemetry)
 - [Security Notes](#security-notes)
 - [Installation](#installation)
+- [Testing](#testing)
 - [Changelog](#changelog)
 - [License](#license)
 
@@ -96,28 +124,38 @@ It didn't just say "nice tools." It wrote a full self-assessment. Unprompted con
 
 That first round exposed the real missing step: after recon and search, the agent still had to spend extra calls just to read the right slice of a file. `fmap` and `fread` close that gap. `fcase` preserves the investigation once the seam is known. `fedit` turns that bounded context into a safe patch surface. `fmetrics` closes the final loop by turning live usage into operational feedback instead of guesswork.
 
+Since v2.2.0, the fleet has expanded further. `fprobe` extends the sensor layer into binary and opaque files — compiled Node.js SEA bundles, packed assets, anything `fread` can't reach. `freplay` makes recorded investigation sequences deterministically reproducible across agents and sessions. `fs` removes the opening routing decision entirely: give it a raw query and it classifies intent, builds the chain, and returns ranked results without the agent choosing between `fsearch`, `fcontent`, and `fmap` on the first move.
+
 **The workflow shift — before and after:**
 
 ```text
 BEFORE fsuite:
-  Spawn Explore agent -> 10-15 internal tool calls -> still blind on structure
+Spawn Explore agent -> 10-15 internal tool calls -> still blind on structure
 
-AFTER fsuite:
-  ftree --snapshot -o json  ->  fsearch -o paths  ->  fmap -o json  ->  fread -o json  ->  fcase init auth-seam --goal "Trace authenticate flow"  ->  fedit -o json
-  6-7 calls. Structural context, bounded reads, durable continuity, and previewable edits. Still dramatically fewer tool invocations.
+AFTER fsuite (v2.3.0):
+fs <query> /project  ->  ftree --snapshot -o json  ->  fmap -o json  ->  fread -o json
+->  fcase init <seam> --goal "..."  ->  fedit -o json  ->  freplay  ->  fmetrics stats
+7-9 calls. Structural context, bounded reads, durable continuity, previewable edits,
+replay verification, and runtime measurement. Dramatically fewer invocations.
+Binary targets? Add fprobe strings / fprobe scan to the branch.
 ```
 
 And once those reads are happening in the real world:
 
 ```text
 AFTER execution:
-  ... -> fcontent -o json (only if exact text confirmation is needed) -> fcase handoff auth-seam -o json -> fedit -o json -> fmetrics import -> fmetrics stats / predict
-  Search inside the narrowed set, preserve what matters, patch surgically, then measure what actually happened and plan the next pass.
+... -> fcontent -o json (only if exact text confirmation is needed)
+    -> fcase handoff <seam> -o json
+    -> fedit -o json
+    -> freplay --verify
+    -> fmetrics import -> fmetrics stats / predict
+Search inside the narrowed set, preserve what matters, patch surgically,
+verify the replay, then measure what actually happened and plan the next pass.
 ```
 
 > **Proof callout — Nightfox investigation:** In a live Nightfox runtime incident, the breakthrough came when the operator coached the agent to stop overcompensating and trust fsuite's direct contracts. The useful path was not a sacred sequence. It was a clean combination of `fsearch`, `fmap`, `fread`, and targeted `fcontent` that surfaced a real subprocess-lifecycle bug. The milestone was not just that the tools worked. It was that the agent stopped fighting them.
 
-The full unedited analysis is in **[AGENT-ANALYSIS.md](AGENT-ANALYSIS.md)** — the raw self-assessment, exactly as Claude Code wrote it after studying and testing every tool in this repo.
+The full unedited analysis is in **[AGENT-ANALYSIS.md](docs/AGENT-ANALYSIS.md)** — the raw self-assessment, exactly as Claude Code wrote it after studying and testing every tool in this repo.
 
 That document is the pitch. Not because we wrote it, but because the agent did.
 
@@ -135,6 +173,11 @@ cd fsuite
 
 # Suite-level guide
 ./fsuite
+
+# Unified search — auto-routes by query shape
+./fs "*.log" /var/log
+./fs renderTool /project/src
+./fs "error loading config" /project
 
 # Find all .log files under /var/log
 ./fsearch '*.log' /var/log
@@ -162,6 +205,10 @@ cd fsuite
 
 # Import telemetry and inspect runtime history
 ./fmetrics import && ./fmetrics stats
+
+# Binary recon — inspect a compiled binary
+./fprobe strings ./binary --filter "renderTool"
+./fprobe scan ./binary --pattern "SNAPSHOT_BLOB" -o json
 ```
 
 ---
@@ -172,6 +219,7 @@ fsuite works best when the agent stops compensating for weak default tooling and
 
 - Use `-o json` and `-o paths` aggressively. They are the default agent surfaces.
 - `ftree` is powerful, but use it intentionally and sparingly on large repos.
+- `fs` is the fastest opening move — it auto-classifies and routes your query.
 - `fsearch -> fmap` is a strong default when you know the area but not the seam.
 - `fcontent -o paths -> fmap` is strong when literal evidence is the cleanest narrowing signal.
 - `fsearch -> fcontent -o paths -> fmap` is a real narrowing pattern, not an anti-pattern.
@@ -179,6 +227,7 @@ fsuite works best when the agent stops compensating for weak default tooling and
 - `fmap + fread` is the power pair for understanding code.
 - `fcase` begins once the seam is known and continuity becomes the bottleneck.
 - `fedit` comes after inspected context, not before.
+- `fprobe` branches off the main pipeline when the target is binary or opaque.
 - `fmetrics` is for observability and next-pass planning, not a reason to spam `ftree`.
 
 ### Tool-Native Reasoning
@@ -189,30 +238,34 @@ The mindset shift is simple: literal search is a strength here, not a fallback. 
 
 ```text
 1. Run `fsuite` once per session to load the suite-level mental model.
-2. Run `ftree` once to establish territory before narrowing.
-3. Start with `fsearch` to narrow candidate files by path or filename.
-4. Prefer `fmap + fread` before broad `fcontent`.
-5. Use `fcontent` only for exact-text confirmation after narrowing.
-6. Prefer `-o paths` for piping, `-o json` for programmatic decisions, and `pretty` only for human terminal output.
-7. Use `-q` for silent control flow and existence checks.
-8. Use `fcase` once the seam is known and continuity becomes the bottleneck.
-9. Use `fmetrics` to measure what happened and estimate the next pass.
-10. Do not overcompensate for weak default tools. Literal search is a strength here, not a fallback.
+2. Use `fs` as the opening move — let it classify and route your query automatically.
+3. Run `ftree` once to establish territory before narrowing.
+4. Start with `fsearch` to narrow candidate files by path or filename.
+5. Prefer `fmap + fread` before broad `fcontent`.
+6. Use `fcontent` only for exact-text confirmation after narrowing.
+7. Prefer `-o paths` for piping, `-o json` for programmatic decisions, and `pretty` only for human terminal output.
+8. Use `-q` for silent control flow and existence checks.
+9. Use `fcase` once the seam is known and continuity becomes the bottleneck.
+10. Use `fprobe` when the target is a binary, SEA bundle, or packed asset.
+11. Use `fmetrics` to measure what happened and estimate the next pass.
+12. Do not overcompensate for weak default tools. Literal search is a strength here, not a fallback.
 ```
 
 ---
 
 ## fsuite Help
 
-`fsuite` is now a real suite-level guide command. The operational work still happens through the seven underlying tools, but `fsuite` is the fastest way to load the mental model.
+`fsuite` is a real suite-level guide command. The operational work still happens through the twelve underlying tools, but `fsuite` is the fastest way to load the mental model.
 
 If your harness reads repo instructions automatically, use the bundled [AGENTS.md](AGENTS.md) as the suite-level operating guide.
 
 If an agent only remembers one thing, it should remember this:
 
 ```text
-fsuite -> ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> fmetrics
-Guide     Scout    Narrowing             Bridge   Read     Preserve  Edit      Measure
+fs -> ftree -> fsearch | fcontent -> fmap -> fread -> fcase -> fedit -> freplay -> fmetrics
+Auto   Scout    Narrowing             Bridge   Read     Preserve  Edit    Replay    Measure
+                                                                    ^
+                                                                fprobe (binary)
 ```
 
 The CLI equivalent is:
@@ -226,16 +279,19 @@ fsuite
 - Composable sensor suite, not a single sacred path
 - Stronger and weaker combinations exist, but not one true sequence
 - Use `-o json` and `-o paths` aggressively
+- Use `fs` for the opening move — it auto-classifies intent
 - Treat `fmap` as the bridge in the middle of the pipeline
 - Treat literal search as a first-class narrowing move
 - Use `fcase` to preserve state once the seam is known
 - Use `fedit` only after inspected context
+- Use `fprobe` for binaries and opaque files
 - Use `fmetrics` for observability, not as a reason to repeat recon
 
 ### What Each Tool Is For
 
 | Tool | Use it when you need to answer | Best output for agents |
 |------|--------------------------------|------------------------|
+| `fs` | "Find me anything related to this query — route it for me." | `-o json` |
 | `ftree` | "What is in this project, how big is it, and where should I look first?" | `-o json` |
 | `fsearch` | "Which files match this name, extension, or glob?" | `-o paths` or `-o json` |
 | `fmap` | "What symbols exist in these source files?" | `-o json` |
@@ -243,6 +299,9 @@ fsuite
 | `fread` | "Show me the exact lines around this function, match, or diff hunk." | `-o json` |
 | `fcase` | "What matters now, what have we ruled out, and what should the next agent do?" | `-o json` |
 | `fedit` | "Preview and apply a surgical patch against the exact symbol or anchor I just inspected." | `-o json` |
+| `fwrite` | "Create or overwrite a file from agent output." (MCP only) | `-o json` |
+| `freplay` | "Show me the exact commands that produced this investigation state." | `-o json` |
+| `fprobe` | "What strings, patterns, or byte sequences live inside this binary?" | `-o json` |
 | `fmetrics` | "What did these runs cost, and what will the next one cost?" | `stats -o json`, `predict` |
 
 ### Headless Contract
@@ -260,31 +319,34 @@ fsuite
 # 0) Load the suite-level guide once
 fsuite
 
-# 1) Scout the target once
+# 1) Auto-route the opening move
+fs "authenticate" /project/src
+
+# 2) Scout the target once
 ftree --snapshot -o json /project
 
-# 2) Narrow to candidate files
+# 3) Narrow to candidate files
 fsearch -o paths '*.py' /project/src
 
-# 3) Map structure before broad reads
+# 4) Map structure before broad reads
 fsearch -o paths '*.py' /project/src | fmap -o json
 
-# 4) Read the exact code neighborhood you care about
+# 5) Read the exact code neighborhood you care about
 fread -o json /project/src/auth.py --around "def authenticate" -B 5 -A 20
 
-# 5) Preserve the current case once the seam is known
+# 6) Preserve the current case once the seam is known
 fcase init auth-seam --goal "Trace authenticate flow"
 fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 --summary "Authenticate branch" --body "..."
 fcase next auth-seam --body "Patch denial branch after reviewing symbol map"
 
-# 6) Only if you still need exact text confirmation, search inside the narrowed set
+# 7) Only if you still need exact text confirmation, search inside the narrowed set
 fsearch -o paths '*.py' /project/src | fcontent -o json "authenticate"
 
-# 7) Preview and then apply the patch
+# 8) Preview and then apply the patch
 fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()"
 fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()" --apply
 
-# 8) Import telemetry and inspect the cost of what just happened
+# 9) Import telemetry and inspect the cost of what just happened
 fmetrics import
 fmetrics stats -o json
 fmetrics predict /project
@@ -315,16 +377,19 @@ fcase next auth-seam --body "Review denial branch after map/read pass"
 
 ### Decision Rule for Agents
 
+- Use `fs` as the opening move for unfamiliar codebases.
 - Run `ftree` once to establish territory.
 - Start with `fsearch` to narrow candidate files.
 - Add `fcontent` only if exact-text confirmation is needed.
 - Prefer `fmap` + `fread` before broad `fcontent`.
 - Use `fcase` when continuity, evidence tracking, or handoff becomes the bottleneck.
 - Use `fcontent` as exact-text confirmation after narrowing, not as the first conceptual repo search.
+- Use `fprobe` when the target is binary or opaque.
 - Do not rediscover the repo twice unless the target changes or a contradiction appears.
 
 | If you need... | Use... |
 |----------------|--------|
+| auto-routed search across file, symbol, and content | `fs` |
 | project shape, size, likely hotspots | `ftree` |
 | candidate filenames | `fsearch` |
 | structural skeleton without reading full files | `fmap` |
@@ -332,71 +397,10 @@ fcase next auth-seam --body "Review denial branch after map/read pass"
 | bounded context from a known file | `fread` |
 | durable case state, evidence, or a handoff | `fcase` |
 | safe patch application against inspected context | `fedit` |
+| file creation or full replacement (MCP) | `fwrite` |
+| replaying an investigation sequence | `freplay` |
+| binary or opaque file reconnaissance | `fprobe` |
 | runtime history or a preflight estimate | `fmetrics` |
-
----
-
-## Language Support
-
-`fsuite` works on any normal text file for `fsearch`, `fcontent`, `fread`, and plain `fedit`.
-The table below tracks the **language-aware structural layer** in `fmap` and the **symbol-scoped** edit path that depends on it.
-
-### Current Structural Support
-
-| Language / ecosystem | `fmap` support | Symbol-scoped `fedit` | Notes |
-|---|---:|---:|---|
-| Python | Yes | Yes | Core AI / automation / backend |
-| JavaScript | Yes | Yes | Web, Node, agent tooling |
-| TypeScript | Yes | Yes | Web, agents, infrastructure tooling |
-| Kotlin | Yes | Yes | Android / Kotlin-first mobile repos |
-| Swift | Yes | Yes | Apple-native app analysis |
-| Rust | Yes | Yes | Systems / infra / performance |
-| Go | Yes | Yes | Services / CLIs / platform code |
-| Java | Yes | Yes | Enterprise / Android-adjacent |
-| C | Yes | Yes | Systems / embedded |
-| C++ | Yes | Yes | Native / performance-heavy code |
-| Ruby | Yes | Yes | Legacy web / scripting |
-| Lua | Yes | Yes | Embedding / config / game tooling |
-| PHP | Yes | Yes | Large real-world web footprint |
-| Bash / Shell | Yes | Yes | DevOps / scripts / automation |
-| Dockerfile | Yes | Yes | Container workflows |
-| Makefile | Yes | Yes | Build systems |
-| YAML | Yes | Yes | CI / config / infra manifests |
-| Markdown | Yes | — | Headings, fences, frontmatter, links |
-
-### Recommended Next Support (2026)
-
-| Language / ecosystem | Why it matters | Priority | Notes |
-|---|---|---:|---|
-| C# | Large .NET / Unity / enterprise footprint | P0 | Strong cross-industry demand |
-| Dart / Flutter | Cross-platform mobile codebases | P1 | Strong next mobile follow-up |
-| HCL / Terraform | Infra / platform repo coverage | P1 | High-value for agent audits |
-| Objective-C | Legacy Apple codebases | P1 | Useful after Swift |
-| Mojo | Emerging AI / GPU language | P2 | Strategic watchlist |
-
-### Ecosystem Bundles We Want
-
-| Bundle | What it should cover |
-|---|---|
-| Apple-lite | Swift, `Package.swift`, `Info.plist`, later Objective-C |
-| Android-lite | Kotlin, Gradle, Gradle Kotlin DSL, `AndroidManifest.xml`, resource/layout XML; narrow manifest/layout reconnaissance now lands in `fmap` |
-| Python AI | Python plus better real-world recipes for PyTorch, JAX, NumPy, PyTensor |
-| Infra | HCL / Terraform, Docker, CI config surfaces |
-| Agent tooling | TypeScript / Python patterns for MCP, tool routing, workflow harnesses |
-
-### Vote On Next Support
-
-Open an issue or discussion with:
-
-- the language or ecosystem you want
-- 1-3 public repos we should test against
-- the symbol types that matter most (`function`, `class`, `type`, `import`, `export`, `constant`)
-- whether you care more about:
-  - reading / mapping
-  - editing
-  - mobile app analysis
-  - AI / ML codebases
-  - infra / DevOps code
 
 ---
 
@@ -430,6 +434,116 @@ ftree --recon -o json /project | jq '.entries | sort_by(-.size_bytes) | .[:10]'
 ---
 
 ## Tools
+
+### `fs` &mdash; unified search orchestrator
+
+One call. Auto-routes. `fs` classifies your query's intent — file, symbol, or content — then builds and fires the optimal fsuite tool chain behind the scenes. You never have to decide whether to reach for `fsearch`, `fcontent`, or `fmap` separately. The drone swarm assembles itself.
+
+```bash
+fs [OPTIONS] <query> [path]
+```
+
+**What it does:**
+
+`fs` runs a Python engine (`fs-engine.py`) that classifies the query, selects tools, executes them in sequence, and returns ranked results with enrichment metadata and a `next_hint` field for follow-up refinement. Output is pipeline-safe: auto-switches from `pretty` to `json` when stdout is not a terminal.
+
+**Intent classification rules:**
+
+| Query shape | Detected intent | Tool chain fired |
+|-------------|-----------------|-----------------|
+| `*.py`, `*.log`, `*.rs` | `file` | `fsearch` |
+| `renderTool`, `McpServer`, `AuthHandler` (camelCase / PascalCase) | `symbol` | `fsearch` -> `fmap --name` |
+| `parse_tokens`, `emit_chunk` (snake_case) | `symbol` | `fsearch` -> `fmap --name` |
+| `MAX_RETRIES`, `DB_PATH` (SCREAMING_CASE) | `symbol` | `fsearch` -> `fmap --name` |
+| `"error loading config"`, `"failed to connect"` (multi-word quoted) | `content` | `fcontent` |
+| `-i symbol authenticate` (forced override) | `symbol` | `fmap --name` |
+| `router`, `config`, `logger` (single bare word) | `content` (low-confidence) | `fcontent` |
+
+**Key capabilities:**
+
+- Single entry point for all search intent — no more per-tool decision overhead
+- Automatic intent detection from query shape (glob, camelCase, multi-word phrase)
+- `--intent` flag to override classification when auto-detection is wrong
+- `--scope GLOB` narrows the candidate file set before tool chain execution
+- Ranked hits with enrichment: file size, language, symbol count where available
+- `next_hint` in JSON output tells the agent what to call next
+- Hard caps: `--max-candidates` (default 50), `--max-enrich` (default 15), `--timeout` (default 10s)
+- Auto output mode: `pretty` for terminal, `json` for pipe
+
+**Examples:**
+
+```bash
+# File search — glob pattern detected
+fs "*.py"
+
+# Symbol search — camelCase detected automatically
+fs renderTool
+
+# Content search — multi-word phrase detected
+fs "error loading config" src/
+
+# Symbol search scoped to TypeScript files only
+fs -s "*.ts" McpServer
+
+# Force symbol intent when auto-detection would miss it
+fs -i symbol authenticate
+
+# JSON output piped to jq
+fs -o json "*.rs" | jq '.hits'
+
+# Scoped content search with explicit path
+fs -p /home/user/project "failed to parse"
+
+# Override candidate cap for large monorepos
+fs --max-candidates 200 "*.go" /repo
+```
+
+**JSON output example:**
+
+```json
+{
+  "tool": "fs",
+  "version": "2.3.0",
+  "intent": "symbol",
+  "query": "renderTool",
+  "hits": [
+    {
+      "path": "src/tools/render.ts",
+      "score": 0.97,
+      "symbol": "renderTool",
+      "line": 42,
+      "language": "typescript"
+    }
+  ],
+  "hit_count": 1,
+  "next_hint": "fread src/tools/render.ts --symbol renderTool"
+}
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-s, --scope GLOB` | — | Glob filter applied before tool chain (e.g. `"*.py"`) |
+| `-i, --intent MODE` | `auto` | Override intent: `auto` \| `file` \| `content` \| `symbol` |
+| `-o, --output MODE` | `pretty`/`json` | Output format; auto-selects based on tty |
+| `-p, --path PATH` | `.` | Search root; overrides positional path argument |
+| `--max-candidates N` | `50` | Cap on candidate files fed into the chain |
+| `--max-enrich N` | `15` | Cap on files enriched with symbol/content metadata |
+| `--timeout N` | `10` | Wall-time cap in seconds for the full chain |
+| `-h, --help` | — | Show usage |
+| `--version` | — | Print version |
+
+**MCP contract (v2.3.0+):**
+
+When called through the MCP adapter, `fs` declares an `outputSchema` (Zod-validated JSON shape) and returns both a `content` field (human-readable text summary for display) and a `structuredContent` field (the full machine-readable JSON result). This lets the client agent consume `structuredContent` directly — no JSON parsing of the text summary required.
+
+```
+content        → plain-text hit summary ("3 hits in 2 files — next: fread src/auth.ts --symbol renderTool")
+structuredContent → { tool, version, intent, query, hits[], hit_count, next_hint }
+```
+
+The `outputSchema` shape matches the JSON output example above. If `structuredContent` is absent (older clients), the agent should parse the JSON from `content` instead.
 
 ### `fsearch` &mdash; filename / path search
 
@@ -782,14 +896,21 @@ sequenceDiagram
 
 Applies **preview-first text patches** after you have already narrowed the target with `fsearch`, `fread`, and `fmap`. It defaults to dry-run, emits a unified diff, and only mutates the file when `--apply` is present.
 
+> **Important behavior difference — CLI vs MCP:**
+> - **CLI**: `fedit` defaults to **dry-run** (preview only). You must pass `--apply` to write changes.
+> - **MCP adapter**: `fedit` defaults to **apply=true** (writes immediately). Set `apply: false` for a dry-run preview.
+>
+> This difference is intentional. CLI users expect to preview before committing. MCP agents have already decided to write by the time they call a mutation tool.
+
 ```bash
 fedit [OPTIONS] <file>
 ```
 
 **Key features:**
 
-- Dry-run by default; `--apply` is required to write
+- Dry-run by default (CLI); `--apply` is required to write
 - Exact replacement plus `--after` / `--before` anchor insertion
+- Line-range replacement with `--lines START:END` (v2.2.0+)
 - Preconditions with `--expect` and `--expect-sha256`
 - `--symbol` / `--symbol-type` scope a patch to one `fmap`-resolved symbol block
 - Three output formats: `pretty` (default), `paths`, `json`
@@ -808,6 +929,258 @@ fedit /project/src/auth.py --symbol authenticate --symbol-type function \
 fedit /project/src/auth.py --after 'def authenticate(user):' \
   --content-file patch.txt --apply
 ```
+
+#### `--lines START:END` — line-range replacement mode
+
+Replaces a specific line range with new content. The replacement is identified by line numbers, not by anchor text — no anchor ambiguity, no pattern matching, no regex. Designed for use directly after `fread` returns line numbers in its output.
+
+**Typical workflow:**
+
+```bash
+# 1. Read the file — fread output includes line numbers in every chunk
+fread /project/src/config.ts --around "defaultTimeout" --after 15
+# Output shows lines 88-103 contain the block you need to replace
+
+# 2. Replace exactly those lines (dry-run preview)
+fedit /project/src/config.ts --lines 88:103 --with "$(cat new-block.ts)"
+
+# 3. Apply when confirmed
+fedit /project/src/config.ts --lines 88:103 --with "$(cat new-block.ts)" --apply
+```
+
+**Key behaviors:**
+
+- Line numbers are 1-indexed, inclusive on both ends (`88:103` replaces lines 88 through 103)
+- Combines with `--with TEXT` for inline replacement content
+- Combines with `--content-file PATH` for multi-line payloads from a file
+- Combines with `--stdin` for pipeline-delivered content
+- Dry-run by default — requires explicit `--apply` to mutate
+- Fails closed if the line range is out of bounds for the target file
+- Rejects inverted ranges (`end < start`) with a clear error
+- JSON output (`-o json`) returns `lines_replaced`, `line_start`, `line_end` in the result envelope
+
+**Examples:**
+
+```bash
+# Replace lines 88-103 with inline content
+fedit /project/src/config.ts --lines 88:103 \
+  --with "  defaultTimeout: 5000," \
+  --apply
+
+# Replace a block with a multi-line payload from a file
+fedit /project/src/handler.py --lines 42:67 \
+  --content-file patch-body.py \
+  --apply
+
+# Dry-run preview only (default — no --apply)
+fedit /project/src/auth.ts --lines 120:135 \
+  --with "  return deny(reason);"
+
+# JSON output for agent verification
+fedit /project/src/auth.ts --lines 120:135 \
+  --with "  return deny(reason);" \
+  --apply -o json
+
+# Combine with fread line-number output in an agent loop
+RANGE=$(fread /project/src/server.ts --around "startServer" --after 20 -o json \
+  | jq -r '"\(.chunks[0].start_line):\(.chunks[0].end_line)"')
+fedit /project/src/server.ts --lines "$RANGE" --content-file new-start.ts --apply
+```
+
+### `fwrite` &mdash; safe atomic writes (MCP adapter)
+
+**`fwrite` is not a CLI command.** It is an MCP-only virtual tool that routes through `fedit`'s mutation engine. When an agent calls `fwrite` via the MCP server, the server translates the call into the appropriate `fedit --create` or `fedit --replace-file --apply` operation. One mutation brain; two surfaces.
+
+This design means agents never need to decide between `fedit` and a separate write primitive. File creation and full-file replacement go through the same dry-run / apply / precondition stack as surgical patches.
+
+**MCP tool signature:**
+
+```json
+{
+  "name": "fwrite",
+  "parameters": {
+    "path":      "Absolute file path to write",
+    "content":   "File content to write",
+    "overwrite": "Replace existing file (default: false = create only)",
+    "apply":     "Apply changes (default: true). Set false for dry-run preview."
+  }
+}
+```
+
+**Behavior:**
+
+- `overwrite: false` (default): fails if the file already exists — safe create
+- `overwrite: true`: replaces the entire file from `content` — equivalent to `fedit --replace-file --apply`
+- `apply: false`: returns a diff preview without writing — dry-run mode inherited from `fedit`
+- All writes are atomic: fedit's temp-file + rename pipeline, not a direct `echo >` write
+
+**When to use `fwrite` vs `fedit` (agent guidance):**
+
+| Task | Tool |
+|------|------|
+| Create a new file from scratch | `fwrite` (MCP) |
+| Replace an entire file | `fwrite` with `overwrite: true` |
+| Surgical inline patch (replace a block, insert after anchor) | `fedit` |
+| Line-range replacement | `fedit --lines` |
+| Batch patch across multiple files | `fedit --targets-file` |
+
+> `fwrite` is only available in MCP-connected agent sessions. It has no CLI equivalent — running `fwrite` from a shell will produce a "command not found" error. Use `fedit --create` or `fedit --replace-file` for the same operations from the command line.
+
+### `freplay` &mdash; deterministic investigation replay
+
+The investigation flight recorder. `freplay` wraps any fsuite command invocation in a record/replay envelope: it runs the command, captures the invocation arguments, output, exit code, and timestamp into a persistent SQLite store keyed by case slug. Replays can be shown, verified, promoted to canonical status, or exported as JSON for handoffs.
+
+Every recorded replay is linked to an `fcase` case. This closes the loop between investigation state (`fcase`) and the exact commands that produced it (`freplay`).
+
+```bash
+freplay record <case-slug> [--purpose "..."] [--link <type:id>]... -- <fsuite-command...>
+freplay show   <case-slug> [--replay-id N] [-o pretty|json]
+freplay list   <case-slug> [-o pretty|json]
+freplay export <case-slug> [--replay-id N] [-o json]
+freplay verify <case-slug> [--replay-id N] [-o pretty|json]
+freplay promote <case-slug> <replay-id>
+freplay archive <case-slug> <replay-id>
+```
+
+**Key capabilities:**
+
+- `record`: runs the target fsuite command and stores its full invocation + result
+- `show`: retrieves a stored replay (latest, or by `--replay-id`)
+- `list`: shows all replays for a case with timestamps and status
+- `verify`: validates a stored replay without re-executing — checks paths, tool availability, linked entities
+- `promote`: marks a replay as canonical for a case
+- `archive`: soft-deletes a replay (recoverable)
+- `--purpose` annotates the recording with human-readable intent
+- `--link type:id` creates a cross-reference to an `fcase` evidence or hypothesis entry
+- `freplay` and `fmetrics` are excluded from recording (denylist — no recursive loops)
+- `fedit` recordings are classified `read_only` by default; `mutating` when `--apply` is present
+- Verify exit codes: `0` = pass, `1` = warn, `2` = fail
+
+**Examples:**
+
+```bash
+# Record a fprobe scan with purpose annotation
+freplay record sea-bundle-audit --purpose "Locate snapshot blob marker" -- \
+  fprobe scan ./claude-binary --pattern "SNAPSHOT_BLOB" -o json
+
+# Record a fread with a case link
+freplay record auth-seam --link evidence:7 -- \
+  fread /project/src/auth.ts --symbol authenticate
+
+# Show the latest replay for a case
+freplay show auth-seam
+
+# Show a specific replay by ID
+freplay show auth-seam --replay-id 3
+
+# List all replays for a case
+freplay list sea-bundle-audit
+
+# Verify a replay is still valid (paths exist, tools present)
+freplay verify auth-seam --replay-id 2
+
+# Promote replay 2 to canonical
+freplay promote auth-seam 2
+
+# Export as JSON for handoff
+freplay export auth-seam --replay-id 2 -o json
+```
+
+**Subcommand reference:**
+
+| Subcommand | Description |
+|-----------|-------------|
+| `record` | Run command, store invocation + result |
+| `show` | Display a stored replay |
+| `list` | List all replays for a case |
+| `export` | Export replay as JSON |
+| `verify` | Validate replay integrity without executing |
+| `promote` | Mark replay as canonical |
+| `archive` | Soft-delete a replay |
+
+### `fprobe` &mdash; binary/opaque file reconnaissance
+
+The deep-scan drone for files that `fread` cannot parse. `fprobe` treats its target as a raw byte stream and applies three specialized subcommands: extract printable strings, scan for literal byte patterns with offset context, or read a raw byte window at a known address. Purpose-built for SEA binaries, compiled bundles, and packed assets.
+
+Architecture: Bash CLI layer + Python `mmap` engine (`fprobe-engine.py`). The engine does byte-safe memory-mapped reads — no shell text processing on binary content.
+
+```bash
+fprobe strings <file> [--filter <literal>] [--ignore-case] [-o pretty|json]
+fprobe scan    <file> --pattern <literal> [--context N] [--ignore-case] [-o pretty|json]
+fprobe window  <file> --offset N [--before N] [--after N] [--decode printable|utf8|hex] [-o pretty|json]
+```
+
+**Key capabilities:**
+
+- Three focused subcommands map directly to three phases of binary recon
+- `strings`: extracts printable ASCII runs (minimum 6 chars); `--filter` narrows to literal matches
+- `scan`: finds a literal byte pattern anywhere in the file; returns byte offset + surrounding context window
+- `window`: reads a raw byte range at a known offset; decodes as printable text, UTF-8, or hex dump
+- Python `mmap` engine — safe on multi-GB binaries, no full-file read into memory
+- `--ignore-case` on `strings` and `scan` for case-insensitive matching
+- Auto output mode: `pretty` for terminal with color offsets, `json` for pipeline/agent consumption
+- Read-only by design — no mutations, no side effects
+
+**Examples:**
+
+```bash
+# Extract all printable strings from a compiled binary
+fprobe strings ./claude-binary
+
+# Find strings containing a specific token
+fprobe strings ./claude-binary --filter "renderTool"
+
+# Scan for a literal pattern and get byte-offset context
+fprobe scan ./claude-binary --pattern "userFacingName" --context 500
+
+# Read 3000 bytes around a known offset (from a previous scan hit)
+fprobe window ./claude-binary --offset 112202147 --before 200 --after 3000
+
+# Inspect file header as hex (magic bytes, format identification)
+fprobe window ./claude-binary --offset 0 --after 16 --decode hex
+
+# Case-insensitive string filter
+fprobe strings ./bundle.js --filter "secret" --ignore-case
+
+# JSON output for agent pipeline
+fprobe scan ./app.node --pattern "SNAPSHOT_BLOB" -o json | jq '.matches[0].offset'
+```
+
+**JSON output example (`scan`):**
+
+```json
+{
+  "tool": "fprobe",
+  "version": "2.3.0",
+  "subcommand": "scan",
+  "file": "./claude-binary",
+  "pattern": "userFacingName",
+  "matches": [
+    {
+      "offset": 112202147,
+      "context_before": "...{\"name\":\"",
+      "match": "userFacingName",
+      "context_after": "\",\"description\":\"..."
+    }
+  ],
+  "match_count": 1
+}
+```
+
+**Subcommand flags:**
+
+| Subcommand | Flag | Description |
+|-----------|------|-------------|
+| `strings` | `--filter LITERAL` | Narrow output to strings containing this literal |
+| `strings` | `--ignore-case` | Case-insensitive filter matching |
+| `scan` | `--pattern LITERAL` | Required. Byte pattern to locate |
+| `scan` | `--context N` | Bytes of surrounding context to return (default: 200) |
+| `scan` | `--ignore-case` | Case-insensitive pattern matching |
+| `window` | `--offset N` | Required. Byte offset to read from |
+| `window` | `--before N` | Bytes to include before offset (default: 0) |
+| `window` | `--after N` | Bytes to include after offset (default: 200) |
+| `window` | `--decode MODE` | Decode output as `printable` (default), `utf8`, or `hex` |
+| all | `-o pretty\|json` | Output format; auto-selects based on tty |
 
 ### `fmetrics` &mdash; telemetry analytics
 
@@ -875,22 +1248,501 @@ sequenceDiagram
 
 ---
 
+## Chain Combinations
+
+The chain system is the highest-leverage feature in fsuite. Two tools piped together can answer questions in one command that would take a dozen raw filesystem calls to answer blindly. This section covers the mechanics, the validated patterns, and — critically — what not to chain.
+
+### The Pipe Contract
+
+Every chainable tool communicates via one of two machine-readable output modes:
+
+| Flag | Output | Role |
+|------|--------|------|
+| `-o paths` | One absolute file path per line | Pipe currency — feeds the next tool |
+| `-o json` | Structured JSON | Terminal output for programmatic decisions |
+
+The rule is simple: **producers** emit paths, **consumers** read paths from stdin. Break this contract and the pipe silently produces garbage.
+
+### Compatibility Matrix
+
+#### Producers — tools that can emit file paths
+
+| Tool | Flag | What it produces |
+|------|------|-----------------|
+| `fsearch` | `-o paths` | File paths matching a glob or name pattern |
+| `fcontent` | `-o paths` | File paths containing a literal string |
+
+Both tools support up to 2000 files in a single run.
+
+#### Consumers — tools that accept file paths on stdin
+
+| Tool | stdin behavior | Notes |
+|------|---------------|-------|
+| `fcontent` | Reads file paths, searches inside them | `stdin_files` mode |
+| `fmap` | Reads file paths, maps symbols in each | `stdin_files` mode |
+
+`fcontent` is both a producer and a consumer. This is what makes deep narrowing chains possible.
+
+#### Non-pipe tools — argument-based, not stdin-chainable
+
+These tools take paths or identifiers as positional arguments. They are terminal nodes in a workflow, not pipe links.
+
+| Tool | Why it cannot be piped from | How to use it |
+|------|----------------------------|---------------|
+| `fread` | Outputs file content, not file paths | Call it after `fmap` identifies the exact symbol or line range |
+| `fedit` | `--stdin` reads payload text, not a file list | Call it after `fread` confirms the seam |
+| `ftree` | Outputs a tree visualization | Use it first, not mid-chain |
+| `fprobe` | Outputs JSON or text report on a single binary | Standalone recon |
+| `fcase` | Outputs investigation state | Standalone continuity ledger |
+| `freplay` | Outputs derivation history | Standalone tracker |
+| `fmetrics` | Reads telemetry database | Standalone analytics |
+
+---
+
+### Named Chain Patterns
+
+These are the validated patterns, tested end-to-end on 2026-03-29.
+
+#### Scout Chain
+
+Purpose: establish territory on a new or unfamiliar codebase.
+
+```bash
+ftree --snapshot -o json /project
+```
+
+`ftree` with `--snapshot` walks the tree once and caches it. Use this as the first move on any session. It is not a pipe node — it is the orientation step that makes every subsequent chain cheaper.
+
+```bash
+# MCP equivalent
+ftree(path: "/project", snapshot: true, output: "json")
+```
+
+#### Investigation Chain
+
+Purpose: find every file that touches a concept, then get the symbol map.
+
+```bash
+fcontent -o paths "authenticate" src | fmap -o json
+```
+
+This answers: "which files mention this token, and what functions/classes live in them?" The output is a symbol map you can scan without opening any file.
+
+```bash
+# MCP equivalent (sequential calls)
+fcontent(query: "authenticate", path: "src", output: "paths")
+# -> returns file list
+fmap(path: "<each file from results>", output: "json")
+```
+
+#### Scout-then-Investigate Chain (2-step)
+
+Purpose: narrow by file type first, then by content.
+
+```bash
+fsearch -o paths '*.py' src | fcontent -o paths "def authenticate"
+```
+
+The `fsearch` pass keeps `fcontent` from scanning unrelated file types. On a polyglot repo this can cut the candidate set by 80%.
+
+#### Surgical Chain
+
+Purpose: get from a concept to an exact edit target in the fewest steps.
+
+```bash
+# Step 1 — find the right files
+fsearch -o paths '*.rs' src | fcontent -o paths "pub fn"
+
+# Step 2 — map what's in them
+fsearch -o paths '*.rs' src | fcontent -o paths "pub fn" | fmap -o json
+
+# Step 3 — read the exact symbol
+fread src/auth.rs --symbol authenticate
+
+# Step 4 — edit the seam
+fedit src/auth.rs --function authenticate --replace "return true" --with "return verify(token)"
+```
+
+Steps 1-2 are a single compound pipe. Steps 3-4 are individual tool calls operating on the exact coordinates the pipe produced.
+
+#### Full Recon Chain
+
+Purpose: new codebase, understand all public API symbols across every source file.
+
+```bash
+ftree --snapshot -o json /project
+fsearch -o paths '*.rs' src | fcontent -o paths "pub fn" | fmap -o json
+fread src/auth.rs --symbol authenticate
+fcase init auth-fix --goal "Fix authenticate bypass"
+fedit src/auth.rs --function authenticate --replace "return true" --with "return verify(token)"
+fmetrics stats
+```
+
+Tested against fsuite itself: this pipeline produced 1956 symbols from the repo in one pass.
+
+#### Progressive Narrowing Chain
+
+Purpose: drill through multiple content filters before mapping.
+
+```bash
+# Narrow -> narrow -> map
+fsearch -o paths '*.ts' src | fcontent -o paths "export" | fcontent -o paths "async" | fmap -o json
+```
+
+Three filters, one final symbol map. Each `fcontent -o paths` stage shrinks the file list. The final `fmap` only runs on files that passed all three gates.
+
+#### Config Key Hunt
+
+Purpose: find which JSON files in a project reference a specific key.
+
+```bash
+fsearch -o paths '*.json' . | fcontent "api_key"
+```
+
+No `-o paths` on the terminal `fcontent` — you want the match lines, not more paths.
+
+#### Test Coverage Map
+
+Purpose: see what test files exist and what they test.
+
+```bash
+fsearch -o paths 'test_*.py' tests | fmap -o json
+```
+
+Binary recon workflow (standalone, not a pipe chain):
+
+```bash
+fprobe scan binary --pattern "renderTool" --context 300
+fprobe window binary --offset 112730723 --before 50 --after 200
+fprobe strings binary --filter "diffAdded"
+```
+
+---
+
+### MCP vs CLI: Chain Translation
+
+In MCP mode (Claude Code, Codex), there are no Unix pipes. The agent reconstructs the equivalent chain by calling tools sequentially and passing results forward explicitly.
+
+```
+CLI pipe:     fsearch -o paths '*.py' | fcontent -o paths "def " | fmap -o json
+
+MCP sequence: fsearch(query: "*.py")
+              -> returns ["/src/auth.py", "/src/user.py", ...]
+              fcontent(query: "def ", path: "/src/auth.py")
+              fcontent(query: "def ", path: "/src/user.py")
+              -> returns filtered list
+              fmap(path: "/src/auth.py")
+              fmap(path: "/src/user.py")
+              -> returns symbol maps
+```
+
+The MCP adapter always returns structured JSON internally, so agents receive clean data without parsing ANSI output.
+
+Key difference: the CLI pipe is O(1) tool calls. The MCP sequence is O(n) calls proportional to the candidate file count. For large repos, run `fsearch` first to reduce n before calling `fcontent` per file.
+
+---
+
+### Power Pairs
+
+These two-tool combinations cover the majority of agent use cases.
+
+| Pair | Use case |
+|------|----------|
+| `fsearch -> fread` | Find file by name, read exact symbol or line range |
+| `fmap + fread` | Map symbols first, then read the one that matches |
+| `fcontent -> fedit` | Confirm text location, then edit the seam |
+| `fprobe -> fread` | Find offset in binary, then read source context |
+| `fsearch -> fmap` | Find files by type, get their full symbol inventory |
+| `fcontent -> fmap` | Find files by content, understand their structure |
+
+The pattern in every pair: one tool establishes coordinates, the next tool acts on them. Never act without coordinates.
+
+---
+
+### Anti-Patterns
+
+These chains look plausible but break the pipe contract. Each one is a common mistake.
+
+| Anti-pattern | Why it fails | What to do instead |
+|-------------|-------------|-------------------|
+| `fread \| anything` | `fread` outputs file content, not file paths. The next tool receives raw text and silently ignores or misparses it. | Use `fread` as the terminal step. Get coordinates from `fmap` first. |
+| `fedit \| anything` | `fedit` outputs a diff or confirmation message, not paths. | `fedit` is always the final step. Chain ends here. |
+| `ftree \| fcontent` | `ftree` outputs a formatted tree visualization. `fcontent` expects one path per line. | Use `fsearch` to produce paths for `fcontent`. `ftree` is for human orientation only. |
+| `fmap \| fread` | `fmap` outputs a JSON symbol map or pretty-printed list, not file paths. | After `fmap`, read the exact symbol with `fread --symbol` using the path from `fmap`'s output. |
+| `fprobe \| anything` | `fprobe` outputs binary analysis in JSON or text. Not a path emitter. | `fprobe` findings -> use the offset/path manually with `fread`. |
+| `fcase \| anything` | `fcase` outputs investigation state JSON. Not a path emitter. | `fcase` is a side-channel bookkeeping tool, not a pipeline node. |
+| `fcontent` (no `-o paths`) `\| fmap` | Without `-o paths`, `fcontent` outputs match lines with context, not bare paths. | Always add `-o paths` to intermediate `fcontent` calls. |
+
+Rule of thumb: if a tool's output is human-readable prose, colored text, or structured JSON describing file contents — it is not a producer. Only `fsearch -o paths` and `fcontent -o paths` are valid producers.
+
+---
+
+## MCP Adapter
+
+### What It Is
+
+`fsuite-mcp` is a thin, stateless Node.js dispatcher that wraps the fsuite bash tools as native MCP tool calls. It does no work itself. Every tool call resolves to an `execFile` invocation against the corresponding bash binary — arguments are passed as an array (never shell-interpolated), and the process exits cleanly after each call.
+
+The adapter's contract:
+- **Architecture**: stateless dispatcher — no session, no cache, no shared state between calls
+- **Security**: uses `execFile`, not `exec` — shell injection is structurally impossible
+- **Rendering**: pretty output is produced by the bash tools, forwarded verbatim to the MCP client
+- **SDK**: `@modelcontextprotocol/sdk` v1.28.0, `McpServer` + `registerTool` API
+
+### Setup
+
+**Install dependencies:**
+
+```bash
+cd /path/to/fsuite/mcp
+npm install
+```
+
+Dependencies: `@modelcontextprotocol/sdk`, `zod`, `highlight.js`.
+
+**Register in Claude Code** (`~/.claude/settings.json` or project-level `.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "fsuite": {
+      "command": "node",
+      "args": ["/path/to/fsuite/mcp/index.js"],
+      "type": "stdio"
+    }
+  }
+}
+```
+
+After adding the config, restart Claude Code. The tools appear as `mcp__fsuite__fread`, `mcp__fsuite__fedit`, etc. in the tool list.
+
+**Verify registration:**
+
+```bash
+# In a Claude Code session, the tools should appear as:
+# mcp__fsuite__ftree, mcp__fsuite__fmap, mcp__fsuite__fread,
+# mcp__fsuite__fcontent, mcp__fsuite__fsearch, mcp__fsuite__fedit,
+# mcp__fsuite__fwrite, mcp__fsuite__fcase, mcp__fsuite__fprobe,
+# mcp__fsuite__fmetrics, mcp__fsuite__fs
+```
+
+### Registered Tools
+
+All twelve tools with their functional roles:
+
+| Tool | Category | Description |
+|------|----------|-------------|
+| `fs` | Meta | Unified search orchestrator — load the mental model, auto-route queries, and return ranked results |
+| `ftree` | Scout | Directory tree with snapshot mode and JSON output. The first call on any new project. |
+| `fsearch` | Search | Find files by glob or name pattern. Produces `-o paths` compatible output. |
+| `fcontent` | Search | Search file contents for a literal string. Can consume a file list from stdin in CLI mode; in MCP mode, accepts a path or file list directly. |
+| `fmap` | Structure | Extract symbol maps (functions, classes, imports, exports) from source files. Core of the investigation chain. |
+| `fread` | Read | Budgeted file reading with symbol resolution, line ranges, and context windows around patterns. The primary file reading tool. |
+| `fedit` | Mutation | Surgical text editing — replace by function name, exact string, or line range. Emits a diff on completion. |
+| `fwrite` | Mutation | Write or overwrite a file. Use when creating new files or when full-file replacement is cleaner than surgical edit. |
+| `fcase` | Knowledge | Investigation ledger — init a case, record steps, preserve context across context window boundaries. |
+| `freplay` | Knowledge | Derivation tracker — record and replay the reasoning chain for a code change. |
+| `fprobe` | Diagnostic | Binary analysis — scan, string extraction, hex window, pattern search in compiled binaries. |
+| `fmetrics` | Diagnostic | Usage telemetry — import, stats, and cost prediction for the fsuite tool suite itself. |
+
+### Pretty Rendering
+
+The MCP adapter produces terminal-quality output inside Claude Code's tool output pane. This is not cosmetic — it is a deliberate design choice to make tool output scannable without reading every line.
+
+**Syntax highlighting** is applied via `highlight.js` with a full Monokai color mapping. Language is auto-detected from the file extension. The ANSI escape sequences use truecolor (24-bit RGB) matching Claude Code's exact rendering engine.
+
+Monokai scope to ANSI color mapping (direct from source):
+
+| Scope | RGB | Appears as |
+|-------|-----|-----------|
+| `keyword` / `operator` | `249, 38, 114` | Monokai pink |
+| `storage` / `hljs-type` | `102, 217, 239` | Monokai cyan |
+| `built_in` / `title` / `attr` | `166, 226, 46` | Monokai green |
+| `string` / `regexp` | `230, 219, 116` | Monokai yellow |
+| `literal` / `number` / `symbol` | `190, 132, 255` | Monokai purple |
+| `params` | `253, 151, 31` | Monokai orange |
+| `comment` / `meta` | `117, 113, 94` | Monokai grey |
+| `variable` / `property` | `255, 255, 255` | White |
+
+**Diff rendering** uses dedicated backgrounds:
+
+| Diff line type | Background RGB | Gutter fg RGB |
+|---------------|---------------|--------------|
+| Added line | `2, 40, 0` | `80, 200, 80` |
+| Removed line | `61, 1, 0` | `220, 90, 90` |
+
+The diff renderer is pixel-matched to Claude Code's native diff view — the result is indistinguishable from the built-in `Edit` tool's output.
+
+### Tool Color Palette
+
+Each tool gets a distinct 256-color ANSI code for its header in the tool output pane. The palette follows a semantic grouping:
+
+| Color | ANSI 256 | Tools | Semantic role |
+|-------|----------|-------|--------------|
+| Neon green | `46` | `fread`, `ftree`, `freplay` | Read / scout — safe, non-mutating |
+| Orange | `208` | `fedit`, `fwrite` | Mutation — write operations |
+| Royal blue | `27` | `fcontent`, `fsearch`, `fs` | Search — content and structure discovery |
+| Dark violet | `129` | `fmap`, `fcase` | Structure / knowledge — symbol maps and case state |
+| Pure red | `196` | `fprobe`, `fmetrics` | Diagnostic / recon — binary and telemetry analysis |
+
+The color is embedded as an ANSI escape in the tool's `annotations.title` field. The binary patch (`fpatch-claude-mcp`) enables Claude Code's renderer to pass the title through verbatim rather than stripping ANSI.
+
+---
+
+## Dev Mode
+
+### FSUITE_USE_PATH Toggle
+
+By default, `mcp/index.js` resolves tool binaries from the source tree — the directory one level up from `mcp/`. This means edits to source bash scripts take effect on the next MCP server restart without reinstallation.
+
+```bash
+# Default (source tree mode — dev workflow)
+node mcp/index.js
+
+# Force PATH resolution (production / installed binaries)
+FSUITE_USE_PATH=1 node mcp/index.js
+```
+
+### How resolveTool() Works
+
+```javascript
+const FSUITE_SRC_DIR = process.env.FSUITE_USE_PATH
+  ? null
+  : join(dirname(new URL(import.meta.url).pathname), "..");
+
+function resolveTool(name) {
+  if (FSUITE_SRC_DIR) return join(FSUITE_SRC_DIR, name);
+  return name; // resolve from PATH
+}
+```
+
+When `FSUITE_USE_PATH` is unset (default), `FSUITE_SRC_DIR` is the repo root (parent of `mcp/`). `resolveTool("fread")` returns `/path/to/fsuite/fread` — the source file, not the installed binary.
+
+When `FSUITE_USE_PATH=1`, `FSUITE_SRC_DIR` is `null`, and `resolveTool` returns the bare name, letting `execFile` find it on `$PATH`.
+
+### Edit -> Restart -> Live Changes Workflow
+
+```bash
+# 1. Edit a source tool
+vim /path/to/fsuite/fread
+
+# 2. Restart the MCP server
+# In Claude Code: /mcp restart fsuite
+# Or kill and relaunch the node process
+
+# 3. Next tool call picks up the change immediately
+# No npm install, no build step required
+```
+
+The only time you need `FSUITE_USE_PATH=1` is when running the MCP server against a globally installed fsuite where the source tree is not authoritative (e.g., CI or a shared environment).
+
+---
+
+## Binary Patching
+
+### fpatch-claude-mcp
+
+`fpatch-claude-mcp` patches the Claude Code Electron binary to clean up how MCP tool names render in the tool output header.
+
+**What it patches:**
+
+The binary contains a `userFacingName()` function that formats MCP tool names as `"fsuite - fread (MCP)"` in plain white. The patch rewrites this to emit just `"fread"` in the configured color (default: bold cyan). It uses `fprobe` to locate the relevant byte offset dynamically, so it survives minor Claude Code version updates without a hardcoded offset.
+
+**Safety:**
+
+- Creates a `.bak` backup before writing any bytes.
+- Idempotent: running twice does not corrupt the binary.
+- `--dry-run` shows what would be patched without writing.
+- `--restore` reverts from the `.bak` backup.
+
+```bash
+fpatch-claude-mcp                    # Apply patch (bold cyan, latest binary)
+fpatch-claude-mcp --dry-run          # Preview only
+fpatch-claude-mcp --color green      # Use a different color
+fpatch-claude-mcp --binary PATH      # Target a specific binary version
+fpatch-claude-mcp --restore          # Revert to .bak
+```
+
+Available colors: `cyan`, `green`, `yellow`, `magenta`, `bold_cyan`, `bold_green`.
+
+**Status note:** `fpatch-claude-mcp` is the original bash-based patcher. Current binary work — including the truecolor title embedding used by the tool palette — is done via manual Python patchers that operate at the renderer level rather than the `userFacingName` function. `fpatch-claude-mcp` remains available for the `userFacingName` patch specifically, but should be treated as a maintenance-mode tool.
+
+---
+
+## Language Support
+
+`fsuite` works on any normal text file for `fsearch`, `fcontent`, `fread`, and plain `fedit`.
+The table below tracks the **language-aware structural layer** in `fmap` and the **symbol-scoped** edit path that depends on it.
+
+### Current Structural Support
+
+| Language / ecosystem | `fmap` support | Symbol-scoped `fedit` | Notes |
+|---|---:|---:|---|
+| Python | Yes | Yes | Core AI / automation / backend |
+| JavaScript | Yes | Yes | Web, Node, agent tooling |
+| TypeScript | Yes | Yes | Web, agents, infrastructure tooling |
+| Kotlin | Yes | Yes | Android / Kotlin-first mobile repos |
+| Swift | Yes | Yes | Apple-native app analysis |
+| Rust | Yes | Yes | Systems / infra / performance |
+| Go | Yes | Yes | Services / CLIs / platform code |
+| Java | Yes | Yes | Enterprise / Android-adjacent |
+| C | Yes | Yes | Systems / embedded |
+| C++ | Yes | Yes | Native / performance-heavy code |
+| Ruby | Yes | Yes | Legacy web / scripting |
+| Lua | Yes | Yes | Embedding / config / game tooling |
+| PHP | Yes | Yes | Large real-world web footprint |
+| Bash / Shell | Yes | Yes | DevOps / scripts / automation |
+| Dockerfile | Yes | Yes | Container workflows |
+| Makefile | Yes | Yes | Build systems |
+| YAML | Yes | Yes | CI / config / infra manifests |
+| Markdown | Yes | — | Headings, fences, frontmatter, links |
+
+### Recommended Next Support (2026)
+
+| Language / ecosystem | Why it matters | Priority | Notes |
+|---|---|---:|---|
+| C# | Large .NET / Unity / enterprise footprint | P0 | Strong cross-industry demand |
+| Dart / Flutter | Cross-platform mobile codebases | P1 | Strong next mobile follow-up |
+| HCL / Terraform | Infra / platform repo coverage | P1 | High-value for agent audits |
+| Objective-C | Legacy Apple codebases | P1 | Useful after Swift |
+| Mojo | Emerging AI / GPU language | P2 | Strategic watchlist |
+
+### Ecosystem Bundles We Want
+
+| Bundle | What it should cover |
+|---|---|
+| Apple-lite | Swift, `Package.swift`, `Info.plist`, later Objective-C |
+| Android-lite | Kotlin, Gradle, Gradle Kotlin DSL, `AndroidManifest.xml`, resource/layout XML; narrow manifest/layout reconnaissance now lands in `fmap` |
+| Python AI | Python plus better real-world recipes for PyTorch, JAX, NumPy, PyTensor |
+| Infra | HCL / Terraform, Docker, CI config surfaces |
+| Agent tooling | TypeScript / Python patterns for MCP, tool routing, workflow harnesses |
+
+### Vote On Next Support
+
+Open an issue or discussion with:
+
+- the language or ecosystem you want
+- 1-3 public repos we should test against
+- the symbol types that matter most (`function`, `class`, `type`, `import`, `export`, `constant`)
+- whether you care more about:
+  - reading / mapping
+  - editing
+  - mobile app analysis
+  - AI / ML codebases
+  - infra / DevOps code
+
+---
+
 ## Output Formats
 
-The filesystem tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fedit`) support three output modes via `--output` / `-o`. `fcase` supports `pretty` and `json`, which is enough for current-state reads and handoff packets.
-
-| Mode | Description | Best for |
-|------|-------------|----------|
-| `pretty` | Human-readable header + formatted list | Terminal use, debugging |
-| `paths` | One file path per line, no decoration | Piping, shell scripts |
-| `json` | Compact JSON object with metadata | AI agents, tool integrations |
+All fsuite CLI tools share the same three output modes: `pretty` (default, human-readable), `paths` (one path per line for piping), `json` (structured, always machine-parseable). Pass `-o json` to any tool.
 
 ### JSON schema (`fcase` — status)
 
 ```json
 {
   "tool": "fcase",
-  "version": "2.1.2",
+  "version": "2.3.0",
   "case": {
     "slug": "auth-seam",
     "goal": "Trace authenticate flow",
@@ -908,7 +1760,7 @@ The filesystem tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fedit`) 
 ```json
 {
   "tool": "fsearch",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "pattern": "*token*",
   "name_glob": "*token*",
   "path": "/home/user",
@@ -924,7 +1776,7 @@ The filesystem tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fedit`) 
 ```json
 {
   "tool": "fcontent",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "query": "ERROR",
   "mode": "directory",
   "path": "/var/log",
@@ -940,7 +1792,7 @@ The filesystem tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fedit`) 
 ```json
 {
   "tool": "ftree",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "mode": "tree",
   "backend": "tree",
   "path": "/project",
@@ -961,7 +1813,7 @@ The filesystem tools (`fsearch`, `fcontent`, `ftree`, `fmap`, `fread`, `fedit`) 
 ```json
 {
   "tool": "ftree",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "mode": "recon",
   "backend": "find/du/stat",
   "path": "/project",
@@ -984,7 +1836,7 @@ Base fields are always present. `query` and `matches` are emitted when `--name` 
 ```json
 {
   "tool": "fmap",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "mode": "single_file",
   "path": "/project/src/auth.py",
   "total_files_scanned": 1,
@@ -1026,7 +1878,7 @@ Base fields are always present. `symbol_resolution` and `candidates` are emitted
 ```json
 {
   "tool": "fread",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "mode": "symbol",
   "truncated": false,
   "truncation_reason": "none",
@@ -1072,12 +1924,28 @@ Base fields are always present. `symbol_resolution` and `candidates` are emitted
 }
 ```
 
+### JSON schema (`fedit` — lines mode)
+
+```json
+{
+  "tool": "fedit",
+  "version": "2.3.0",
+  "mode": "lines",
+  "file": "/project/src/auth.ts",
+  "line_start": 120,
+  "line_end": 135,
+  "lines_replaced": 16,
+  "applied": true,
+  "diff": "@@ -120,16 +120,1 @@\n-  return false;\n+  return deny(reason);\n"
+}
+```
+
 ### JSON schema (`fmetrics stats`)
 
 ```json
 {
   "tool": "fmetrics",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "subcommand": "stats",
   "total_runs": 24,
   "db_path": "/home/user/.fsuite/telemetry.db",
@@ -1093,6 +1961,120 @@ Base fields are always present. `symbol_resolution` and `candidates` are emitted
 }
 ```
 
+### JSON schema (`fprobe scan`)
+
+```json
+{
+  "tool": "fprobe",
+  "version": "2.3.0",
+  "subcommand": "scan",
+  "file": "./claude-binary",
+  "pattern": "userFacingName",
+  "matches": [
+    {
+      "offset": 112202147,
+      "context_before": "...{\"name\":\"",
+      "match": "userFacingName",
+      "context_after": "\",\"description\":\"..."
+    }
+  ],
+  "match_count": 1
+}
+```
+
+### JSON schema (`fprobe strings`)
+
+```json
+{
+  "tool": "fprobe",
+  "version": "2.3.0",
+  "mode": "strings",
+  "path": "/path/to/binary",
+  "min_len": 4,
+  "filter": null,
+  "total_found": 412,
+  "strings": [
+    { "offset": "0x1a30", "value": "https://api.example.com/v1" },
+    { "offset": "0x1a58", "value": "Authorization: Bearer" }
+  ],
+  "truncated": false
+}
+```
+
+### JSON schema (`fprobe window`)
+
+```json
+{
+  "tool": "fprobe",
+  "version": "2.3.0",
+  "mode": "window",
+  "path": "/path/to/binary",
+  "offset": 256,
+  "size": 64,
+  "hex": "4d5a9000 03000000 04000000 ffff0000",
+  "ascii": "MZ..............",
+  "truncated": false
+}
+```
+
+### JSON schema (`fs` — unified search)
+
+```json
+{
+  "tool": "fs",
+  "version": "2.3.0",
+  "query": "authenticate",
+  "scope": "/project",
+  "results": [
+    {
+      "rank": 1,
+      "type": "symbol",
+      "path": "/project/src/auth.py",
+      "symbol": "authenticate",
+      "symbol_type": "function",
+      "line": 42,
+      "confidence": 0.97
+    },
+    {
+      "rank": 2,
+      "type": "content",
+      "path": "/project/tests/test_auth.py",
+      "line": 18,
+      "match": "def test_authenticate_rejects_expired():",
+      "confidence": 0.81
+    }
+  ],
+  "total": 2,
+  "tools_used": ["fmap", "fcontent"],
+  "truncated": false
+}
+```
+
+### JSON schema (`freplay show`)
+
+```json
+{
+  "tool": "freplay",
+  "version": "2.3.0",
+  "case": "auth-seam",
+  "steps": [
+    {
+      "step": 1,
+      "ts": "2026-03-29T14:02:11Z",
+      "cmd": "fread /project/src/auth.py --around 'def authenticate' -A 20",
+      "note": "Located denial branch at line 71"
+    },
+    {
+      "step": 2,
+      "ts": "2026-03-29T14:04:33Z",
+      "cmd": "fedit /project/src/auth.py --lines 71:73 --with '    return deny()\\n' --apply",
+      "note": "Patched denial path"
+    }
+  ],
+  "total_steps": 2
+}
+```
+
 ---
 
 ## Agent / Headless Usage
@@ -1102,40 +2084,43 @@ These tools are designed to be called programmatically by AI agents, automation 
 **Recommended drill-down workflow for agents:**
 
 ```bash
-# Step 1: Scout — what's in this project?
+# Step 1: Auto-route opening query
+fs "authenticate" /project
+
+# Step 2: Scout — what's in this project?
 ftree --recon -o json /project
-# → per-dir item counts and sizes, agent picks targets programmatically
+# -> per-dir item counts and sizes, agent picks targets programmatically
 
-# Step 2: Structure — show me the tree
+# Step 3: Structure — show me the tree
 ftree /project
-# → depth-3 tree, 200-line cap, noise excluded
+# -> depth-3 tree, 200-line cap, noise excluded
 
-# Step 3: Zoom — drill into interesting part
+# Step 4: Zoom — drill into interesting part
 ftree -L 5 /project/src
-# → deeper view of just src/
+# -> deeper view of just src/
 
-# Step 4: Find candidate files (deterministic, structured)
+# Step 5: Find candidate files (deterministic, structured)
 fsearch --output json '*.py' /project
 
-# Step 5: Map code structure (structural skeleton)
+# Step 6: Map code structure (structural skeleton)
 fsearch --output paths '*.py' /project | fmap --output json
-# → functions, classes, imports for each file
+# -> functions, classes, imports for each file
 
-# Step 6: Search inside candidates (structured results)
+# Step 7: Search inside candidates (structured results)
 fsearch --output paths '*.py' /project | fcontent --output json "import torch"
 
-# Step 7: Read the exact code neighborhood
+# Step 8: Read the exact code neighborhood
 fread --output json /project/src/auth.py --around "def authenticate" -B 5 -A 20
 
-# Step 8: Measure and plan the next pass
+# Step 9: Measure and plan the next pass
 fmetrics import && fmetrics stats -o json
 ```
 
 **The full pipeline:**
 
 ```text
-ftree --snapshot → fsearch -o paths → fmap -o json → fread -o json → fcontent -o json → fmetrics
-Scout            → Find              → Map          → Read          → Search            → Measure
+fs -> ftree --snapshot -> fsearch -o paths -> fmap -o json -> fread -o json -> fcontent -o json -> fmetrics
+Auto   Scout              Find                Map             Read             Search             Measure
 ```
 
 **Why this matters:**
@@ -1152,29 +2137,63 @@ Scout            → Find              → Map          → Read          → Se
 
 Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless marked **Interactive**.
 
+### `fs` — Unified Search Orchestrator
+
+| Call | What it does |
+|------|-------------|
+| `fs "authenticate"` | Unified search — scouts structure, finds files, maps symbols, returns ranked results in one call |
+| `fs "error handler" --scope '**/*.py'` | Narrow the search surface to a file-type glob |
+| `fs "class AuthHandler" --intent symbol` | Force symbol-name intent over auto-detected content |
+| `fs "TODO" --intent content` | Force in-file text content intent |
+| `fs "*.log" --intent file` | Force file-name pattern intent |
+| `fs "def authenticate" -o json` | Structured JSON with ranked hits, tool breakdown, and confidence |
+
+### `fprobe` — Binary Recon
+
+| Command | What it does |
+|---------|-------------|
+| `fprobe strings /path/to/binary` | Extract printable strings from a binary file |
+| `fprobe strings /path/to/binary --min-len 8` | Only strings of 8+ characters |
+| `fprobe strings /path/to/binary --filter "http"` | Strings containing a literal substring |
+| `fprobe scan /path/to/binary --pattern "userFacingName"` | Find a literal byte pattern; returns byte offset + context |
+| `fprobe scan /path/to/binary --pattern "renderTool" --context 200 -o json` | JSON with offset, hex context window, and surrounding bytes |
+| `fprobe window /path/to/binary --offset 0x100 --after 256` | Read 256 bytes after offset |
+| `fprobe window /path/to/binary --offset 0x100 --before 64 --after 256` | Read bytes before and after offset |
+| `fprobe window /path/to/binary --offset 0x100 --after 256 --decode hex` | Hex dump of the window |
+| `fprobe window /path/to/binary --offset 0x100 --after 256 -o json` | JSON with hex, printable text, and offset metadata |
+| `fprobe --self-check` | Verify `file`, `strings`, `xxd`/`od` availability |
+| `fprobe --version` | Print version |
+
+### `freplay` — Derivation Replay
+
+| Command | What it does |
+|---------|-------------|
+| `freplay record auth-seam --purpose "Traced denial branch" -- fread /project/src/auth.py --around 'def authenticate'` | Record a derivation step: case slug, optional purpose, then `--` separator, then the fsuite command |
+| `freplay record auth-seam -- fcontent -o paths "authenticate" src` | Record a content search step with no purpose annotation |
+| `freplay show auth-seam` | Show the full replay chain for a case in order |
+| `freplay show auth-seam -o json` | Machine-readable replay chain with timestamps |
+| `freplay list` | List all cases that have replay chains |
+| `freplay list -o json` | JSON list of case slugs with step counts |
+| `freplay --version` | Print version |
+
 ### `fsearch` — Find Files by Name
 
 | Command | What it does |
 |---------|-------------|
 | `fsearch '*.log' /var/log` | Find all `.log` files under `/var/log` (pretty output) |
-| `fsearch log /var/log` | Same thing — bare word `log` auto-expands to `*.log` |
-| `fsearch .log /var/log` | Same thing — dotted `.log` also auto-expands to `*.log` |
+| `fsearch log /var/log` | Bare word `log` auto-expands to `*.log` |
+| `fsearch .log /var/log` | Dotted `.log` also auto-expands to `*.log` |
 | `fsearch 'upscale*' /home/user` | Files whose names start with `upscale` |
 | `fsearch '*progress*' /home/user` | Files containing `progress` anywhere in the name |
 | `fsearch '*error' /var/log` | Files whose names end with `error` |
-| `fsearch '*.??' /tmp` | Files with two-character extensions (`*.js`, `*.py`, etc.) |
-| `fsearch --output paths '*.py' /project` | One path per line, no header — ideal for piping |
+| `fsearch --output paths '*.py' /project` | One path per line — ideal for piping |
 | `fsearch --output json '*.conf' /etc` | Structured JSON with `total_found`, `results[]`, `backend` |
-| `fsearch --include 'src' --exclude '*test*' '*.py' /project` | Find `.py` files only under source paths, skipping tests |
-| `fsearch --exclude 'node_modules' --exclude '.git' '*.log' /repo` | Scan logs while skipping noisy directories |
-| `fsearch --max 10 '*.py' /project` | Limit pretty output to first 10 results |
+| `fsearch --include 'src' --exclude '*test*' '*.py' /project` | Scope to source, skip tests |
+| `fsearch --exclude 'node_modules' --exclude '.git' '*.log' /repo` | Skip noisy dirs |
+| `fsearch --max 10 '*.py' /project` | Limit to first 10 results |
 | `fsearch --backend fd '*.rs' /src` | Force `fd` backend (faster, if installed) |
-| `fsearch --backend find '*.c' /src` | Force POSIX `find` backend |
 | `fsearch --self-check` | Show which backends are available |
-| `fsearch --install-hints` | Print install commands for `fd` and `rg` |
-| `fsearch --version` | Print version |
-| `fsearch --project-name "MyApp" '*.py' /project` | Override project name in telemetry |
-| `fsearch -q '*.py' /project` | Quiet mode — exit code only, no output |
+| `fsearch -q '*.py' /project` | Quiet mode — exit code only |
 | `fsearch -i` | **Interactive** — prompts for pattern and path |
 
 ### `fcontent` — Search Inside Files
@@ -1183,18 +2202,14 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 |---------|-------------|
 | `fcontent "ERROR" /var/log` | Search for `ERROR` inside all files under `/var/log` |
 | `fcontent "TODO" /project` | Find every `TODO` in a project tree |
-| `fcontent --output paths "ERROR" /var/log` | Print only the file paths that matched (one per line) |
+| `fcontent --output paths "ERROR" /var/log` | Print only file paths that matched (one per line) |
 | `fcontent --output json "ERROR" /var/log` | Structured JSON with `matches[]`, `matched_files[]`, counts |
 | `fcontent -m 20 "debug" /project` | Cap output to 20 match lines |
 | `fcontent -n 50 "debug" /project` | Cap to 50 files searched |
 | `fcontent --rg-args "-i" "error" /var/log` | Case-insensitive search |
-| `fcontent --rg-args "--hidden" "secret" ~` | Include hidden/dotfiles in search |
-| `fcontent --rg-args "-i --hidden" "token" ~` | Case-insensitive + hidden files |
+| `fcontent --rg-args "--hidden" "secret" ~` | Include hidden/dotfiles |
 | `fcontent --rg-args "-w" "main" /project` | Whole-word match only |
 | `fcontent --self-check` | Verify `rg` is installed |
-| `fcontent --install-hints` | Print install command for `rg` |
-| `fcontent --version` | Print version |
-| `fcontent --project-name "MyApp" "TODO" /project` | Override project name in telemetry |
 | `fcontent -q "TODO" /project` | Quiet mode — exit code only (0=found, 1=not found) |
 
 ### `ftree` — Visualize Directory Structure
@@ -1207,25 +2222,14 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `ftree -o json /project` | Structured JSON tree with metadata envelope |
 | `ftree -o paths /project` | Flat file list, one per line |
 | `ftree --recon -o json /project` | Recon JSON: agent-parseable per-dir inventory |
-| `ftree --snapshot /project` | Snapshot: recon inventory + tree excerpt in one output |
+| `ftree --snapshot /project` | Recon inventory + tree excerpt in one output |
 | `ftree --snapshot -o json /project` | Snapshot JSON: combined recon + tree for agents |
 | `ftree --recon --hide-excluded /project` | Clean recon, no excluded-dir summaries |
 | `ftree --include .git /project` | Show `.git` even though it's in the default ignore list |
 | `ftree -I 'docs\|*.md' /project` | Exclude additional patterns (appended to defaults) |
-| `ftree -I 'docs' -I '*.md' /project` | Same — multiple `-I` flags accumulate (v1.0.1+) |
 | `ftree --no-default-ignore /project` | Disable built-in ignore list entirely |
-| `ftree -d /project` | Directories only |
-| `ftree -s /project` | Show file/dir sizes |
-| `ftree -f /project` | Full absolute paths |
-| `ftree -m50 /project` | Cap pretty output at 50 lines (combined flag) |
-| `ftree -m 0 /project` | Unlimited lines (may be large!) |
-| `ftree --gitignore /project` | Also honor `.gitignore` rules (if tree supports it) |
+| `ftree --snapshot --no-lines -o json /project` | Snapshot JSON without `tree.lines` array |
 | `ftree --self-check` | Verify tree is installed, check `--gitignore` support |
-| `ftree --install-hints` | Print install command for tree |
-| `ftree --version` | Print version |
-| `ftree --snapshot --no-lines -o json /project` | Snapshot JSON without tree.lines array |
-| `ftree --project-name "MyApp" /project` | Override project name in telemetry |
-| `ftree -q /project` | Quiet mode — exit code only |
 
 ### `fmap` — Extract Code Structure
 
@@ -1234,19 +2238,15 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `fmap /project` | Map all source files under `/project` (pretty output) |
 | `fmap /project/src/auth.py` | Map a single file |
 | `fmap -o json /project` | JSON output with symbol metadata |
-| `fmap --name authenticate -o json /project` | Rank/filter symbols by exact then substring symbol-name matches |
+| `fmap --name authenticate -o json /project` | Rank/filter by symbol name matches |
 | `fmap -o paths /project` | File paths that contain symbols |
 | `fmap -t function /project` | Show only function definitions |
 | `fmap -t class /project` | Show only class definitions |
 | `fmap --no-imports /project` | Skip import lines |
-| `fmap -t import --no-imports /project` | Precedence: `-t import` overrides `--no-imports` |
 | `fmap -L bash /project/scripts` | Force language to Bash |
 | `fmap -m 50 /project` | Cap shown symbols to 50 |
 | `fmap -n 100 /project` | Cap files processed to 100 |
-| `fmap --no-default-ignore /project` | Include node_modules etc. |
 | `fmap --self-check` | Verify grep is available |
-| `fmap --version` | Print version |
-| `fmap -q /project` | Quiet mode — no header |
 | `fsearch -o paths '*.py' /project \| fmap -o json` | Pipeline: find then map |
 
 ### `fread` — Read Just Enough Context
@@ -1260,29 +2260,28 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `fread /project/src/auth.py --around-line 150 -B 5 -A 15` | Read context around line 150 |
 | `fread /project/src/auth.py --around "def authenticate" -B 5 -A 20` | Read around the first literal pattern match |
 | `fread /project/src/auth.py --symbol authenticate -o json` | Read one exact symbol block from a file |
-| `fread /project/src --symbol authenticate -o json` | Resolve and read one exact symbol block from a directory scope |
+| `fread /project/src --symbol authenticate -o json` | Resolve and read one exact symbol from a directory scope |
 | `fread /project/src/auth.py --all-matches --around "TODO"` | Read around every match until caps are hit |
 | `fread /project/src/auth.py --max-lines 80 --max-bytes 12000` | Enforce hard output budgets |
 | `fread /project/src/auth.py --token-budget 2000 -o json` | Cap by estimated token cost |
-| `fsearch -o paths '*.py' /project \| fread --from-stdin --stdin-format=paths --max-files 5` | Read the first 5 files from a pipeline |
+| `fsearch -o paths '*.py' /project \| fread --from-stdin --stdin-format=paths --max-files 5` | Read first 5 files from a pipeline |
 | `git diff \| fread --from-stdin --stdin-format=unified-diff -B 3 -A 10` | Read context around changed hunks |
 | `fread --self-check` | Verify dependencies (`sed`, `awk`, `grep`, `wc`, `od`, `perl`) |
-| `fread --version` | Print version |
 
 ### `fcase` — Preserve Investigation Continuity
 
 | Command | What it does |
 |---------|-------------|
-| `fcase init auth-seam --goal "Trace authenticate flow"` | Create a new investigation case and open its first session |
+| `fcase init auth-seam --goal "Trace authenticate flow"` | Create a new investigation case |
 | `fcase list -o json` | List known cases for automation |
-| `fcase status auth-seam -o json` | Read the current case state quickly |
+| `fcase status auth-seam -o json` | Read current case state |
 | `fcase note auth-seam --body "Focused on denial branch"` | Append a note to the case history |
-| `fcase target add auth-seam --path /project/src/auth.py --symbol authenticate --symbol-type function --state active` | Mark the main file/symbol seam as active |
-| `fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 --summary "Authenticate branch" --body "..."` | Store structured proof from a read or search |
-| `fcase hypothesis add auth-seam --body "Cleanup bug lives in tool cancellation"` | Track an open explanation |
-| `fcase reject auth-seam --hypothesis-id 1 --reason "Process survives normal completion too"` | Reject one hypothesis explicitly |
-| `fmap -o json /project/src/auth.py | fcase target import auth-seam` | Import mapped symbols as structured targets |
-| `fread -o json /project/src/auth.py --around "def authenticate" -A 20 | fcase evidence import auth-seam` | Import bounded reads as structured evidence |
+| `fcase target add auth-seam --path /project/src/auth.py --symbol authenticate --symbol-type function --state active` | Mark a file/symbol seam as active |
+| `fcase evidence auth-seam --tool fread --path /project/src/auth.py --lines 40:72 --summary "..." --body "..."` | Store structured proof from a read |
+| `fcase hypothesis add auth-seam --body "Cleanup bug in tool cancellation"` | Track an open hypothesis |
+| `fcase reject auth-seam --hypothesis-id 1 --reason "Process survives normal completion too"` | Reject a hypothesis explicitly |
+| `fmap -o json /project/src/auth.py \| fcase target import auth-seam` | Import mapped symbols as structured targets |
+| `fread -o json /project/src/auth.py --around "def authenticate" -A 20 \| fcase evidence import auth-seam` | Import bounded reads as structured evidence |
 | `fcase next auth-seam --body "Patch denial branch after reviewing symbol map"` | Update the next best move |
 | `fcase handoff auth-seam -o json` | Emit a concise handoff packet for the next agent |
 | `fcase export auth-seam -o json` | Export the full portable case envelope |
@@ -1292,21 +2291,25 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 
 | Command | What it does |
 |---------|-------------|
-| `fedit /project/src/auth.py --replace 'old' --with 'new'` | Preview an exact replacement |
+| `fedit /project/src/auth.py --replace 'old' --with 'new'` | Preview an exact replacement (dry-run by default) |
 | `fedit /project/src/auth.py --replace 'old' --with 'new' --apply` | Apply the exact replacement |
+| `fedit /project/src/auth.py --lines 71:73 --with "    return deny()\n"` | Replace a specific line range with new content |
 | `fedit /project/src/auth.py --after 'def authenticate(user):' --content-file patch.txt` | Preview an insertion after an anchor |
 | `fedit /project/src/auth.py --before 'return True' --stdin --apply` | Insert payload from stdin before an anchor |
 | `fedit /project/src/auth.py --symbol authenticate --replace 'return False' --with 'return deny()'` | Scope the patch to one `fmap`-resolved symbol |
 | `fedit /project/src/auth.py --function authenticate --replace 'return False' --with 'return deny()'` | Scope to a function without spelling `--symbol-type` |
-| `fedit /project/src/auth.py --class AuthHandler --after 'self.ready = False' --with $'\n        self.ready = True'` | Target one class block with shortcut syntax |
-| `printf '/project/a.py\n/project/b.py\n' \| fedit --targets-file - --targets-format paths --replace 'x = 1' --with 'x = 2'` | Preview a preflighted batch patch from stdin targets |
-| `fedit --targets-file map.json --targets-format fmap-json --function authenticate --replace 'return False' --with 'return deny()' --apply` | Apply one symbol-scoped edit across `fmap` JSON targets |
+| `fedit /project/src/auth.py --class AuthHandler --after 'self.ready = False' --with $'\n        self.ready = True'` | Target one class block |
+| `printf '/project/a.py\n/project/b.py\n' \| fedit --targets-file - --targets-format paths --replace 'x = 1' --with 'x = 2'` | Preview a batch patch from stdin targets |
+| `fedit --targets-file map.json --targets-format fmap-json --function authenticate --replace 'return False' --with 'return deny()' --apply` | Apply symbol-scoped edit across `fmap` JSON targets |
 | `fedit /project/src/auth.py --expect 'def authenticate' --replace 'old' --with 'new'` | Require expected text before patching |
 | `fedit /project/src/auth.py --expect-sha256 HASH --replace 'old' --with 'new' --apply` | Guard the write with a content hash |
 | `fedit --create /project/src/new_file.py --content-file body.txt --apply` | Create a new file from payload |
 | `fedit --replace-file /project/src/auth.py --content-file rewrite.txt --apply` | Replace an entire file from payload |
 | `fedit --self-check` | Verify perl, diff, mktemp, and SHA tooling |
-| `fedit --version` | Print version |
+
+### `fwrite` — Write Files (MCP Only)
+
+> MCP-only tool. Not available as a CLI binary. Call via the fsuite MCP server. Writes or overwrites a file from a string payload. Use `fedit` for surgical patches; `fwrite` for complete file creation or full rewrites.
 
 ### `fmetrics` — Analyze and Predict
 
@@ -1323,76 +2326,23 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `fmetrics clean --days 30` | Prune old telemetry |
 | `fmetrics --self-check` | Verify sqlite3, python3, and predict helper availability |
 
-### Pipeline — Find Then Grep (the power move)
+### Pipeline — Canonical Sequences
 
-| Command | What it does |
-|---------|-------------|
-| `fsearch -o paths '*.log' /var/log \| fcontent "ERROR"` | Find logs, then search inside them for `ERROR` |
-| `fsearch -o paths '*.py' /project \| fcontent "import torch"` | Which Python files import torch? |
-| `fsearch -o paths '*.env' /home \| fcontent "API_KEY"` | Find `.env` files that mention `API_KEY` |
-| `fsearch -o paths '*.yml' /etc \| fcontent "password"` | Audit YAML configs for hardcoded passwords |
-| `fsearch -o paths '*.sh' /opt \| fcontent "rm -rf"` | Find shell scripts with dangerous deletes |
-| `fsearch -o paths '*.js' /app \| fcontent "eval("` | Find JS files using `eval()` |
-| `fsearch -o paths '*.py' /app \| fcontent --output json "def "` | JSON list of every function definition across all Python files |
-| `fsearch -o paths '*.log' /var/log \| fcontent --output paths "CRITICAL"` | Just file paths of logs containing `CRITICAL` |
-| `fsearch -o paths '*.conf' /etc \| fcontent --output json "listen"` | JSON: which config files have `listen` directives? |
-| `fsearch -o paths '*.py' /project \| fread --from-stdin --stdin-format=paths --max-files 5 -o json` | Read bounded context from the first few matching files |
+| Workflow | Command chain |
+|----------|--------------|
+| **Full scout** | `ftree --snapshot -o json /project` |
+| **Find + map** | `fsearch -o paths '*.py' /project \| fmap -o json` |
+| **Find + grep** | `fsearch -o paths '*.log' /var/log \| fcontent "ERROR"` |
+| **Find + read** | `fsearch -o paths '*.py' /project \| fread --from-stdin --stdin-format=paths --max-files 5 -o json` |
+| **Map + read** | `fmap --name authenticate -o json /project \| fread --symbol authenticate -o json` |
+| **Binary recon** | `fprobe scan /binary && fprobe strings /binary --filter "http"` |
+| **Investigation** | `fcase init seam --goal "..." && fmap -o json /path \| fcase target import seam && fcase handoff seam -o json` |
+| **Batch patch** | `fsearch -o paths '*.py' /project \| fedit --targets-file - --targets-format paths --replace 'x' --with 'y' --apply` |
+| **Git diff read** | `git diff \| fread --from-stdin --stdin-format=unified-diff -o json` |
 
-### Headless / Agent Workflows
+---
 
-These are designed for AI agents, CI pipelines, cron jobs, and automation scripts. No TTY, no prompts, deterministic output.
-
-| Workflow | Commands | Why |
-|----------|----------|-----|
-| **One-shot context** | `ftree --snapshot -o json /project` | Agent gets recon + tree in one call (v1.2.0+) |
-| **Scout a project** | `ftree --recon -o json /project` | Agent gets per-dir item counts, sizes, and exclusion tags |
-| **Structure overview** | `ftree -o json /project` | Agent gets depth-3 tree with truncation metadata |
-| **Drill into subdirectory** | `ftree -L 5 -o json /project/src` | Agent zooms into a specific subtree |
-| **Inventory a project** | `fsearch -o json '*.py' /project` | Agent gets structured file list with count |
-| **Map code structure** | `fmap -o json /project` | Agent gets functions, classes, imports per file |
-| **Map specific files** | `fsearch -o paths '*.py' /project \| fmap -o json` | Pipeline: find then map structure |
-| **Read targeted context** | `fread -o json /project/src/auth.py --around "def authenticate" -A 20` | Agent reads one function neighborhood without flooding context |
-| **Preserve case state** | `fcase status auth-seam -o json` | Agent reloads what matters now without replaying chat history |
-| **Emit a handoff** | `fcase handoff auth-seam -o json` | Agent hands the current seam, evidence, and next move to the next run |
-| **Preview a patch** | `fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()"` | Agent gets a structured diff before changing code |
-| **Apply a patch** | `fedit -o json /project/src/auth.py --symbol authenticate --replace "return False" --with "return deny()" --apply` | Agent mutates only after it has inspected the diff |
-| **Shortcut-scoped patch** | `fedit -o json /project/src/auth.py --function authenticate --replace "return False" --with "return deny()"` | Agent targets one function directly from the CLI |
-| **Batch patch preview** | `printf 'a.py\nb.py\n' \| fedit -o json --targets-file - --targets-format paths --replace "x = 1" --with "x = 2"` | Agent previews a multi-file batch before writing |
-| **Batch symbol patch** | `fedit -o json --targets-file map.json --targets-format fmap-json --function authenticate --replace "return False" --with "return deny()" --apply` | Agent applies one symbol-scoped patch across mapped files |
-| **Read changed code** | `git diff \| fread --from-stdin --stdin-format=unified-diff -o json` | Agent turns a patch into contextual file reads |
-| **Budgeted follow-up reads** | `fsearch -o paths '*.py' /project \| fread --from-stdin --stdin-format=paths --max-files 5 --token-budget 2000 -o json` | Agent keeps reading within a controlled context budget |
-| **Functions only** | `fmap -t function -o json /project` | Agent gets only function definitions |
-| **Find + grep in one shot** | `fsearch -o paths '*.py' /project \| fcontent -o json "import"` | Agent gets structured match data in one pipeline |
-| **Predict before scanning** | `fmetrics predict /project` | Agent estimates cost before launching recon on a large target |
-| **Count log files** | `fsearch -o json '*.log' /var/log \| jq .total_found` | Pull a single integer from JSON |
-| **List matched files only** | `fsearch -o paths '*.cfg' /etc \| fcontent -o paths "deprecated"` | Clean file list, no noise, one per line |
-| **Feed files to another tool** | `fsearch -o paths '*.py' /src \| xargs wc -l` | Line count of every Python file found |
-| **Triage error logs** | `fsearch -o paths '*.log' /var/log \| fcontent -o json "FATAL"` | Agent parses `total_matched_files` to decide severity |
-| **Security sweep** | `fsearch -o paths '*.env' / \| fcontent -o paths "SECRET"` | Find exposed secrets across the whole filesystem |
-| **Dependency audit** | `fsearch -o paths 'requirements*.txt' /home \| fcontent "requests=="` | Which projects pin the `requests` library? |
-| **Config drift check** | `fsearch -o paths '*.conf' /etc \| fcontent -o json "PermitRootLogin"` | Agent checks SSH config state across hosts |
-| **Pre-deploy scan** | `fsearch -o paths '*.js' /app \| fcontent -o paths "console.log"` | Find leftover debug statements before shipping |
-| **Dead code detection** | `fsearch -o paths '*.py' /src \| fcontent -o json "def unused_"` | Agent flags functions prefixed `unused_` |
-| **Batch rename prep** | `fsearch -o paths '*_old*' /project` | List all `_old` files an agent should rename or delete |
-| **Monitor new files** | `fsearch -o json '*.tmp' /var/tmp` | Agent checks `total_found` periodically to track tmp growth |
-| **Multi-stage pipeline** | `fsearch -o paths '*.py' /src \| fcontent -o paths "class " \| xargs head -5` | Find Python files with classes, show first 5 lines of each |
-| **Existence check** | `fsearch -q '*.lock' /project && echo "found"` | Quiet mode — check if lockfiles exist (exit code only) |
-| **Grep check** | `fcontent -q "FIXME" /src \|\| echo "clean"` | Quiet mode — check if FIXME exists in codebase |
-
-### Interactive / Human Shortcuts
-
-| Command | What it does |
-|---------|-------------|
-| `fsearch -i` | Prompts for pattern and path interactively |
-| `fsearch '*.log'` | Searches current directory (no path needed) |
-| `fcontent "TODO"` | Searches current directory for `TODO` |
-| `fsearch '*test*' .` | Find test files from here |
-| `fcontent "FIXME" .` | Find `FIXME` comments from here |
-| `fsearch '*.py' . \| less` | Page through results |
-| `fcontent "error" /var/log 2>/dev/null` | Suppress permission warnings |
-| `sudo fcontent "error" /var/log` | Search protected dirs (authenticate first with `sudo -v`) |
-
-### Quick Reference — Flags
+## Quick Reference — Flags
 
 **`fsearch`**
 
@@ -1481,6 +2431,7 @@ These are designed for AI agents, CI pipelines, cron jobs, and automation script
 | `--with` | — | payload text | — |
 | `--after` | — | exact anchor text | — |
 | `--before` | — | exact anchor text | — |
+| `--lines` | — | `START:END` | — |
 | `--content-file` | — | readable file path | — |
 | `--stdin` | — | — | off |
 | `--expect` | — | exact text block | — |
@@ -1497,8 +2448,8 @@ These are designed for AI agents, CI pipelines, cron jobs, and automation script
 | `--targets-file` | — | path list file or `-` for stdin | — |
 | `--targets-format` | — | `paths`, `fmap-json` | — |
 | `--allow-multiple` | — | — | off |
-| `--apply` | — | — | off |
-| `--dry-run` | — | — | on |
+| `--apply` | — | — | off (CLI) / on (MCP) |
+| `--dry-run` | — | — | on (CLI) |
 | `--create` | — | — | off |
 | `--replace-file` | — | — | off |
 | `--project-name` | — | any string | auto-detected |
@@ -1580,6 +2531,7 @@ These are designed for AI agents, CI pipelines, cron jobs, and automation script
 | `rg` (ripgrep) | **Required** by `fcontent` | `sudo apt install ripgrep` |
 | `perl` | **Required** by `fread` for JSON escaping and portable timing fallback | `sudo apt install perl` |
 | `sqlite3` | Required by `fcase` case storage and `fmetrics import/stats/history/clean` | `sudo apt install sqlite3` |
+| `python3` | Required by `fmetrics predict`, `fprobe` engine, and `fs` engine | `sudo apt install python3` |
 
 All tools include built-in guidance:
 
@@ -1595,6 +2547,8 @@ fmap --install-hints       # Print install command for grep
 fread --self-check         # Verify sed/awk/grep/wc/od/perl
 fread --install-hints      # Print install commands for core deps
 fcase --help               # Show case ledger subcommands
+fprobe --self-check        # Verify file/strings/xxd/od availability
+fedit --self-check         # Verify perl, diff, mktemp, and SHA tooling
 fmetrics --self-check      # Verify sqlite3 + python3 helper chain
 fmetrics --install-hints
 ```
@@ -1678,9 +2632,11 @@ fmetrics clean --days 30
 ## Security Notes
 
 - No tool stores passwords or credentials
-- No tool writes to the filesystem or modifies files (except telemetry in `~/.fsuite/`)
+- No tool writes to the filesystem or modifies files (except `fedit`/`fwrite` mutations and telemetry in `~/.fsuite/`)
+- `fprobe` is read-only by design — no mutations on binary targets
 - For scanning protected directories, authenticate first with `sudo -v` then run with `sudo`
 - No auto-install behavior; `--install-hints` only _prints_ commands for you to run manually
+- MCP adapter uses `execFile` (not `exec`) — shell injection is structurally impossible
 
 ---
 
@@ -1706,10 +2662,10 @@ This installs into `~/.local/bin` and `~/.local/share/fsuite`.
 ### Alternate: manual symlink install
 
 ```bash
-chmod +x fsuite fsearch fcontent ftree fmap fread fcase fedit fmetrics
+chmod +x fsuite fs fsearch fcontent ftree fmap fread fcase fedit fprobe freplay fmetrics
 
 sudo ln -s "$(pwd)/fsuite" /usr/local/bin/fsuite
-
+sudo ln -s "$(pwd)/fs" /usr/local/bin/fs
 sudo ln -s "$(pwd)/fsearch" /usr/local/bin/fsearch
 sudo ln -s "$(pwd)/fcontent" /usr/local/bin/fcontent
 sudo ln -s "$(pwd)/ftree" /usr/local/bin/ftree
@@ -1717,7 +2673,30 @@ sudo ln -s "$(pwd)/fmap" /usr/local/bin/fmap
 sudo ln -s "$(pwd)/fread" /usr/local/bin/fread
 sudo ln -s "$(pwd)/fcase" /usr/local/bin/fcase
 sudo ln -s "$(pwd)/fedit" /usr/local/bin/fedit
+sudo ln -s "$(pwd)/fprobe" /usr/local/bin/fprobe
+sudo ln -s "$(pwd)/freplay" /usr/local/bin/freplay
 sudo ln -s "$(pwd)/fmetrics" /usr/local/bin/fmetrics
+```
+
+### MCP adapter setup
+
+```bash
+cd /path/to/fsuite/mcp
+npm install
+```
+
+Then register in `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "fsuite": {
+      "command": "node",
+      "args": ["/path/to/fsuite/mcp/index.js"],
+      "type": "stdio"
+    }
+  }
+}
 ```
 
 ### Build the Debian package
@@ -1735,6 +2714,7 @@ sudo dpkg -i ../fsuite_*_all.deb
 ftree --version
 fread --version
 fedit --version
+fprobe --version
 fmetrics --version
 ```
 
@@ -1744,205 +2724,199 @@ For harnesses that read repo instructions, point them at [AGENTS.md](AGENTS.md).
 
 ---
 
+## Testing
+
+The full test harness lives in `tests/`. Run via the master runner:
+
+```bash
+./tests/run_all_tests.sh          # all suites
+./tests/run_all_tests.sh --suite fprobe   # one suite only
+./tests/run_all_tests.sh --verbose        # per-test output
+```
+
+### Test matrix (v2.3.0)
+
+| Suite | File | Tests | Notes |
+|-------|------|-------|-------|
+| `fsearch` | `test_fsearch.sh` | 35 | Pattern normalization, backend fallback, output modes |
+| `fcontent` | `test_fcontent.sh` | 30 | rg passthrough, pipeline, caps |
+| `ftree` | `test_ftree.sh` | 48 | Recon, snapshot, JSON schema, depth |
+| `fmap` | `test_fmap.sh` | 80 | 18 languages, dedup, imports, Markdown |
+| `fread` | `test_fread.sh` | 42 | Range, head/tail, around, symbol, stdin modes |
+| `fcase` | `test_fcase.sh` | 25 | Lifecycle, SQLite, import, handoff, busy-timeout |
+| `fedit` | `test_fedit.sh` | 38 | Dry-run, apply, symbol scope, batch, line-range |
+| `fmetrics` | `test_fmetrics.sh` | 20 | Import, stats, predict, clean |
+| `fprobe` | `test_fprobe.sh` | 25 | scan, strings, window, binary formats, self-check |
+| `freplay` | `test_freplay.sh` | 14 | record, show, list, JSON schema |
+| `fs` | `test_fs.sh` | 18 | Unified dispatch, ranking, scope, JSON output |
+| `pipelines` | `test_pipelines.sh` | 22 | End-to-end cross-tool pipeline tests |
+| `mcp_rendering` | `test_mcp_rendering.sh` | 16 | Pixel-perfect MCP display, dev mode, ANSI |
+| `install` | `test_install.sh` | 12 | Installer, PATH, self-check, version |
+
+**Total: ~425 tests across 14 suites.** All suites must pass green before any release.
+
+Exit codes: `0` = all pass, `1` = failures (count printed), `2` = suite not found.
+
+---
+
 ## Changelog
+
+### v2.3.0 (2026-03-29)
+
+`fs` unified search orchestrator ships. MCP rendering overhauled for pixel-perfect output. Review fixes applied across two rounds.
+
+**New tools:**
+- **`fs`**: Unified search orchestrator — dispatches `ftree`, `fsearch`, `fmap`, and `fcontent` in one call; returns ranked, typed results with confidence scores and `tools_used` metadata
+- **`freplay`**: Derivation replay — records investigation steps (command + note), shows ordered replay chains, supports `record|show|list` subcommands and JSON output
+
+**Rendering and display:**
+- **`fedit`**: Full display overhaul — pixel-perfect unified diff rendering in MCP context; line numbers preserved in preview; `--lines` mode (`--lines 71:73 --with "..."`) for direct line-range replacement without text anchors
+- **MCP dev mode**: `FSUITE_DEV=1` env var enables verbose MCP trace output for server-side debugging without affecting client-facing JSON contracts
+- **Pixel-perfect rendering**: All tools emit clean ANSI-free output in non-TTY/MCP contexts; pretty mode renders correctly in Claude Code tool output panels
+
+**Review fixes (rounds 1 + 2):**
+- `fread`: `--symbol` resolution now disambiguates same-name symbols across multiple files when scope is a directory
+- `fedit`: `--lines` range validation rejects inverted ranges (`end < start`) with a clear error before any file mutation
+- `fprobe`: `strings` mode defaults to `--min-len 4`; `window` mode validates offset + size does not exceed file size
+- `fcase`: `next_move` update no longer clobbers evidence records added in the same session
+- `fs`: Tie-breaking in ranking now favors `symbol` hits over `content` hits at equal confidence
+
+**Tests:**
+- `test_fs.sh` (18 tests), `test_freplay.sh` (14 tests), `test_mcp_rendering.sh` (16 tests) added
+- Full suite: 14 suites, ~425 tests, all green
+
+---
+
+### v2.2.0 (2026-03-29)
+
+`fprobe` binary recon and `fedit --lines` mode ship. MCP rendering stabilized at 10-tool baseline.
+
+**New tools:**
+- **`fprobe`**: Binary reconnaissance — `strings`, `scan`, and `window` subcommands; zero new dependencies (`file`, `strings`, `xxd`/`od`); structured JSON output with binary detection, entropy, section table, and offset-addressed windows
+- 25-test suite `test_fprobe.sh` covering all three subcommands, format variants, and self-check
+
+**New features:**
+- **`fedit --lines`**: Line-range replacement mode — specify `--lines START:END --with "content"` to replace an exact line range without needing a text anchor; safe on files with duplicate anchor strings
+- **MCP rendering**: `fread`, `fedit`, `fprobe` output renders correctly in Claude Code MCP tool panels — ANSI stripping in non-TTY, consistent line-number formatting, no bleed between tool outputs
+
+**Tests:**
+- Full suite: 10 suites, ~350 tests, all green
+
+---
 
 ### v2.1.2
 
-Hotfix release for the `fcase` SQLite busy-timeout regression that slipped into `v2.1.1`.
+Hotfix for `fcase` SQLite busy-timeout regression introduced in v2.1.1.
 
-- **fix(fcase):** preserve clean JSON/stdout contracts while still enabling SQLite timeout behavior when the sqlite frontend supports it
+- **fix(fcase):** preserve clean JSON/stdout contracts while enabling SQLite timeout behavior when the sqlite frontend supports it
 - **fix(fcase):** avoid `PRAGMA busy_timeout=5000` result leakage in shim-based sqlite environments that printed `5000` ahead of JSON payloads
 - **fix(fcase):** restore healthy `fcase` command behavior for `init`, `status`, `next`, `note`, `handoff`, `export`, and structured imports
 - **test:** full suite restored green, including `25/25` `fcase` tests and `10/10` passing test suites overall
+
+---
 
 ### v2.1.1
 
 `fmap` adds Markdown as its 18th language. Headings, fences, frontmatter, and links are mapped with CommonMark-compliant rules.
 
 - **feat(fmap):** Markdown language support (`.md`, `.markdown`, `.mdx`)
-- **feat(fmap):** ATX headings h1–h6 with up to 3 leading spaces, trailing `#` stripping per CommonMark (only when preceded by space)
-- **feat(fmap):** Setext headings with full paragraph accumulation (multiline) and paragraph validation (rejects list items, blockquotes, ATX headings, HTML)
-- **feat(fmap):** Fenced code block suppression via stateful awk post-pass — backtick, tilde, and bare fences. Zero false positives from code inside fences.
-- **feat(fmap):** YAML frontmatter (`---` at line 1) suppressed
-- **feat(fmap):** Inline links detected anywhere in line (not just line-start), reference link definitions (`[ref]: url`), images excluded from imports
-- **Known Markdown limitations:** escaped links (`\[`), autolinks (`<url>`), empty-text links, `.mdx` JSX/ESM
+- **feat(fmap):** ATX headings h1-h6, Setext headings with paragraph accumulation, fenced code block suppression, YAML frontmatter suppression, inline links and reference link definitions
 - **test:** 21 markdown-specific regression tests, 122 total tests passing
+
+---
 
 ### v2.1.0
 
-`fmap` expands from language-aware code mapping into a more practical mobile-leaning scout step. This release adds Kotlin coverage for both source files and Gradle Kotlin DSL, plus an Android-lite bridge for manifest and layout XML discovery.
+`fmap` expands to cover Kotlin and Android-lite (manifest + layout XML). `fcase` and `freplay` ship.
 
 **New language and ecosystem coverage:**
-- **`fmap`**: Kotlin symbol mapping for `.kt` and `.kts`, including classes, objects, interfaces, functions, imports, and SCREAMING_CASE constants
-- **`fmap`**: Android-lite mapping for `AndroidManifest.xml` and `res/layout/*.xml` with narrow symbol extraction for application components and layout elements
-- **Tests**: added Kotlin and Android-lite coverage, including regressions for modifier handling and manifest tag disambiguation
+- **`fmap`**: Kotlin symbol mapping for `.kt` and `.kts`
+- **`fmap`**: Android-lite mapping for `AndroidManifest.xml` and `res/layout/*.xml`
 
-**Release hardening:**
-- **`fmap`**: tightened Kotlin constant matching so bare declarations do not false-positive as mapped constants
-- **`fmap`**: narrowed manifest activity matching so `<activity-alias>` no longer misclassifies as `<activity>`
-- **Packaging**: suite version unified at `2.1.0`, including updated Debian release assets
+**New tools:**
+- **`fcase`**: Investigation lifecycle ledger — SQLite-backed, typed targets/evidence/hypotheses, explicit `fmap` and `fread` JSON imports, append-only history, handoff packets
+- **`freplay`**: Derivation replay (initial version — `record` + `show` only; `list` added in v2.3.0)
+
+**Packaging:** suite version unified at `2.1.0`
+
+---
 
 ### v2.0.0
 
-`fedit` grows from a single-file patch tool into a symbol-first, preflighted batch editor. This release adds the structural editing surface that turns the suite into scout-map-read-edit at project scale.
+`fedit` grows into a symbol-first, preflighted batch editor. Suite gains the full scout-map-read-edit loop at project scale.
 
 **New editing surface:**
-- **`fedit`**: symbol shortcuts `--function`, `--class`, `--method`, `--import`, `--constant`, and `--type`
+- **`fedit`**: symbol shortcuts `--function`, `--class`, `--method`, `--import`, `--constant`, `--type`
 - **`fedit`**: preflighted batch patching via `--targets-file` with `paths` or `fmap-json` target formats
 - **`fedit`**: batch JSON envelope for headless agents, including per-target status and combined diffs
 
 **Workflow hardening:**
-- **`fsearch` / `fcontent`**: default-ignore steering for dependency/build trees so agent discovery stays focused on real project files
-- **Docs**: README and AGENTS guidance now frame `fcontent` as a confirmation tool and `fedit` as part of the structural edit loop
-- **`fsuite`**: new suite-level guide command that prints the conceptual flow, tool roles, and headless usage contract on first contact
-- **Packaging**: suite version unified at `2.0.0`, including the new `fsuite` command, helper scripts, and Debian release assets
+- **`fsearch` / `fcontent`**: default-ignore steering for dependency/build trees
+- **`fsuite`**: new suite-level guide command for first-contact workflow orientation
+- **Packaging**: suite version unified at `2.0.0`
+
+---
 
 ### v1.9.0
 
-The missing modification step is now part of the suite. `fedit` turns `fsuite` from scout-map-read-measure into scout-map-read-edit-measure, and the entire release is unified at `1.9.0`.
+`fedit` introduced — suite becomes scout-map-read-edit-measure.
 
-**New tool:**
 - **`fedit`**: preview-first surgical patching with exact replace, before/after anchors, and dry-run diffs by default
-- **`fedit`**: preconditions (`--expect`, `--expect-sha256`), structured JSON error output, and binary-target rejection for safe headless use
-- **`fedit`**: `fmap`-driven `--symbol` / `--symbol-type` scoping so agents patch one symbol block instead of guessing with raw text alone
+- **`fedit`**: preconditions (`--expect`, `--expect-sha256`), structured JSON error output, binary-target rejection
+- **`fedit`**: `fmap`-driven `--symbol` / `--symbol-type` scoping
+- **Tests**: dedicated `fedit` suite; 9 test suites total
 
-**Release hardening:**
-- **Packaging**: Debian package and installer now install `fedit`
-- **Tests**: dedicated `fedit` suite added and wired into the master runner; full suite now runs across 9 test suites
-- **Docs**: README promoted from a six-tool recon kit to the seven-tool inspect/edit loop
+---
 
 ### v1.8.0
 
-The missing read step is now part of the suite. `fread` turns `fsuite` from scout-and-map into scout-map-read-measure, and the entire release is unified at `1.8.0`.
+`fread` introduced — suite becomes scout-map-read-measure.
+
 - **`fread`**: budgeted file reading with range, head/tail, around-line, around-pattern, stdin path mode, and unified-diff mode
-- **`fread`**: token estimation, binary detection, truncation `next_hint`, and structured JSON output for agents
+- **`fread`**: token estimation, binary detection, truncation `next_hint`, and structured JSON output
+- **Tests**: 7 test suites total
 
-**Release hardening:**
-- **Packaging**: Debian package now installs `fread`
-- **Telemetry**: `fread` uses portable millisecond timestamp fallback for macOS/BSD as well as GNU/Linux
-- **Tests**: dedicated `fread` suite added and wired into the master runner; full suite now runs across 7 test suites
-- **Docs**: README promoted from a four-tool view to the full six-tool suite
+---
 
-### v1.7.0
+### v1.7.0 and earlier
 
-Unified version bump. All tools now at 1.7.0. Seven bug fixes, new features, 281 tests.
+See `docs/ftree.md` and the `v1.6.x` entries below for full per-tool history.
 
-**Bug fixes:**
-- **ftree**: recon path identity at depth > 1 — positional `rel_path` replaces `basename`, JSON includes both `name` and `path` fields
-- **ftree**: timeout detection fixed — structured output protocol (`value|flag`) replaces broken subshell variable propagation
-- **ftree**: `total_size_bytes` preserves `-1` sentinel for unknown sizes (was coerced to `0`)
-- **telemetry**: `run_id`-based dedup replaces timestamp-based `UNIQUE` constraint — burst runs no longer silently dropped
-- **telemetry**: atomic DB migration with `.bail on` + `BEGIN IMMEDIATE` + rollback safety
-- **fsearch**: bounded memory — `head -n` before `mapfile` + `|| true` guards under `pipefail`
-- **fcontent**: `-q` exit code 1 on no match (matches documented contract)
-
-**New features:**
-- `fsearch`: `-I/--include` and `-x/--exclude` repeatable path filters with wildcard matching
-- `fcontent`: path deduplication in output — first match shows full path, subsequent show basename
-
-### v1.6.2
-
-Production-grade path filtering for `fsearch`:
-
-- Added `-I/--include` and `-x/--exclude` repeatable filters with wildcard-aware pattern matching.
-- Added filter-aware filtering pipeline: include checks run first (OR across includes), then exclude checks remove matches (OR across excludes).
-- Recorded include/exclude flags in telemetry for `fsearch`.
-- Documentation updates for `fsearch` include/exclude workflows (monorepo and test-scope triage).
+---
 
 ### v1.6.1
 
-Hardening and review fixes for `fmap`. No new features — all changes improve robustness, safety, and correctness.
+Hardening and review fixes for `fmap`. No new features.
 
-- **`.h` header heuristic**: `.h` files now dispatch to C++ when C++ constructs are detected (class, template, namespace, `std::`), otherwise fall back to C
-- **Locale pinning**: `LC_ALL=C` set at script top so grep/regex character classes behave consistently across environments
-- **Performance**: replaced O(n²) string concatenation in `extract_symbols` with temp file streaming
-- **JSON escape**: handles `\b`, `\f`, and all control chars (U+0000–U+001F) via perl
-- **Safety**: `--` before filenames in grep calls; missing-value checks on all option flags (`-o`, `-m`, `-n`, `-L`, `-t`)
-- **Java regex**: access modifier now optional — captures package-private methods
-- **Paths output**: respects `--max-symbols` cap (was previously uncapped)
-- **Tests**: `_validate_lang_json` passes variables as argv (no shell interpolation); `run_test` reports crashes with exit code; truncated field uses canonical JSON booleans
-- **Docs**: fenced code blocks annotated with language specifiers (MD040); TESTING.md language list expanded to all 12; TEST_QUICKSTART.md total updated to 259
+- `.h` header heuristic: dispatches to C++ when C++ constructs are detected
+- Locale pinning: `LC_ALL=C` set at script top
+- Performance: replaced O(n^2) string concatenation in `extract_symbols` with temp file streaming
+- JSON escape: handles `\b`, `\f`, and all control chars (U+0000-U+001F) via perl
+- Safety: `--` before filenames in grep calls; missing-value checks on all option flags
 - CodeRabbit review: **0 findings** on this release
+
+---
 
 ### v1.6.0
 
-**Introduces `fmap` — code cartography.** The fourth tool in the suite, completing the recon pipeline from "what's here" to "what's inside the code."
+**Introduces `fmap` — code cartography.** Fourth tool in the suite, completing the recon pipeline from "what's here" to "what's inside the code."
 
-```text
-ftree --snapshot → fsearch -o paths → fmap -o json → fcontent
-Scout            → Find              → Map           → Search
-```
+- **`fmap`**: 12 languages (Python, JavaScript, TypeScript, Rust, Go, Java, C, C++, Ruby, Lua, PHP, Bash/Shell)
+- **`fmap`**: directory scan, single file, stdin pipe (`fsearch -o paths '*.py' | fmap -o json`)
+- **`fmap`**: pretty, paths, JSON output — grep-only, zero new dependencies
+- **Tests**: 6 suites, 259 tests total
 
-**New tool: `fmap`**
-- Extract structural skeletons (functions, classes, imports, types, exports, constants) from source files
-- **12 languages**: Python, JavaScript, TypeScript, Rust, Go, Java, C, C++, Ruby, Lua, PHP, Bash/Shell
-- **3 modes**: directory scan, single file, stdin pipe (`fsearch -o paths '*.py' | fmap -o json`)
-- **3 output formats**: pretty, paths, JSON — same as every other fsuite tool
-- **grep-only** — zero new dependencies, uses `grep -n -E -I` for extraction
-- Line-level dedup prevents multi-regex overlap false positives
-- Shebang detection for extensionless files (`#!/usr/bin/env bash`)
-- Default ignore list matches ftree (node_modules, .git, venv, etc.)
-- Filters: `-t function`, `-t class`, `--no-imports`, `-L bash`
-- Caps: `-m` (max symbols), `-n` (max files)
-- Telemetry integration (tool=fmap, backend=grep)
-
-**Suite-wide changes:**
-- All tools bumped to v1.6.0 (unified suite versioning)
-- Debian packaging updated (fsuite_1.6.0-1_all.deb includes fmap)
-- 58-test suite for fmap (per-language exact parsing for all 12 languages, dedup regression tests)
-- Full test suite: 6 suites, 259 tests
-- CodeRabbit review: 8 findings addressed (Go regex false positives, paths output cap, exit code handling, telemetry test isolation)
+---
 
 ### v1.5.0
 
-New features across all tools:
+Suite-wide enhancements: `duration_ms` in JSON output, smart project name inference, `--project-name` override, `--no-lines` for snapshot JSON, `--tool` flag for `fmetrics predict`, telemetry flag accumulation.
 
-- **`duration_ms`** (ftree): JSON output now includes wall-clock milliseconds for recon, tree, and snapshot modes (snapshot also has nested recon `duration_ms`)
-- **Smart project name inference** (all 3 tools): Walk-up heuristic finds `.git`, `package.json`, etc. to auto-detect the project name from any subdirectory
-- **`--project-name <name>`** (all 3 tools): Override project name in telemetry records
-- **`--no-lines`** (ftree): Omit the `lines` array from snapshot JSON output (only valid with `--snapshot -o json`)
-- **`--tool <name>`** (fmetrics predict): Predict for a specific tool only (`ftree`, `fsearch`, `fcontent`)
-- **Recon reason field** (ftree): Entries with `size_bytes: -1` now include a `reason` field (`excluded`, `budget_exceeded`, `timeout`, `stat_failed`)
-- **Telemetry flag accumulation**: All flags passed to tools are now recorded in telemetry (previously only mode + output format)
-- **JSONL safety**: Telemetry flags are sanitized to prevent invalid JSON in telemetry.jsonl
-- **fmetrics `--self-check` enhancement**: Reports python3, predict script, and k-NN availability separately
-- **fcontent stdin project inference**: When piped file paths, infers project from first file's directory (walks up to find .git, package.json, etc.)
-- **Packaging fix**: `fmetrics-predict.py` installs to `/usr/share/fsuite/` with multi-path resolution
+---
 
-### ftree v1.2.0
+### ftree v1.2.0 — v1.0.1
 
-New mode: `--snapshot` — combined recon + tree in one invocation.
-
-- `--snapshot` produces a single artifact with both inventory (recon) and structure (tree)
-- Pretty output: sectioned `== Recon ==` and `== Tree ==` blocks
-- JSON output: envelope with embedded recon and tree objects (plus `lines` array on tree)
-- Default recon depth in snapshot: 2 (standalone recon stays 1)
-- Mutually exclusive with `--recon` and `-o paths`
-
-See [docs/ftree.md](docs/ftree.md) for full JSON schema and snapshot mode details.
-
-### ftree v1.1.0
-
-Clear all deferred items from v1.0.1. Intentional observable output changes; JSON schema unchanged (no new fields, only value changes).
-
-- Error/warning messages now prefixed `ftree:` (was `Error:` / `Warning:`)
-- `human_size()` rounds to nearest instead of truncating (e.g. 1536 bytes → `1.5K`)
-- Pretty headers and JSON `path` always use absolute path (logical, preserves symlinks)
-- Drill-down path is shell-quoted (`printf %q`) for copy-paste safety
-- Robust report line detection (backward scan, dual-anchor regex)
-- Graceful `? directories, ? files` when count parsing fails
-- Tree mode requires directory target (was: degenerate output for files)
-- `--self-check` exits 3 when tree is missing (was: always 0)
-- `count_items_total()` strips `wc -l` whitespace (portability)
-- Removed `sort -z` from recon find pipeline (portability)
-- Recon sort uses alphabetical name tiebreak for size ties (determinism)
-
-See [docs/ftree.md](docs/ftree.md) for the full version history and JSON schema notes.
-
-### ftree v1.0.1
-
-Internal refactor + correctness fixes. No observable output changes except version field.
-See [docs/ftree.md](docs/ftree.md) for details.
+See [docs/ftree.md](docs/ftree.md) for full version history and JSON schema notes.
 
 ---
 
