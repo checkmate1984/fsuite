@@ -1282,6 +1282,150 @@ cmd_export() {
   export_json "$slug"
 }
 
+cmd_resolve() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "resolve requires <slug>"
+
+  local summary="" output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --summary) summary="${2:-}"; shift 2 ;;
+      -o|--output) output="${2:-}"; shift 2 ;;
+      *) die "Unknown option for resolve: $1" ;;
+    esac
+  done
+  [[ -n "$summary" ]] || die "resolve requires --summary"
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+  local case_id session_id now prior_status
+  case_id="$(case_exists_or_die "$slug")"
+  prior_status="$(db_query <<<"SELECT status FROM cases WHERE id = $case_id;")"
+  [[ "$prior_status" == "open" ]] || die "resolve requires status=open (current: $prior_status)"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+
+  db_exec <<SQL
+UPDATE cases
+SET status = 'resolved',
+    resolution_summary = $(sql_quote "$summary"),
+    resolved_at = $(sql_quote "$now"),
+    next_move = '',
+    updated_at = $(sql_quote "$now")
+WHERE id = $case_id;
+SQL
+
+  local payload
+  payload="$(printf '{"prior_status":"%s","summary":"%s"}' \
+    "$(printf '%s' "$prior_status" | json_escape)" \
+    "$(printf '%s' "$summary" | json_escape)")"
+  append_event "$case_id" "$session_id" "case_resolved" "$payload" "$now"
+
+  rebuild_fts_for_case "$case_id"
+
+  if [[ "$output" == "json" ]]; then
+    status_json "$slug"
+  else
+    echo "Case '${slug}' resolved."
+  fi
+}
+
+cmd_archive() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "archive requires <slug>"
+
+  local output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output) output="${2:-}"; shift 2 ;;
+      *) die "Unknown option for archive: $1" ;;
+    esac
+  done
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+  local case_id session_id now prior_status
+  case_id="$(case_exists_or_die "$slug")"
+  prior_status="$(db_query <<<"SELECT status FROM cases WHERE id = $case_id;")"
+  [[ "$prior_status" == "resolved" ]] || die "archive requires status=resolved (current: $prior_status)"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+
+  db_exec <<SQL
+UPDATE cases
+SET status = 'archived',
+    archived_at = $(sql_quote "$now"),
+    updated_at = $(sql_quote "$now")
+WHERE id = $case_id;
+SQL
+
+  local payload
+  payload="$(printf '{"prior_status":"%s"}' \
+    "$(printf '%s' "$prior_status" | json_escape)")"
+  append_event "$case_id" "$session_id" "case_archived" "$payload" "$now"
+
+  rebuild_fts_for_case "$case_id"
+
+  if [[ "$output" == "json" ]]; then
+    status_json "$slug"
+  else
+    echo "Case '${slug}' archived."
+  fi
+}
+
+cmd_delete() {
+  local slug="${1:-}"
+  shift || true
+  [[ -n "$slug" ]] || die "delete requires <slug>"
+
+  local reason="" confirm="" output="$DEFAULT_OUTPUT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --reason) reason="${2:-}"; shift 2 ;;
+      --confirm) confirm="${2:-}"; shift 2 ;;
+      -o|--output) output="${2:-}"; shift 2 ;;
+      *) die "Unknown option for delete: $1" ;;
+    esac
+  done
+  [[ -n "$reason" ]] || die "delete requires --reason"
+  [[ "$confirm" == "DELETE" ]] || die "delete requires --confirm DELETE"
+  [[ "$output" == "pretty" || "$output" == "json" ]] || die "Invalid --output: $output"
+
+  ensure_db
+  local case_id session_id now prior_status
+  case_id="$(case_exists_or_die "$slug")"
+  prior_status="$(db_query <<<"SELECT status FROM cases WHERE id = $case_id;")"
+  [[ "$prior_status" != "deleted" ]] || die "case is already deleted"
+  session_id="$(latest_session_id_for_case "$case_id")"
+  now="$(now_utc)"
+
+  db_exec <<SQL
+UPDATE cases
+SET status = 'deleted',
+    deleted_at = $(sql_quote "$now"),
+    delete_reason = $(sql_quote "$reason"),
+    next_move = '',
+    updated_at = $(sql_quote "$now")
+WHERE id = $case_id;
+SQL
+
+  local payload
+  payload="$(printf '{"prior_status":"%s","reason":"%s"}' \
+    "$(printf '%s' "$prior_status" | json_escape)" \
+    "$(printf '%s' "$reason" | json_escape)")"
+  append_event "$case_id" "$session_id" "case_deleted" "$payload" "$now"
+
+  rebuild_fts_for_case "$case_id"
+
+  if [[ "$output" == "json" ]]; then
+    status_json "$slug"
+  else
+    echo "Case '${slug}' tombstoned. Reason: ${reason}"
+  fi
+}
+
 main() {
   local cmd="${1:---help}"
   case "$cmd" in
@@ -1366,6 +1510,18 @@ main() {
     reject)
       shift
       cmd_reject "$@"
+      ;;
+    resolve)
+      shift
+      cmd_resolve "$@"
+      ;;
+    archive)
+      shift
+      cmd_archive "$@"
+      ;;
+    delete)
+      shift
+      cmd_delete "$@"
       ;;
     *)
       die 2 "unknown or unimplemented subcommand: $cmd"
