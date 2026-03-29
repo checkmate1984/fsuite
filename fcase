@@ -1429,8 +1429,8 @@ SELECT json_object(
     WHERE cases_fts MATCH ${fts_match}
       AND ${where_clause}
     ORDER BY
-      CASE WHEN c.slug LIKE '%${like_safe}%' THEN 0 ELSE 1 END,
-      CASE WHEN c.resolution_summary LIKE '%${like_safe}%' THEN 0 ELSE 1 END,
+CASE WHEN c.slug LIKE '%${like_safe}%' ESCAPE '\' THEN 0 ELSE 1 END,
+CASE WHEN c.resolution_summary LIKE '%${like_safe}%' ESCAPE '\' THEN 0 ELSE 1 END,
       c.updated_at DESC
   ), json('[]'))
 );
@@ -1444,9 +1444,9 @@ JOIN cases c ON c.id = fts.rowid
 WHERE cases_fts MATCH ${fts_match}
   AND ${where_clause}
 ORDER BY
-  CASE WHEN c.slug LIKE '%${like_safe}%' THEN 0 ELSE 1 END,
-  CASE WHEN c.resolution_summary LIKE '%${like_safe}%' THEN 0 ELSE 1 END,
-  c.updated_at DESC;
+CASE WHEN c.slug LIKE '%${like_safe}%' ESCAPE '\' THEN 0 ELSE 1 END,
+CASE WHEN c.resolution_summary LIKE '%${like_safe}%' ESCAPE '\' THEN 0 ELSE 1 END,
+c.updated_at DESC;
 SQL
       )
     fi
@@ -1468,10 +1468,10 @@ SELECT json_object(
     ))
     FROM cases c
     WHERE ${where_clause}
-      AND (c.slug LIKE '%${like_safe}%' OR c.goal LIKE '%${like_safe}%' OR c.resolution_summary LIKE '%${like_safe}%')
+      AND (c.slug LIKE '%${like_safe}%' ESCAPE '\' OR c.goal LIKE '%${like_safe}%' ESCAPE '\' OR c.resolution_summary LIKE '%${like_safe}%' ESCAPE '\')
     ORDER BY
-      CASE WHEN c.slug LIKE '%${like_safe}%' THEN 0 ELSE 1 END,
-      CASE WHEN c.resolution_summary LIKE '%${like_safe}%' THEN 0 ELSE 1 END,
+      CASE WHEN c.slug LIKE '%${like_safe}%' ESCAPE '\' THEN 0 ELSE 1 END,
+      CASE WHEN c.resolution_summary LIKE '%${like_safe}%' ESCAPE '\' THEN 0 ELSE 1 END,
       c.updated_at DESC
   ), json('[]'))
 );
@@ -1482,11 +1482,11 @@ SQL
 SELECT c.slug, c.status, c.priority, c.goal, c.resolution_summary, c.resolved_at
 FROM cases c
 WHERE ${where_clause}
-  AND (c.slug LIKE '%${like_safe}%' OR c.goal LIKE '%${like_safe}%' OR c.resolution_summary LIKE '%${like_safe}%')
+AND (c.slug LIKE '%${like_safe}%' ESCAPE '\' OR c.goal LIKE '%${like_safe}%' ESCAPE '\' OR c.resolution_summary LIKE '%${like_safe}%' ESCAPE '\')
 ORDER BY
-  CASE WHEN c.slug LIKE '%${like_safe}%' THEN 0 ELSE 1 END,
-  CASE WHEN c.resolution_summary LIKE '%${like_safe}%' THEN 0 ELSE 1 END,
-  c.updated_at DESC;
+CASE WHEN c.slug LIKE '%${like_safe}%' ESCAPE '\' THEN 0 ELSE 1 END,
+CASE WHEN c.resolution_summary LIKE '%${like_safe}%' ESCAPE '\' THEN 0 ELSE 1 END,
+c.updated_at DESC;
 SQL
       )
     fi
