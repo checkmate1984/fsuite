@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# test_fs.sh — TDD tests for fs-engine.py (intent classification + orchestration engine)
+# Run with: bash tests/test_fs.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENGINE="${REPO_DIR}/fs-engine.py"
+
+TESTS_RUN=0
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+assert_eq() {
+  local label="$1" expected="$2" actual="$3"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ "$expected" == "$actual" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} ${label}"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} ${label}"
+    echo "  expected: ${expected}"
+    echo "  actual:   ${actual}"
+  fi
+}
+
+assert_json_field() {
+  local label="$1" json="$2" field="$3" expected="$4"
+  local actual
+  actual=$(echo "$json" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+keys = '${field}'.split('.')
+val = data
+for k in keys:
+    val = val[k]
+print(val)
+" 2>/dev/null || echo "__JSON_PARSE_ERROR__")
+  assert_eq "$label" "$expected" "$actual"
+}
+
+run_engine() {
+  echo "$1" | python3 "$ENGINE" 2>/dev/null
+}
+
+# ── Preflight check ─────────────────────────────────────────────────────────
+
+if [[ ! -f "$ENGINE" ]]; then
+  echo -e "${RED}ERROR${NC}: fs-engine.py not found at ${ENGINE}"
+  exit 1
+fi
+
+echo "═══════════════════════════════════════════"
+echo " fs-engine test suite"
+echo "═══════════════════════════════════════════"
+echo ""
+
+# ============================================================================
+# Section 1: Intent Classification
+# ============================================================================
+
+echo "── Section 1: Intent Classification ──"
+
+# 1. Glob pattern → file intent, high confidence
+result=$(run_engine '{"query": "*.py", "path": "/tmp"}')
+assert_json_field "*.py → file intent" "$result" "resolved_intent" "file"
+assert_json_field "*.py → high confidence" "$result" "route_confidence" "high"
+
+# 2. Bare extension → file intent, high confidence
+result=$(run_engine '{"query": ".rs", "path": "/tmp"}')
+assert_json_field ".rs → file intent" "$result" "resolved_intent" "file"
+assert_json_field ".rs → high confidence" "$result" "route_confidence" "high"
+
+# 3. Known filename (package.json) → file intent, high confidence
+result=$(run_engine '{"query": "package.json", "path": "/tmp"}')
+assert_json_field "package.json → file intent" "$result" "resolved_intent" "file"
+assert_json_field "package.json → high confidence" "$result" "route_confidence" "high"
+
+# 4. camelCase → symbol intent, high confidence
+result=$(run_engine '{"query": "renderTool", "path": "/tmp"}')
+assert_json_field "renderTool (camelCase) → symbol intent" "$result" "resolved_intent" "symbol"
+assert_json_field "renderTool → high confidence" "$result" "route_confidence" "high"
+
+# 5. PascalCase → symbol intent, high confidence
+result=$(run_engine '{"query": "McpServer", "path": "/tmp"}')
+assert_json_field "McpServer (PascalCase) → symbol intent" "$result" "resolved_intent" "symbol"
+assert_json_field "McpServer → high confidence" "$result" "route_confidence" "high"
+
+# 6. snake_case → symbol intent, high confidence
+result=$(run_engine '{"query": "verify_token", "path": "/tmp"}')
+assert_json_field "verify_token (snake_case) → symbol intent" "$result" "resolved_intent" "symbol"
+assert_json_field "verify_token → high confidence" "$result" "route_confidence" "high"
+
+# 7. SCREAMING_CASE → symbol intent, medium confidence
+result=$(run_engine '{"query": "DIFF_COLORS", "path": "/tmp"}')
+assert_json_field "DIFF_COLORS (SCREAMING_CASE) → symbol intent" "$result" "resolved_intent" "symbol"
+assert_json_field "DIFF_COLORS → medium confidence" "$result" "route_confidence" "medium"
+
+# 8. Multi-word (spaces) → content intent, high confidence
+result=$(run_engine '{"query": "error loading config", "path": "/tmp"}')
+assert_json_field "multi-word → content intent" "$result" "resolved_intent" "content"
+assert_json_field "multi-word → high confidence" "$result" "route_confidence" "high"
+
+# 9. Single lowercase word → content intent, LOW confidence
+result=$(run_engine '{"query": "authenticate", "path": "/tmp"}')
+assert_json_field "single lowercase → content intent" "$result" "resolved_intent" "content"
+assert_json_field "single lowercase → low confidence" "$result" "route_confidence" "low"
+
+# 10. Explicit intent override → symbol, high confidence
+result=$(run_engine '{"query": "authenticate", "path": "/tmp", "intent": "symbol"}')
+assert_json_field "explicit intent override → symbol" "$result" "resolved_intent" "symbol"
+assert_json_field "explicit override → high confidence" "$result" "route_confidence" "high"
+
+# ============================================================================
+# Section 2: Chain Building
+# ============================================================================
+
+echo ""
+echo "── Section 2: Chain Building ──"
+
+# file intent, no scope → ["fsearch"]
+result=$(run_engine '{"query": "*.py", "path": "/tmp"}')
+chain=$(echo "$result" | python3 -c "import sys,json; print(','.join(json.load(sys.stdin)['selected_chain']))")
+assert_eq "file (no scope) → [fsearch]" "fsearch" "$chain"
+
+# content intent, no scope → ["fcontent"]
+result=$(run_engine '{"query": "error loading config", "path": "/tmp"}')
+chain=$(echo "$result" | python3 -c "import sys,json; print(','.join(json.load(sys.stdin)['selected_chain']))")
+assert_eq "content (no scope) → [fcontent]" "fcontent" "$chain"
+
+# symbol intent, no scope → ["fcontent", "fmap"]
+result=$(run_engine '{"query": "renderTool", "path": "/tmp"}')
+chain=$(echo "$result" | python3 -c "import sys,json; print(','.join(json.load(sys.stdin)['selected_chain']))")
+assert_eq "symbol (no scope) → [fcontent,fmap]" "fcontent,fmap" "$chain"
+
+# file intent with scope → ["fsearch"] (scope is the glob itself for file intent)
+result=$(run_engine '{"query": "authenticate", "path": "/tmp", "intent": "content", "scope": "*.py"}')
+chain=$(echo "$result" | python3 -c "import sys,json; print(','.join(json.load(sys.stdin)['selected_chain']))")
+assert_eq "content (with scope) → [fsearch,fcontent]" "fsearch,fcontent" "$chain"
+
+# symbol intent with scope → ["fsearch", "fcontent", "fmap"]
+result=$(run_engine '{"query": "McpServer", "path": "/tmp", "scope": "*.ts"}')
+chain=$(echo "$result" | python3 -c "import sys,json; print(','.join(json.load(sys.stdin)['selected_chain']))")
+assert_eq "symbol (with scope) → [fsearch,fcontent,fmap]" "fsearch,fcontent,fmap" "$chain"
+
+# ============================================================================
+# Section 3: Output Structure
+# ============================================================================
+
+echo ""
+echo "── Section 3: Output Structure ──"
+
+result=$(run_engine '{"query": "*.py", "path": "/tmp"}')
+
+# Verify all required top-level keys exist
+for key in query path intent resolved_intent route_reason route_confidence selected_chain hits truncated budget next_hint; do
+  has_key=$(echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print('yes' if '${key}' in data else 'no')
+" 2>/dev/null || echo "no")
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ "$has_key" == "yes" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} output has '${key}' field"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} output missing '${key}' field"
+  fi
+done
+
+# Budget sub-fields
+for key in candidate_files enriched_files time_ms; do
+  has_key=$(echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print('yes' if '${key}' in data.get('budget', {}) else 'no')
+" 2>/dev/null || echo "no")
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ "$has_key" == "yes" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} budget has '${key}' sub-field"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} budget missing '${key}' sub-field"
+  fi
+done
+
+# ============================================================================
+# Section 4: Budget Caps
+# ============================================================================
+
+echo ""
+echo "── Section 4: Budget Caps ──"
+
+result=$(run_engine '{"query": "*.py", "path": "/tmp"}')
+candidate_cap=$(echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print(data['budget']['candidate_files'])
+" 2>/dev/null || echo "-1")
+
+TESTS_RUN=$((TESTS_RUN + 1))
+cap_ok=$(python3 -c "print('yes' if int('${candidate_cap}') <= 50 else 'no')" 2>/dev/null || echo "no")
+if [[ "$cap_ok" == "yes" ]]; then
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+  echo -e "${GREEN}✓${NC} candidate_files <= 50 (MAX_CANDIDATE_FILES)"
+else
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  echo -e "${RED}✗${NC} candidate_files exceeds MAX_CANDIDATE_FILES cap (got ${candidate_cap})"
+fi
+
+# ============================================================================
+# Section 5: Edge Cases
+# ============================================================================
+
+echo ""
+echo "── Section 5: Edge Cases ──"
+
+# Empty query
+result=$(run_engine '{"query": "", "path": "/tmp"}')
+has_error=$(echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print('yes' if 'error' in data else 'no')
+" 2>/dev/null || echo "no")
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$has_error" == "yes" ]]; then
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+  echo -e "${GREEN}✓${NC} empty query returns error"
+else
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  echo -e "${RED}✗${NC} empty query should return error"
+fi
+
+# Missing path
+result=$(run_engine '{"query": "test"}')
+has_error=$(echo "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print('yes' if 'error' in data else 'no')
+" 2>/dev/null || echo "no")
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$has_error" == "yes" ]]; then
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+  echo -e "${GREEN}✓${NC} missing path returns error"
+else
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  echo -e "${RED}✗${NC} missing path should return error"
+fi
+
+# Filename-shaped query (word.ext) → file
+result=$(run_engine '{"query": "config.yaml", "path": "/tmp"}')
+assert_json_field "config.yaml → file intent" "$result" "resolved_intent" "file"
+assert_json_field "config.yaml → high confidence" "$result" "route_confidence" "high"
+
+# ============================================================================
+# Results
+# ============================================================================
+
+echo ""
+echo "═══════════════════════════════════════════"
+echo " Results: ${TESTS_PASSED}/${TESTS_RUN} passed, ${TESTS_FAILED} failed"
+echo "═══════════════════════════════════════════"
+
+[[ $TESTS_FAILED -eq 0 ]] || exit 1
