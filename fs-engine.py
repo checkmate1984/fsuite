@@ -192,8 +192,8 @@ def run_tool(name, args, stdin_data=None, timeout=TIMEOUT_SECONDS):
 
 # ── Tool Runners ─────────────────────────────────────────────────────────────
 
-def run_fsearch(query, path, scope=None):
-    """Run fsearch -o paths, return list of file paths (capped)."""
+def run_fsearch(query, path, scope=None, timeout=TIMEOUT_SECONDS):
+    """Run fsearch -o paths, return list of file paths."""
     args = ["-o", "paths"]
     if scope:
         args.append(scope)
@@ -201,15 +201,14 @@ def run_fsearch(query, path, scope=None):
         args.append(query)
     args.append(path)
 
-    stdout, stderr, rc, timed_out = run_tool("fsearch", args)
+    stdout, stderr, rc, timed_out = run_tool("fsearch", args, timeout=timeout)
     if timed_out:
         return [], True
     paths = [p.strip() for p in stdout.strip().splitlines() if p.strip()]
-    capped = paths[:MAX_CANDIDATE_FILES]
-    return capped, False
+    return paths, False
 
 
-def run_fcontent(query, path, file_list=None):
+def run_fcontent(query, path, file_list=None, timeout=TIMEOUT_SECONDS):
     """Run fcontent -o json. If file_list given, pipe paths via stdin."""
     args = ["-o", "json", query]
     stdin_data = None
@@ -220,7 +219,7 @@ def run_fcontent(query, path, file_list=None):
         args.append(path)
 
     stdout, stderr, rc, timed_out = run_tool(
-        "fcontent", args, stdin_data=stdin_data
+        "fcontent", args, stdin_data=stdin_data, timeout=timeout
     )
     if timed_out:
         return None, True
@@ -232,17 +231,16 @@ def run_fcontent(query, path, file_list=None):
     return result, False
 
 
-def run_fmap(file_list):
-    """Run fmap -o json on a list of files (capped at MAX_ENRICH_FILES)."""
-    capped = file_list[:MAX_ENRICH_FILES]
-    if not capped:
+def run_fmap(file_list, timeout=TIMEOUT_SECONDS):
+    """Run fmap -o json on a list of files."""
+    if not file_list:
         return [], False
 
-    stdin_data = "\n".join(capped) + "\n"
+    stdin_data = "\n".join(file_list) + "\n"
     args = ["-o", "json"]
 
     stdout, stderr, rc, timed_out = run_tool(
-        "fmap", args, stdin_data=stdin_data
+        "fmap", args, stdin_data=stdin_data, timeout=timeout
     )
     if timed_out:
         return None, True
@@ -346,8 +344,8 @@ def _is_definition(text, symbol_names):
     return False
 
 
-def shape_symbol_hits(content_hits, fmap_result):
-    """Merge content hits with fmap symbol data."""
+def shape_symbol_hits(content_hits, fmap_result, query=""):
+    """Merge content hits with fmap symbol data, rank by relevance."""
     if not content_hits:
         return []
 
@@ -366,28 +364,62 @@ def shape_symbol_hits(content_hits, fmap_result):
             symbols = item.get("symbols", item.get("entries", []))
             symbol_map[f] = symbols
 
+    q_lower = query.lower()
+
     merged = []
     for hit in content_hits:
         entry = dict(hit)
         file_symbols = symbol_map.get(hit["file"], [])
-        entry["symbols"] = file_symbols
+
+        # Filter symbols to only those relevant to the query
+        if q_lower:
+            relevant_symbols = []
+            for sym in file_symbols:
+                name = sym.get("name", "") if isinstance(sym, dict) else str(sym)
+                if q_lower in name.lower():
+                    relevant_symbols.append(sym)
+            entry["symbols"] = relevant_symbols
+        else:
+            entry["symbols"] = file_symbols
 
         # Collect symbol names for definition heuristic
         sym_names = []
-        for sym in file_symbols:
+        for sym in entry["symbols"]:
             if isinstance(sym, dict):
                 sym_names.append(sym.get("name", ""))
             else:
                 sym_names.append(str(sym))
 
         # Annotate matches with type if they look like definitions
+        has_definition = False
         if "matches" in entry:
             for match in entry["matches"]:
                 text = match.get("text", "")
                 if _is_definition(text, sym_names):
                     match["type"] = "definition"
+                    has_definition = True
+
+        # Compute ranking score
+        has_symbol_match = any(q_lower in n.lower() for n in sym_names) if q_lower else False
+        entry["_has_symbol_match"] = has_symbol_match
+        entry["_has_definition"] = has_definition
+        entry["_match_count"] = entry.get("match_count", 0)
 
         merged.append(entry)
+
+    # Rank: symbol name match first, definitions within those, then by match count
+    merged.sort(key=lambda e: (
+        not e["_has_symbol_match"],   # True first (False < True, so negate)
+        not e["_has_definition"],     # Definitions first
+        -e["_match_count"],           # More matches first
+    ))
+
+    # Strip internal ranking keys
+    for entry in merged:
+        del entry["_has_symbol_match"]
+        del entry["_has_definition"]
+        del entry["_match_count"]
+
     return merged
 
 
@@ -411,16 +443,19 @@ def generate_next_hint(intent, hits, query, scope=None):
         return {"tool": "fread", "args": {"path": top_file, "around": query}}
 
     elif intent == "symbol":
-        best_match = query
-        # Try to find the best matching symbol name from symbols list
+        # Only suggest fread --symbol if the top hit has a matching symbol
         symbols = top_hit.get("symbols", [])
+        best_match = None
         if symbols:
             for sym in symbols:
                 name = sym.get("name", "") if isinstance(sym, dict) else str(sym)
                 if query.lower() in name.lower():
                     best_match = name
                     break
-        return {"tool": "fread", "args": {"path": top_file, "symbol": best_match}}
+        if best_match:
+            return {"tool": "fread", "args": {"path": top_file, "symbol": best_match}}
+        # No symbol match — fall back to fread --around
+        return {"tool": "fread", "args": {"path": top_file, "around": query}}
 
     return None
 
@@ -435,6 +470,11 @@ def orchestrate(request):
     path = request.get("path") or "."
     scope = request.get("scope", None)
     explicit_intent = request.get("intent", None)
+
+    # ── Budget overrides ────────────────────────────────────────────────
+    max_candidates = int(request.get("max_candidates", MAX_CANDIDATE_FILES))
+    max_enrich = int(request.get("max_enrich", MAX_ENRICH_FILES))
+    timeout = int(request.get("timeout", TIMEOUT_SECONDS))
 
     # ── Validation ───────────────────────────────────────────────────────
     if not query:
@@ -457,22 +497,28 @@ def orchestrate(request):
 
     for tool_name in chain:
         # Budget: check total elapsed time
-        if elapsed() > TIMEOUT_SECONDS * 1000:
+        if elapsed() > timeout * 1000:
             truncated = True
             break
 
         if tool_name == "fsearch":
             search_query = scope if scope else query
-            file_list, timed_out = run_fsearch(search_query, path, scope=None)
+            file_list, timed_out = run_fsearch(search_query, path, scope=None, timeout=timeout)
+            file_list = file_list[:max_candidates]
             candidate_count = len(file_list)
             if timed_out:
                 truncated = True
                 break
             if resolved_intent == "file":
+                # When scope is present, filter candidates by query match
+                if scope and query:
+                    q_lower = query.lower()
+                    file_list = [f for f in file_list if q_lower in f.lower()]
+                    candidate_count = len(file_list)
                 hits = shape_file_hits(file_list)
 
         elif tool_name == "fcontent":
-            result, timed_out = run_fcontent(query, path, file_list)
+            result, timed_out = run_fcontent(query, path, file_list, timeout=timeout)
             if timed_out:
                 truncated = True
                 break
@@ -481,16 +527,16 @@ def orchestrate(request):
 
         elif tool_name == "fmap":
             # Only enrich files that have content hits
-            enrich_files = [h["file"] for h in hits[:MAX_ENRICH_FILES]]
+            enrich_files = [h["file"] for h in hits[:max_enrich]]
             enriched_count = len(enrich_files)
             if enrich_files:
-                fmap_result, timed_out = run_fmap(enrich_files)
+                fmap_result, timed_out = run_fmap(enrich_files, timeout=timeout)
                 if timed_out:
                     truncated = True
                     # Return search-only results
                     break
                 if fmap_result:
-                    hits = shape_symbol_hits(hits, fmap_result)
+                    hits = shape_symbol_hits(hits, fmap_result, query=query)
 
     # ── next_hint ────────────────────────────────────────────────────────
     next_hint = generate_next_hint(resolved_intent, hits, query, scope)
