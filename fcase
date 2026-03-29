@@ -1402,7 +1402,7 @@ cmd_find() {
   # 2. For FTS (deep mode): also strip double-quotes, FTS boolean keywords,
   #    and prefix operators (- and *) that FTS4 interprets specially.
   local like_safe fts_safe
-  like_safe=$(printf '%s' "$query" | sed "s/'/''/g" | sed 's/%/\\%/g' | sed 's/_/\\_/g')
+  like_safe=$(printf '%s' "$query" | sed "s/'/''/g" | sed 's/\\/\\\\/g' | sed 's/%/\\%/g' | sed 's/_/\\_/g')
   fts_safe=$(printf '%s' "$query" | sed 's/"//g' | sed 's/\*//g' | sed 's/\(^\| \)-/\1/g' \
     | sed 's/ OR / or /g; s/^OR /or /; s/ OR$/or/' \
     | sed 's/ AND / and /g; s/^AND /and /; s/ AND$/ and/' \

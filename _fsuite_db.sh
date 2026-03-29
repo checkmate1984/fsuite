@@ -354,6 +354,7 @@ SQL
 
 rebuild_all_fts() {
   db_exec <<'SQL'
+BEGIN;
 DELETE FROM cases_fts;
 INSERT INTO cases_fts(rowid, slug, goal, resolution_summary, targets_text, evidence_text, hypotheses_text, notes_text)
 SELECT
@@ -366,6 +367,7 @@ SELECT
   COALESCE((SELECT group_concat(COALESCE(h.body,'') || ' ' || COALESCE(h.reason,''), ' ') FROM hypotheses h WHERE h.case_id = c.id), ''),
   COALESCE((SELECT group_concat(COALESCE(ev.payload_json,''), ' ') FROM events ev WHERE ev.case_id = c.id AND ev.event_type IN ('note','next_move_set','case_resolved','case_deleted')), '')
 FROM cases c;
+COMMIT;
 SQL
 }
 

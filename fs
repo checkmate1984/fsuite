@@ -135,6 +135,11 @@ if [[ -z "$OUTPUT" ]]; then
   fi
 fi
 
+case "$OUTPUT" in
+  pretty|json) ;;
+  *) die "invalid --output value: '$OUTPUT' (accepted: pretty, json)" ;;
+esac
+
 # ── Build JSON request via python3 ───────────────────────────────
 json_request=$(python3 -c "
 import json, sys
@@ -191,7 +196,7 @@ NC = '\033[0m'
 data = json.load(sys.stdin)
 
 if 'error' in data:
-    print(f'fs: {data[\"error\"]}')
+    print(f'fs: {data[\"error\"]}', file=sys.stderr)
     sys.exit(1)
 intent = data.get('resolved_intent', '?')
 confidence = data.get('route_confidence', '?')

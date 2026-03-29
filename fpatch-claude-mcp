@@ -96,8 +96,17 @@ echo ""
 
 # Find offsets using fprobe
 echo "Scanning for patch points..."
-OFFSETS=$("$FPROBE" scan "$CLAUDE_BINARY" --pattern "$TARGET" -o json 2>/dev/null | \
-  python3 -c "import sys,json; [print(m['offset']) for m in json.load(sys.stdin)]" 2>/dev/null)
+OFFSETS=$("$FPROBE" scan "$CLAUDE_BINARY" --pattern "$TARGET" -o json | \
+  python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError as e:
+    print(f'fpatch: failed to parse fprobe output: {e}', file=sys.stderr)
+    sys.exit(1)
+for m in data:
+    print(m['offset'])
+" 2>&1) || die "fprobe scan failed: $OFFSETS"
 
 if [[ -z "$OFFSETS" ]]; then
   die "Pattern not found in binary. Maybe already patched or different version?"
