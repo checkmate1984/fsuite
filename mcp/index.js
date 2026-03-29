@@ -281,18 +281,6 @@ function renderFeditResult(jsonStr) {
     if (!d.tool || d.tool !== "fedit") return null;
 
     const mode = d.mode === "create" ? "create" : d.mode === "replace_file" ? "replace" : "patch";
-    const path = shortPath(d.path);
-
-    // Colored header: file path in orange, mode/lines info
-    const editColor = `\x1b[1;38;5;208m`;  // bold orange (fedit palette color)
-    const R = RESET;
-    let header = `${editColor}${path}${R}`;
-    if (d.mode === "lines" && d.lines_start && d.lines_end) {
-      header += ` ${DIM}lines${UNDIM} ${editColor}${d.lines_start}:${d.lines_end}${R}`;
-    } else if (d.function_name) {
-      header += ` ${DIM}fn${UNDIM} ${editColor}${d.function_name}${R}`;
-    }
-    if (d.mode) header += ` ${DIM}(${d.mode})${R}`;
 
     // Count diff lines for summary
     let added = 0, removed = 0;
@@ -303,6 +291,7 @@ function renderFeditResult(jsonStr) {
       }
     }
 
+    // Status-only body — no path line, Claude Code header already shows it
     const parts = [];
     if (d.applied) {
       parts.push(theme.ok("Applied"));
@@ -314,7 +303,7 @@ function renderFeditResult(jsonStr) {
     if (added > 0 || removed > 0) parts.push("lines");
     if (!d.preconditions_ok) parts.push(theme.error("PRECONDITION FAILED"));
 
-    let out = header + "\n" + parts.join(" ") + "\n";
+    let out = parts.join(" ") + "\n";
 
     if (d.error_code) {
       out += theme.error(`Error: ${d.error_code}`) + ` \u2014 ${d.error_detail}\n`;
