@@ -669,6 +669,23 @@ test_flag_accumulation() {
   fi
 }
 
+test_nav_flag_accumulation() {
+  rm -f "$HOME/.fsuite/telemetry.jsonl"
+  FSUITE_TELEMETRY=1 "${FSEARCH}" --type dir --match path --mode literal --preview 3 --output json "docs" "${TEST_DIR}" >/dev/null 2>&1 || true
+  local line
+  line=$(tail -1 "$HOME/.fsuite/telemetry.jsonl" 2>/dev/null) || line=""
+  local flags
+  flags=$(echo "$line" | grep -o '"flags":"[^"]*"' || true)
+  if [[ "$flags" =~ "--type dir" ]] && \
+     [[ "$flags" =~ "--match path" ]] && \
+     [[ "$flags" =~ "--mode literal" ]] && \
+     [[ "$flags" =~ "--preview 3" ]]; then
+    pass "Telemetry flags record explicit nav contract values"
+  else
+    fail "Telemetry flags should include the explicit nav contract values" "Got: $flags"
+  fi
+}
+
 test_default_flag_seeding() {
   rm -f "$HOME/.fsuite/telemetry.jsonl"
   FSUITE_TELEMETRY=1 "${FSEARCH}" --output paths "*.log" "${TEST_DIR}" >/dev/null 2>&1 || true
@@ -676,10 +693,14 @@ test_default_flag_seeding() {
   line=$(tail -1 "$HOME/.fsuite/telemetry.jsonl" 2>/dev/null) || line=""
   local flags
   flags=$(echo "$line" | grep -o '"flags":"[^"]*"' || true)
-  if [[ "$flags" =~ "-o paths" ]]; then
-    pass "Default flag seeding records output format"
+  if [[ "$flags" =~ "-o paths" ]] && \
+     [[ "$flags" =~ "--type file" ]] && \
+     [[ "$flags" =~ "--match name" ]] && \
+     [[ "$flags" =~ "--mode auto" ]] && \
+     [[ "$flags" =~ "--preview 0" ]]; then
+    pass "Default flag seeding records output format and nav defaults"
   else
-    fail "Telemetry flags should include -o paths" "Got: $flags"
+    fail "Telemetry flags should include output format and nav defaults" "Got: $flags"
   fi
 }
 
@@ -774,6 +795,7 @@ main() {
   # v1.5.0 features
   run_test "Project-name flag" test_project_name
   run_test "Flag accumulation in telemetry" test_flag_accumulation
+  run_test "Nav flag accumulation in telemetry" test_nav_flag_accumulation
   run_test "Default flag seeding" test_default_flag_seeding
 
   teardown
