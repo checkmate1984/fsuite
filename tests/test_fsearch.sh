@@ -557,6 +557,19 @@ test_backend_auto() {
   fi
 }
 
+test_backend_find_supports_nav_modes() {
+  local output rc=0
+  output=$("${FSEARCH}" --backend find --type both --match path --output json "auth" "${TEST_DIR}" 2>&1) || rc=$?
+  if [[ $rc -eq 0 ]] && \
+     [[ "$output" == *'"backend":"find"'* ]] && \
+     [[ "$output" == *"${TEST_DIR}/src/auth"* ]] && \
+     [[ "$output" == *"${TEST_DIR}/src/auth/index.ts"* ]]; then
+    pass "Backend 'find' supports nav-style dir and path matching"
+  else
+    fail "Backend 'find' should support nav-style dir and path matching" "Output: $output"
+  fi
+}
+
 # ============================================================================
 # Edge Cases and Boundary Tests
 # ============================================================================
@@ -867,6 +880,7 @@ main() {
   # Backends
   run_test "Backend find" test_backend_find
   run_test "Backend auto" test_backend_auto
+  run_test "Backend find supports nav modes" test_backend_find_supports_nav_modes
 
   # Edge cases
   run_test "No results" test_no_results
