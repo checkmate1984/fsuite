@@ -75,8 +75,9 @@ test_prefix_install_copies_tools_and_assets() {
     "${prefix}/bin/fs" \
     "${prefix}/share/fsuite/_fsuite_common.sh" \
     "${prefix}/share/fsuite/fmetrics-predict.py" \
+    "${prefix}/share/fsuite/fmetrics-import.py" \
     "${prefix}/share/fsuite/fs-engine.py" \
-"${prefix}/share/fsuite/fprobe-engine.py"; do
+    "${prefix}/share/fsuite/fprobe-engine.py"; do
     [[ -e "$path" ]] || missing=1
   done
 
@@ -203,10 +204,10 @@ test_installed_fmetrics_finds_predict_helper() {
     FSUITE_TELEMETRY=0 "${prefix}/bin/fmetrics" --self-check 2>&1
   )
 
-  if [[ "$output" == *"fmetrics-predict.py: found"* ]]; then
-    pass "Installed fmetrics locates the predict helper from the prefix"
+  if [[ "$output" == *"fmetrics-predict.py: found"* ]] && [[ "$output" == *"fmetrics-import.py: found"* ]]; then
+    pass "Installed fmetrics locates the import and predict helpers from the prefix"
   else
-    fail "Installed fmetrics should find the predict helper" "Got: $output"
+    fail "Installed fmetrics should find the import and predict helpers" "Got: $output"
   fi
 }
 

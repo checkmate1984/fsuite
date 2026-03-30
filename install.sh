@@ -20,8 +20,8 @@ SKIP_MCP=0
 MCP_ONLY=0
 DO_UNINSTALL=0
 
-TOOLS=(fsuite ftree fsearch fcontent fmap fread fcase fedit fmetrics freplay fprobe fs)
-SHARE_FILES=(_fsuite_common.sh _fsuite_db.sh fmetrics-predict.py fprobe-engine.py fs-engine.py)
+TOOLS=(fsuite ftree fsearch fcontent fmap fread fcase fedit fmetrics flog freplay fprobe fs)
+SHARE_FILES=(_fsuite_common.sh _fsuite_db.sh fmetrics-predict.py fmetrics-import.py fprobe-engine.py fs-engine.py)
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -265,7 +265,7 @@ install_from_source() {
   for share_file in "${SHARE_FILES[@]}"; do
     [[ -f "${SCRIPT_DIR}/${share_file}" ]] || die "Missing shared file: ${share_file}"
     case "$share_file" in
-      fmetrics-predict.py) mode=755 ;;
+      fmetrics-predict.py|fmetrics-import.py) mode=755 ;;
       *) mode=644 ;;
     esac
     run_privileged install -m "$mode" "${SCRIPT_DIR}/${share_file}" "${share_dir}/${share_file}"

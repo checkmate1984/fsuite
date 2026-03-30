@@ -115,19 +115,34 @@ sql_escape() {
 }
 
 _find_predict_script() {
-  local candidates=(
-    "${FSUITE_SHARE_DIR:-}/fmetrics-predict.py"
-    "$SCRIPT_DIR/fmetrics-predict.py"
-    "$SCRIPT_DIR/fmetrics-predict"
-    "$SCRIPT_DIR/../share/fsuite/fmetrics-predict.py"
-    "/usr/local/share/fsuite/fmetrics-predict.py"
-    "/usr/share/fsuite/fmetrics-predict.py"
-    "/usr/lib/fsuite/fmetrics-predict.py"
-  )
-  for c in "${candidates[@]}"; do
-    [[ -n "$c" && -f "$c" ]] && { printf "%s" "$c"; return 0; }
-  done
-  return 1
+local candidates=(
+"${FSUITE_SHARE_DIR:-}/fmetrics-predict.py"
+"$SCRIPT_DIR/fmetrics-predict.py"
+"$SCRIPT_DIR/fmetrics-predict"
+"$SCRIPT_DIR/../share/fsuite/fmetrics-predict.py"
+"/usr/local/share/fsuite/fmetrics-predict.py"
+"/usr/share/fsuite/fmetrics-predict.py"
+"/usr/lib/fsuite/fmetrics-predict.py"
+)
+for c in "${candidates[@]}"; do
+[[ -n "$c" && -f "$c" ]] && { printf "%s" "$c"; return 0; }
+done
+return 1
+}
+
+_find_import_script() {
+local candidates=(
+"${FSUITE_SHARE_DIR:-}/fmetrics-import.py"
+"$SCRIPT_DIR/fmetrics-import.py"
+"$SCRIPT_DIR/../share/fsuite/fmetrics-import.py"
+"/usr/local/share/fsuite/fmetrics-import.py"
+"/usr/share/fsuite/fmetrics-import.py"
+"/usr/lib/fsuite/fmetrics-import.py"
+)
+for c in "${candidates[@]}"; do
+[[ -n "$c" && -f "$c" ]] && { printf "%s" "$c"; return 0; }
+done
+return 1
 }
 
 # Portable JSON field extraction (no grep -oP / PCRE dependency)
@@ -402,20 +417,27 @@ printf '%s' "$sql"
 
 ensure_analytics_populated() {
 ensure_db
-  local telemetry_count analytics_version run_facts_count combo_count next_count
-  telemetry_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM telemetry;" 2>/dev/null) || telemetry_count=0
-  [[ "$telemetry_count" =~ ^[0-9]+$ ]] || telemetry_count=0
-  (( telemetry_count > 0 )) || return 0
-  analytics_version=$(sqlite3 "$DB_FILE" "SELECT value FROM analytics_meta WHERE key='analytics_version';" 2>/dev/null) || analytics_version=""
-  run_facts_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM run_facts_v1;" 2>/dev/null) || run_facts_count=0
-  combo_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM combo_stats_v1;" 2>/dev/null) || combo_count=0
-  next_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM combo_next_stats_v1;" 2>/dev/null) || next_count=0
-  [[ "$run_facts_count" =~ ^[0-9]+$ ]] || run_facts_count=0
-  [[ "$combo_count" =~ ^[0-9]+$ ]] || combo_count=0
-  [[ "$next_count" =~ ^[0-9]+$ ]] || next_count=0
-  if [[ "$analytics_version" != "2" ]] || (( run_facts_count == 0 )) || (( combo_count == 0 )) || (( next_count == 0 )); then
-    rebuild_analytics
-  fi
+local telemetry_count analytics_version analytics_dirty run_facts_count combo_count next_count
+telemetry_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM telemetry;" 2>/dev/null) || telemetry_count=0
+[[ "$telemetry_count" =~ ^[0-9]+$ ]] || telemetry_count=0
+analytics_version=$(sqlite3 "$DB_FILE" "SELECT value FROM analytics_meta WHERE key='analytics_version';" 2>/dev/null) || analytics_version=""
+analytics_dirty=$(sqlite3 "$DB_FILE" "SELECT value FROM analytics_meta WHERE key='analytics_dirty';" 2>/dev/null) || analytics_dirty=""
+run_facts_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM run_facts_v1;" 2>/dev/null) || run_facts_count=0
+combo_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM combo_stats_v1;" 2>/dev/null) || combo_count=0
+next_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM combo_next_stats_v1;" 2>/dev/null) || next_count=0
+[[ "$analytics_dirty" =~ ^[01]$ ]] || analytics_dirty=0
+[[ "$run_facts_count" =~ ^[0-9]+$ ]] || run_facts_count=0
+[[ "$combo_count" =~ ^[0-9]+$ ]] || combo_count=0
+[[ "$next_count" =~ ^[0-9]+$ ]] || next_count=0
+if (( telemetry_count == 0 )); then
+if [[ "$analytics_version" != "2" ]] || [[ "$analytics_dirty" == "1" ]] || (( run_facts_count > 0 )) || (( combo_count > 0 )) || (( next_count > 0 )); then
+rebuild_analytics
+fi
+return 0
+fi
+if [[ "$analytics_version" != "2" ]] || [[ "$analytics_dirty" == "1" ]] || (( run_facts_count == 0 )) || (( combo_count == 0 )) || (( next_count == 0 )); then
+rebuild_analytics
+fi
 }
 
 ensure_column() {
@@ -466,12 +488,13 @@ CREATE INDEX IF NOT EXISTS idx_tool ON telemetry(tool);
 CREATE INDEX IF NOT EXISTS idx_project ON telemetry(project_name);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON telemetry(timestamp);
 CREATE TABLE IF NOT EXISTS analytics_meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
+key TEXT PRIMARY KEY,
+value TEXT NOT NULL
 );
+INSERT OR IGNORE INTO analytics_meta (key, value) VALUES ('analytics_dirty', '0');
 CREATE TABLE IF NOT EXISTS run_facts_v1 (
-  run_id TEXT PRIMARY KEY,
-  first_timestamp TEXT NOT NULL,
+run_id TEXT PRIMARY KEY,
+first_timestamp TEXT NOT NULL,
   last_timestamp TEXT NOT NULL,
   project_name TEXT NOT NULL,
   tool_count INTEGER NOT NULL,
@@ -682,9 +705,11 @@ JOIN run_facts_v1 rf ON rf.run_id = pe.run_id
 WHERE COALESCE(pe.prefix_key, '') != ''
 GROUP BY pe.project_name, pe.prefix_key, pe.prefix_step_count, pe.next_tool;
 INSERT INTO analytics_meta (key, value) VALUES ('analytics_version', '2')
-  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 INSERT INTO analytics_meta (key, value) VALUES ('last_rebuilt_at', '$rebuilt_at')
-  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+INSERT INTO analytics_meta (key, value) VALUES ('analytics_dirty', '0')
+ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 COMMIT;
 SQL
 }
@@ -702,12 +727,13 @@ USAGE
   SUBCOMMANDS
     stats              Show dashboard of tool usage, runtimes, reliability
     history            Show recent runs (filterable)
-    combos             Show telemetry-backed combo patterns
-    recommend          Suggest the strongest next tool after a prefix
-    predict <path>     Estimate how long fsuite tools will take on <path>
-    import             Ingest telemetry.jsonl into SQLite database
-    clean              Prune old telemetry data
-  profile            Show machine profile (Tier 3 telemetry)
+combos             Show telemetry-backed combo patterns
+recommend          Suggest the strongest next tool after a prefix
+predict <path>     Estimate how long fsuite tools will take on <path>
+import             Ingest new telemetry.jsonl rows into SQLite database
+rebuild            Recompute derived analytics tables from imported telemetry
+clean              Prune old telemetry data
+profile            Show machine profile (Tier 3 telemetry)
 
 OPTIONS (global)
   -o, --output       Output format: pretty (default) or json
@@ -745,14 +771,15 @@ ENVIRONMENT
 
 EXAMPLES
     fmetrics import              Import telemetry data into SQLite
-    fmetrics stats               Show usage dashboard
-    fmetrics stats -o json       Machine-readable stats
-    fmetrics history --tool ftree --limit 10
-    fmetrics combos --project fsuite -o json
-    fmetrics recommend --after ftree,fsearch --project fsuite
-    fmetrics predict /project    Estimate runtimes for /project
-    fmetrics predict --tool ftree --mode snapshot /project
-    fmetrics clean --days 30     Remove data older than 30 days
+fmetrics stats               Show usage dashboard
+fmetrics stats -o json       Machine-readable stats
+fmetrics history --tool ftree --limit 10
+fmetrics combos --project fsuite -o json
+fmetrics recommend --after ftree,fsearch --project fsuite
+fmetrics predict /project    Estimate runtimes for /project
+fmetrics rebuild             Recompute combo/recommend analytics now
+fmetrics predict --tool ftree --mode snapshot /project
+fmetrics clean --days 30     Remove data older than 30 days
 EOF
 }
 
@@ -760,102 +787,74 @@ EOF
 # Subcommand: import
 # -------------------------
 cmd_import() {
-  ensure_db
+ensure_db
 
-  if [[ ! -f "$JSONL_FILE" ]]; then
-    rebuild_analytics
-    echo "No telemetry data found at $JSONL_FILE"
-    echo "Run fsuite tools (ftree, fsearch, fcontent) to generate telemetry."
-    return 0
-  fi
+if [[ ! -f "$JSONL_FILE" ]]; then
+if [[ "$OUTPUT" == "json" ]]; then
+echo "{\"tool\":\"fmetrics\",\"version\":\"$VERSION\",\"subcommand\":\"import\",\"total_lines\":0,\"inserted\":0,\"skipped\":0,\"errors\":0,\"db_path\":\"$DB_FILE\",\"jsonl_path\":\"$JSONL_FILE\"}"
+else
+echo "No telemetry data found at $JSONL_FILE"
+echo "Run fsuite tools (ftree, fsearch, fcontent) to generate telemetry."
+fi
+return 0
+fi
 
-  local total=0 inserted=0 skipped=0 errors=0
+has python3 || die 3 "python3 is required for import. Run: fmetrics --install-hints"
+local import_script output total inserted skipped errors cursor_reset
+import_script=$(_find_import_script 2>/dev/null) || import_script=""
+[[ -n "$import_script" ]] || die 3 "fmetrics-import.py not found. Run: ./install.sh --user or set FSUITE_SHARE_DIR"
+output=$(python3 "$import_script" --db "$DB_FILE" --jsonl "$JSONL_FILE" 2>&1) || die "telemetry import failed: $output"
+total=$(json_get "$output" "total_lines") || total=0
+inserted=$(json_get "$output" "inserted") || inserted=0
+skipped=$(json_get "$output" "skipped") || skipped=0
+errors=$(json_get "$output" "errors") || errors=0
+cursor_reset=$(json_get "$output" "cursor_reset") || cursor_reset=0
 
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    (( total++ )) || true
+if [[ "$OUTPUT" == "json" ]]; then
+echo "$output"
+else
+echo "Importing telemetry data..."
+echo "  Processed $total lines"
+echo "  Inserted $inserted new records"
+echo "  Skipped $skipped duplicates"
+(( errors > 0 )) && echo "  Errors: $errors (malformed lines)"
+(( cursor_reset > 0 )) && echo "  Import cursor reset (telemetry file changed)"
+if (( inserted > 0 )); then
+echo "  Analytics marked dirty: run fmetrics rebuild now, or let combos/recommend rebuild on demand"
+fi
+local db_size
+db_size=$(du -h "$DB_FILE" 2>/dev/null | cut -f1) || db_size="unknown"
+echo "Database: $DB_FILE ($db_size)"
+fi
+}
 
-    # Parse JSON fields using portable json_get (no grep -oP / PCRE dependency)
-    local ts tool ver mode ph pn dur ec dep items bytes flags backend run_id
-    local cpu_temp disk_temp ram_total ram_avail load_avg
-    ts=$(json_get "$line" "timestamp") || true
-    [[ -n "$ts" ]] || { (( errors++ )); continue; }
-    tool=$(json_get "$line" "tool") || true
-    [[ -n "$tool" ]] || { (( errors++ )); continue; }
-    ver=$(json_get "$line" "version") || ver=""
-    mode=$(json_get "$line" "mode") || mode=""
-    ph=$(json_get "$line" "path_hash") || ph=""
-    pn=$(json_get "$line" "project_name") || pn=""
-    dur=$(json_get "$line" "duration_ms") || dur=0
-    [[ "$dur" =~ ^-?[0-9]+$ ]] || dur=0
-    ec=$(json_get "$line" "exit_code") || ec=0
-    [[ "$ec" =~ ^[0-9]+$ ]] || ec=0
-    dep=$(json_get "$line" "depth") || dep=-1
-    [[ "$dep" =~ ^-?[0-9]+$ ]] || dep=-1
-    items=$(json_get "$line" "items_scanned") || items=-1
-    [[ "$items" =~ ^-?[0-9]+$ ]] || items=-1
-    bytes=$(json_get "$line" "bytes_scanned") || bytes=-1
-    [[ "$bytes" =~ ^-?[0-9]+$ ]] || bytes=-1
-    flags=$(json_get "$line" "flags") || flags=""
-    backend=$(json_get "$line" "backend") || backend=""
-    # Hardware telemetry fields (Tier 2)
-    cpu_temp=$(json_get "$line" "cpu_temp_mc") || cpu_temp=-1
-    [[ "$cpu_temp" =~ ^-?[0-9]+$ ]] || cpu_temp=-1
-    disk_temp=$(json_get "$line" "disk_temp_mc") || disk_temp=-1
-    [[ "$disk_temp" =~ ^-?[0-9]+$ ]] || disk_temp=-1
-    ram_total=$(json_get "$line" "ram_total_kb") || ram_total=-1
-    [[ "$ram_total" =~ ^-?[0-9]+$ ]] || ram_total=-1
-    ram_avail=$(json_get "$line" "ram_available_kb") || ram_avail=-1
-    [[ "$ram_avail" =~ ^-?[0-9]+$ ]] || ram_avail=-1
-    load_avg=$(json_get "$line" "load_avg_1m") || load_avg="-1"
-    [[ "$load_avg" =~ ^[0-9.]+$ ]] || load_avg="-1"
-    fs_type=$(json_get "$line" "filesystem_type") || fs_type="unknown"
-    [[ -z "$fs_type" ]] && fs_type="unknown"
-    stor_type=$(json_get "$line" "storage_type") || stor_type="unknown"
-    [[ -z "$stor_type" ]] && stor_type="unknown"
-    run_id=$(json_get "$line" "run_id") || run_id=""
-    if [[ -z "$run_id" ]]; then
-      run_id="${ts}_${dur}_${total}"
-    fi
+cmd_rebuild() {
+ensure_db
+rebuild_analytics
 
-    # Sanitize string fields using helper (strips unsafe chars + escapes quotes)
-    ts=$(sql_escape "$ts")
-    tool=$(sql_escape "$tool")
-    ver=$(sql_escape "$ver")
-    mode=$(sql_escape "$mode")
-    ph=$(sql_escape "$ph")
-    pn=$(sql_escape "$pn")
-    flags=$(sql_escape "$flags")
-    backend=$(sql_escape "$backend")
-    load_avg=$(sql_escape "$load_avg")
-    fs_type=$(sql_escape "$fs_type")
-    stor_type=$(sql_escape "$stor_type")
-    run_id=$(sql_escape "$run_id")
+local telemetry_count run_facts_count combo_count next_count dirty rebuilt_at
+telemetry_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM telemetry;" 2>/dev/null) || telemetry_count=0
+run_facts_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM run_facts_v1;" 2>/dev/null) || run_facts_count=0
+combo_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM combo_stats_v1;" 2>/dev/null) || combo_count=0
+next_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM combo_next_stats_v1;" 2>/dev/null) || next_count=0
+dirty=$(sqlite3 "$DB_FILE" "SELECT value FROM analytics_meta WHERE key='analytics_dirty';" 2>/dev/null) || dirty=0
+rebuilt_at=$(sqlite3 "$DB_FILE" "SELECT value FROM analytics_meta WHERE key='last_rebuilt_at';" 2>/dev/null) || rebuilt_at=""
+[[ "$telemetry_count" =~ ^[0-9]+$ ]] || telemetry_count=0
+[[ "$run_facts_count" =~ ^[0-9]+$ ]] || run_facts_count=0
+[[ "$combo_count" =~ ^[0-9]+$ ]] || combo_count=0
+[[ "$next_count" =~ ^[0-9]+$ ]] || next_count=0
+[[ "$dirty" =~ ^[01]$ ]] || dirty=0
 
-    local result
-    result=$(sqlite3 "$DB_FILE" "INSERT OR IGNORE INTO telemetry (timestamp,tool,version,mode,path_hash,project_name,duration_ms,exit_code,depth,items_scanned,bytes_scanned,flags,backend,cpu_temp_mc,disk_temp_mc,ram_total_kb,ram_available_kb,load_avg_1m,filesystem_type,storage_type,run_id) VALUES ('$ts','$tool','$ver','$mode','$ph','$pn',$dur,$ec,$dep,$items,$bytes,'$flags','$backend',$cpu_temp,$disk_temp,$ram_total,$ram_avail,'$load_avg','$fs_type','$stor_type','$run_id'); SELECT changes();" 2>/dev/null) || { (( errors++ )); continue; }
-
-    if [[ "$result" == "1" ]]; then
-      (( inserted++ )) || true
-    else
-      (( skipped++ )) || true
-      fi
-    done < "$JSONL_FILE"
-
-    rebuild_analytics
-
-    if [[ "$OUTPUT" == "json" ]]; then
-    echo "{\"tool\":\"fmetrics\",\"version\":\"$VERSION\",\"subcommand\":\"import\",\"total_lines\":$total,\"inserted\":$inserted,\"skipped\":$skipped,\"errors\":$errors,\"db_path\":\"$DB_FILE\"}"
-  else
-    echo "Importing telemetry data..."
-    echo "  Processed $total lines"
-    echo "  Inserted $inserted new records"
-    echo "  Skipped $skipped duplicates"
-    (( errors > 0 )) && echo "  Errors: $errors (malformed lines)"
-    local db_size
-    db_size=$(du -h "$DB_FILE" 2>/dev/null | cut -f1) || db_size="unknown"
-    echo "Database: $DB_FILE ($db_size)"
-  fi
+if [[ "$OUTPUT" == "json" ]]; then
+echo "{\"tool\":\"fmetrics\",\"version\":\"$VERSION\",\"subcommand\":\"rebuild\",\"telemetry_rows\":$telemetry_count,\"run_facts\":$run_facts_count,\"combos\":$combo_count,\"next_edges\":$next_count,\"analytics_dirty\":$dirty,\"rebuilt_at\":\"$rebuilt_at\",\"db_path\":\"$DB_FILE\"}"
+else
+echo "$(metric_title 'Rebuilt analytics tables')"
+echo "  Telemetry rows: $telemetry_count"
+echo "  Run facts: $run_facts_count"
+echo "  Combos: $combo_count"
+echo "  Next-step edges: $next_count"
+echo "  Rebuilt at: ${rebuilt_at:-unknown}"
+fi
 }
 
 # -------------------------
@@ -1905,9 +1904,9 @@ cmd_profile() {
 # Self-check
 # -------------------------
 self_check() {
-  echo "fmetrics dependency check:"
-  if has sqlite3; then
-    echo "  sqlite3: $(sqlite3 --version 2>&1 | head -1)"
+echo "fmetrics dependency check:"
+if has sqlite3; then
+echo "  sqlite3: $(sqlite3 --version 2>&1 | head -1)"
   else
     echo "  sqlite3: NOT FOUND"
   fi
@@ -1915,23 +1914,35 @@ self_check() {
     echo "  python3: $(python3 --version 2>&1)"
   else
     echo "  python3: NOT FOUND (predictions unavailable, basic stats still work)"
-  fi
-  local predict_path
-  predict_path=$(_find_predict_script 2>/dev/null) || predict_path=""
-  if [[ -n "$predict_path" ]]; then
-    echo "  fmetrics-predict.py: found at $predict_path"
-  else
-    echo "  fmetrics-predict.py: NOT FOUND (check installation path)"
-  fi
-  if has python3 && [[ -n "$predict_path" ]]; then
-    echo "  k-NN predictions: available"
-  else
-    echo "  k-NN predictions: unavailable"
-  fi
-  echo "  telemetry.jsonl: $(wc -l < "$JSONL_FILE" 2>/dev/null || echo "0") lines"
-  if [[ -f "$DB_FILE" ]]; then
-    local count
-    count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM telemetry;" 2>/dev/null) || count="error"
+fi
+local predict_path
+predict_path=$(_find_predict_script 2>/dev/null) || predict_path=""
+if [[ -n "$predict_path" ]]; then
+echo "  fmetrics-predict.py: found at $predict_path"
+else
+echo "  fmetrics-predict.py: NOT FOUND (check installation path)"
+fi
+local import_path
+import_path=$(_find_import_script 2>/dev/null) || import_path=""
+if [[ -n "$import_path" ]]; then
+echo "  fmetrics-import.py: found at $import_path"
+else
+echo "  fmetrics-import.py: NOT FOUND (incremental import unavailable)"
+fi
+if has python3 && [[ -n "$predict_path" ]]; then
+echo "  k-NN predictions: available"
+else
+echo "  k-NN predictions: unavailable"
+fi
+if has python3 && [[ -n "$import_path" ]]; then
+echo "  incremental import: available"
+else
+echo "  incremental import: unavailable"
+fi
+echo "  telemetry.jsonl: $(wc -l < "$JSONL_FILE" 2>/dev/null || echo "0") lines"
+if [[ -f "$DB_FILE" ]]; then
+local count
+count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM telemetry;" 2>/dev/null) || count="error"
     echo "  telemetry.db: $count records"
   else
     echo "  telemetry.db: not created yet (run: fmetrics import)"
@@ -1946,9 +1957,9 @@ fmetrics dependencies:
     sqlite3    sudo apt install sqlite3      # Debian/Ubuntu
                brew install sqlite           # macOS
 
-  Optional (for predictions):
-    python3    sudo apt install python3      # Debian/Ubuntu
-               brew install python3          # macOS
+Optional (for predictions):
+python3    sudo apt install python3      # Required for import, enables predictions
+brew install python3          # macOS
 EOF
 }
 
@@ -2038,17 +2049,18 @@ if [[ -n "$RECOMMEND_AFTER" && "$SUBCOMMAND" != "recommend" ]]; then
 fi
 
 case "$SUBCOMMAND" in
-  stats)   cmd_stats ;;
-  history) cmd_history ;;
-  combos)  cmd_combos ;;
-  recommend) cmd_recommend ;;
+stats)   cmd_stats ;;
+history) cmd_history ;;
+combos)  cmd_combos ;;
+recommend) cmd_recommend ;;
   predict)
     PREDICT_PATH="${POSITIONAL[1]:-}"
     [[ -n "$PREDICT_PATH" ]] || die "predict requires a path argument"
     PREDICT_TOOL="$FILTER_TOOL"
-    cmd_predict ;;
-  import)  cmd_import ;;
-  clean)   cmd_clean ;;
-  profile) cmd_profile ;;
-  *)       die "Unknown subcommand: $SUBCOMMAND. Run: fmetrics --help" ;;
+cmd_predict ;;
+import)  cmd_import ;;
+rebuild) cmd_rebuild ;;
+clean)   cmd_clean ;;
+profile) cmd_profile ;;
+*)       die "Unknown subcommand: $SUBCOMMAND. Run: fmetrics --help" ;;
 esac
