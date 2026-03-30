@@ -835,22 +835,34 @@ server.registerTool(
 );
 
 // ─── fmetrics ────────────────────────────────────────────────────
-server.registerTool(
-  "fmetrics",
-  {
-    title: coloredTitle("fmetrics"),
-    description: "Telemetry analytics — import data, show stats, history, or predict runtimes.",
-    inputSchema: z.object({
-      action: z.enum(["import", "stats", "history", "predict"]).describe("Metrics action"),
-      tool: z.string().optional().describe("Filter by tool name"),
-    }),
-  },
-  async ({ action, tool }) => {
-    const args = [action];
-    if (tool) args.push("--tool", tool);
-    return cli("fmetrics", args);
-  }
-);
+  server.registerTool(
+    "fmetrics",
+    {
+      title: coloredTitle("fmetrics"),
+      description: "Telemetry analytics — import data, inspect stats/history, mine combos, recommend next steps, or predict runtimes.",
+      inputSchema: z.object({
+        action: z.enum(["import", "stats", "history", "predict", "combos", "recommend"]).describe("Metrics action"),
+        tool: z.string().optional().describe("Filter by tool name"),
+        project: z.string().optional().describe("Filter by project name"),
+        limit: z.number().int().positive().optional().describe("Limit result count"),
+        starts_with: z.string().optional().describe("Required combo prefix for combos, as comma-separated tools"),
+        contains: z.string().optional().describe("Required tool anywhere in a combo"),
+        min_occurrences: z.number().int().positive().optional().describe("Minimum combo occurrence count"),
+        after: z.string().optional().describe("Recommendation prefix, as comma-separated tools"),
+      }),
+    },
+    async ({ action, tool, project, limit, starts_with, contains, min_occurrences, after }) => {
+      const args = [action];
+      if (tool) args.push("--tool", tool);
+      if (project) args.push("--project", project);
+      if (limit !== undefined) args.push("--limit", String(limit));
+      if (starts_with) args.push("--starts-with", starts_with);
+      if (contains) args.push("--contains", contains);
+      if (min_occurrences !== undefined) args.push("--min-occurrences", String(min_occurrences));
+      if (after) args.push("--after", after);
+      return cli("fmetrics", args);
+    }
+  );
 
 // ─── fprobe ─────────────────────────────────────────────────────
 server.registerTool(

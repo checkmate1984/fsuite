@@ -34,7 +34,7 @@
 | **`fwrite`** | Write or overwrite files from agent output — MCP-native, safe atomic writes (MCP adapter only) |
 | **`freplay`** | Deterministic replay of recorded investigation command sequences |
 | **`fprobe`** | Binary and opaque-file reconnaissance — strings, scan, and byte-window reads |
-| **`fmetrics`** | Analyze telemetry, history, and predicted runtime |
+| **`fmetrics`** | Analyze telemetry, history, combo patterns, recommendations, and predicted runtime |
 
 The first reconnaissance tools are the sensor layer. `fs` is the unified entry point that accepts a raw query, classifies intent (path pattern, literal content, or structural symbol), and builds the right tool chain automatically — removing the decision overhead from the agent's first move. `fcase` is the continuity ledger. `fedit` is the surgical patch arm. `fwrite` is the safe write surface exposed through the MCP adapter. `freplay` is the investigation playback engine. `fprobe` is the binary sensor. `fmetrics` is the flight recorder and analyst. Together they cover **scout -> find/search -> map -> read -> preserve -> edit -> replay -> probe -> measure**. The `fsuite` command is the suite-level explainer that teaches that flow to humans and agents on first contact.
 
@@ -148,7 +148,7 @@ AFTER execution:
     -> fcase handoff <seam> -o json
     -> fedit -o json
     -> freplay --verify
-    -> fmetrics import -> fmetrics stats / predict
+    -> fmetrics import -> fmetrics stats / combos / recommend / predict
 Search inside the narrowed set, preserve what matters, patch surgically,
 verify the replay, then measure what actually happened and plan the next pass.
 ```
@@ -2320,6 +2320,9 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `fmetrics stats -o json` | Machine-readable stats for automation |
 | `fmetrics history --tool ftree --limit 10` | Show recent runs for one tool |
 | `fmetrics history --project MyApp` | Filter telemetry by project name |
+| `fmetrics combos --project fsuite` | Show evidence-backed combo patterns for one project |
+| `fmetrics combos --starts-with ftree,fsearch --contains fmap -o json` | Filter combo analytics by prefix and required tool |
+| `fmetrics recommend --after ftree,fsearch --project fsuite` | Suggest the strongest next step from historical telemetry |
 | `fmetrics predict /project` | Estimate runtimes for the target path |
 | `fmetrics predict --tool ftree /project` | Estimate a single tool only |
 | `fmetrics profile` | Show Tier 3 machine profile |
@@ -2606,6 +2609,12 @@ fmetrics stats
 
 # View recent runs
 fmetrics history --tool ftree --limit 10
+
+# View the strongest combo patterns for one project
+fmetrics combos --project fsuite
+
+# Ask which next tool usually wins after a prefix
+fmetrics recommend --after ftree,fsearch --project fsuite
 
 # Predict runtime for a directory
 fmetrics predict /project
