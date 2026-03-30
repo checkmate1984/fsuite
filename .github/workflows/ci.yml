@@ -30,5 +30,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tree ripgrep fd-find sqlite3
 
+      - name: Install MCP test dependencies
+        run: npm ci --prefix mcp
+
       - name: Run fsuite test suite
         run: bash tests/run_all_tests.sh
