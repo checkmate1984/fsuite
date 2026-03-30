@@ -189,7 +189,27 @@ SQL
   run_fmetrics clean --days 9999 >/dev/null 2>&1
 }
 
-test_import_rebuilds_run_facts_analytics() {
+test_import_marks_analytics_dirty_without_rebuild() {
+  mkdir -p "$HOME/.fsuite"
+  cat > "$HOME/.fsuite/telemetry.jsonl" <<'JSONL'
+{"timestamp":"2026-03-20T00:00:00Z","tool":"ftree","version":"2.3.0","mode":"snapshot","path_hash":"alpha-1","project_name":"analytics-fixture","duration_ms":12,"exit_code":0,"depth":2,"items_scanned":10,"bytes_scanned":1000,"flags":"--snapshot","backend":"tree","run_id":"run-alpha"}
+{"timestamp":"2026-03-20T00:00:01Z","tool":"fcontent","version":"2.3.0","mode":"directory","path_hash":"alpha-2","project_name":"analytics-fixture","duration_ms":9,"exit_code":0,"depth":1,"items_scanned":4,"bytes_scanned":400,"flags":"-o json","backend":"read","run_id":"run-alpha"}
+JSONL
+
+  local output inserted dirty row_count
+  output=$(run_fmetrics import -o json 2>&1)
+  inserted=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["inserted"])' <<< "$output" 2>/dev/null || echo "-1")
+  dirty=$(sqlite3 "$HOME/.fsuite/telemetry.db" "SELECT value FROM analytics_meta WHERE key='analytics_dirty';" 2>/dev/null || true)
+  row_count=$(sqlite3 "$HOME/.fsuite/telemetry.db" "SELECT COUNT(*) FROM run_facts_v1;" 2>/dev/null || echo "999")
+
+  if [[ "$inserted" == "2" && "$dirty" == "1" && "$row_count" == "0" ]]; then
+    pass "Import marks analytics dirty without rebuilding derived tables"
+  else
+    fail "Import should mark analytics dirty without rebuilding derived tables" "inserted=$inserted dirty=$dirty run_facts_count=$row_count output=$output"
+  fi
+}
+
+test_rebuild_populates_run_facts_after_import() {
   mkdir -p "$HOME/.fsuite"
   cat > "$HOME/.fsuite/telemetry.jsonl" <<'JSONL'
 {"timestamp":"2026-03-20T00:00:00Z","tool":"ftree","version":"2.3.0","mode":"snapshot","path_hash":"alpha-1","project_name":"analytics-fixture","duration_ms":12,"exit_code":0,"depth":2,"items_scanned":10,"bytes_scanned":1000,"flags":"--snapshot","backend":"tree","run_id":"run-alpha"}
@@ -197,13 +217,66 @@ test_import_rebuilds_run_facts_analytics() {
 JSONL
 
   run_fmetrics import >/dev/null 2>&1
+  run_fmetrics rebuild >/dev/null 2>&1
 
-  local row
+  local row dirty
   row=$(sqlite3 "$HOME/.fsuite/telemetry.db" "SELECT tool_count || '|' || project_name FROM run_facts_v1 WHERE run_id='run-alpha';" 2>/dev/null || true)
-  if [[ "$row" == "2|analytics-fixture" ]]; then
-    pass "Import rebuilds run_facts_v1 analytics"
+  dirty=$(sqlite3 "$HOME/.fsuite/telemetry.db" "SELECT value FROM analytics_meta WHERE key='analytics_dirty';" 2>/dev/null || true)
+  if [[ "$row" == "2|analytics-fixture" && "$dirty" == "0" ]]; then
+    pass "Rebuild populates run_facts_v1 and clears dirty flag"
   else
-    fail "Import should rebuild run_facts_v1 analytics" "Got: $row"
+    fail "Rebuild should populate run_facts_v1 and clear dirty flag" "row=$row dirty=$dirty"
+  fi
+}
+
+test_import_survives_malformed_lines() {
+  mkdir -p "$HOME/.fsuite"
+  rm -f "$HOME/.fsuite/telemetry.db"
+  cat > "$HOME/.fsuite/telemetry.jsonl" <<'JSONL'
+{"tool":"ftree","version":"2.3.0","mode":"snapshot","path_hash":"broken-1","project_name":"bad-line-fixture","duration_ms":12,"exit_code":0,"depth":2,"items_scanned":10,"bytes_scanned":1000,"flags":"--snapshot","backend":"tree","run_id":"run-bad"}
+{"timestamp":"2026-03-20T00:00:00Z","tool":"ftree","version":"2.3.0","mode":"snapshot","path_hash":"good-1","project_name":"bad-line-fixture","duration_ms":12,"exit_code":0,"depth":2,"items_scanned":10,"bytes_scanned":1000,"flags":"--snapshot","backend":"tree","run_id":"run-good"}
+JSONL
+
+  local output rc inserted errors count
+  output=$(run_fmetrics import -o json 2>&1)
+  rc=$?
+  inserted=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["inserted"])' <<< "$output" 2>/dev/null || echo "-1")
+  errors=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["errors"])' <<< "$output" 2>/dev/null || echo "-1")
+  count=$(sqlite3 "$HOME/.fsuite/telemetry.db" "SELECT COUNT(*) FROM telemetry;" 2>/dev/null || echo "0")
+
+  if [[ $rc -eq 0 && "$inserted" == "1" && "$errors" == "1" && "$count" == "1" ]]; then
+    pass "Import survives malformed lines and continues"
+  else
+    fail "Import should survive malformed lines and continue" "rc=$rc inserted=$inserted errors=$errors count=$count output=$output"
+  fi
+}
+
+test_import_only_processes_new_lines() {
+  mkdir -p "$HOME/.fsuite"
+  cat > "$HOME/.fsuite/telemetry.jsonl" <<'JSONL'
+{"timestamp":"2026-03-21T00:00:00Z","tool":"ftree","version":"2.3.0","mode":"snapshot","path_hash":"inc-1","project_name":"incremental-fixture","duration_ms":5,"exit_code":0,"depth":1,"items_scanned":3,"bytes_scanned":300,"flags":"--snapshot","backend":"tree","run_id":"run-inc-1"}
+JSONL
+
+  local first second third
+  local first_total second_total third_total
+  local first_inserted second_inserted third_inserted
+
+  first=$(run_fmetrics import -o json 2>&1)
+  printf '%s\n' '{"timestamp":"2026-03-21T00:00:01Z","tool":"fsearch","version":"2.3.0","mode":"glob","path_hash":"inc-2","project_name":"incremental-fixture","duration_ms":7,"exit_code":0,"depth":1,"items_scanned":4,"bytes_scanned":400,"flags":"*.sh","backend":"find","run_id":"run-inc-2"}' >> "$HOME/.fsuite/telemetry.jsonl"
+  second=$(run_fmetrics import -o json 2>&1)
+  third=$(run_fmetrics import -o json 2>&1)
+
+  first_total=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["total_lines"])' <<< "$first" 2>/dev/null || echo "-1")
+  second_total=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["total_lines"])' <<< "$second" 2>/dev/null || echo "-1")
+  third_total=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["total_lines"])' <<< "$third" 2>/dev/null || echo "-1")
+  first_inserted=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["inserted"])' <<< "$first" 2>/dev/null || echo "-1")
+  second_inserted=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["inserted"])' <<< "$second" 2>/dev/null || echo "-1")
+  third_inserted=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["inserted"])' <<< "$third" 2>/dev/null || echo "-1")
+
+  if [[ "$first_total" == "1" && "$first_inserted" == "1" && "$second_total" == "1" && "$second_inserted" == "1" && "$third_total" == "0" && "$third_inserted" == "0" ]]; then
+    pass "Import only processes newly appended telemetry lines"
+  else
+    fail "Import should only process newly appended telemetry lines" "first=$first second=$second third=$third"
   fi
 }
 
@@ -226,6 +299,30 @@ SQL
     pass "Clean rebuilds run_facts_v1 after direct seed"
   else
     fail "Clean should rebuild run_facts_v1 after direct seed" "Got: $row"
+  fi
+}
+
+test_combos_rebuilds_dirty_analytics_on_demand() {
+  mkdir -p "$HOME/.fsuite"
+  rm -f "$HOME/.fsuite/telemetry.db"
+  cat > "$HOME/.fsuite/telemetry.jsonl" <<'JSONL'
+{"timestamp":"2026-03-22T00:00:00Z","tool":"ftree","version":"2.3.0","mode":"snapshot","path_hash":"lazy-1","project_name":"lazy-fixture","duration_ms":10,"exit_code":0,"depth":1,"items_scanned":5,"bytes_scanned":500,"flags":"--snapshot","backend":"tree","run_id":"run-lazy"}
+{"timestamp":"2026-03-22T00:00:01Z","tool":"fsearch","version":"2.3.0","mode":"glob","path_hash":"lazy-2","project_name":"lazy-fixture","duration_ms":12,"exit_code":0,"depth":1,"items_scanned":6,"bytes_scanned":600,"flags":"*.md","backend":"find","run_id":"run-lazy"}
+JSONL
+
+  run_fmetrics import >/dev/null 2>&1
+
+  local before_count after_count dirty output rc
+  before_count=$(sqlite3 "$HOME/.fsuite/telemetry.db" "SELECT COUNT(*) FROM run_facts_v1;" 2>/dev/null || echo "999")
+  output=$(run_fmetrics combos --project lazy-fixture -o json 2>&1)
+  rc=$?
+  after_count=$(sqlite3 "$HOME/.fsuite/telemetry.db" "SELECT COUNT(*) FROM run_facts_v1;" 2>/dev/null || echo "0")
+  dirty=$(sqlite3 "$HOME/.fsuite/telemetry.db" "SELECT value FROM analytics_meta WHERE key='analytics_dirty';" 2>/dev/null || true)
+
+  if [[ "$before_count" == "0" && $rc -eq 0 && "$after_count" == "1" && "$dirty" == "0" ]]; then
+    pass "Combos lazily rebuilds dirty analytics"
+  else
+    fail "Combos should lazily rebuild dirty analytics" "before=$before_count after=$after_count dirty=$dirty rc=$rc output=$output"
   fi
 }
 
@@ -1241,9 +1338,13 @@ main() {
   run_test "Telemetry JSONL includes run_id" test_run_id_in_jsonl
   run_test "Burst runs are not dropped" test_burst_runs_not_dropped
   run_test "Legacy import backfills run_id" test_legacy_import_backfill_run_id
-  run_test "Migration rollback on failure preserves data" test_migration_atomicity
-  run_test "Import rebuilds run_facts_v1 analytics" test_import_rebuilds_run_facts_analytics
-  run_test "Clean rebuilds run_facts_v1 after direct seed" test_clean_rebuilds_run_facts_after_direct_seed
+    run_test "Migration rollback on failure preserves data" test_migration_atomicity
+    run_test "Import marks analytics dirty without rebuild" test_import_marks_analytics_dirty_without_rebuild
+    run_test "Rebuild populates run_facts_v1 analytics" test_rebuild_populates_run_facts_after_import
+    run_test "Import survives malformed lines" test_import_survives_malformed_lines
+    run_test "Import only processes newly appended lines" test_import_only_processes_new_lines
+    run_test "Clean rebuilds run_facts_v1 after direct seed" test_clean_rebuilds_run_facts_after_direct_seed
+  run_test "Combos lazily rebuilds dirty analytics" test_combos_rebuilds_dirty_analytics_on_demand
   run_test "fmetrics combos reports ordered sequences" test_v17_combos_reports_ordered_sequences
   run_test "fmetrics combos filters and errors" test_v17_combos_filters_and_errors
   run_test "fmetrics recommend suggests next step" test_v17_recommend_suggests_next_step

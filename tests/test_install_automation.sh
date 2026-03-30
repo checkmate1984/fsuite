@@ -80,7 +80,7 @@ run_installer() {
 # ── Shared fixture arrays (mirror install.sh) ────────────────────────────────
 
 EXPECTED_TOOLS=(fsuite ftree fsearch fcontent fmap fread fcase fedit fmetrics freplay fprobe fs)
-EXPECTED_SHARE_FILES=(_fsuite_common.sh _fsuite_db.sh fmetrics-predict.py fprobe-engine.py fs-engine.py)
+EXPECTED_SHARE_FILES=(_fsuite_common.sh _fsuite_db.sh fmetrics-predict.py fmetrics-import.py fprobe-engine.py fs-engine.py)
 
 # ── §1  Dependency detection ─────────────────────────────────────────────────
 
@@ -251,7 +251,7 @@ test_source_install_all_12_tools_present() {
   fi
 }
 
-test_source_install_all_5_share_files_present() {
+test_source_install_all_6_share_files_present() {
   local prefix="${TEST_ROOT}/src-share"
   local fake_home="${TEST_ROOT}/src-share-home"
   run_installer "$fake_home" --prefix "$prefix" --skip-mcp --no-verify >/dev/null 2>&1 || {
@@ -320,7 +320,7 @@ test_source_install_shell_lib_permissions_644() {
   fi
 }
 
-test_source_install_fmetrics_predict_permissions_755() {
+test_source_install_fmetrics_helpers_permissions_755() {
   local prefix="${TEST_ROOT}/perm-py-exec"
   local fake_home="${TEST_ROOT}/perm-py-exec-home"
   run_installer "$fake_home" --prefix "$prefix" --skip-mcp --no-verify >/dev/null 2>&1 || {
@@ -328,13 +328,18 @@ test_source_install_fmetrics_predict_permissions_755() {
     return
   }
 
-  local perms
-  perms="$(stat -c '%a' "${prefix}/share/fsuite/fmetrics-predict.py" 2>/dev/null || echo missing)"
-  if [[ "$perms" == "755" ]]; then
-    pass "fmetrics-predict.py installed with 755 (executable) permissions"
-  else
-    fail "fmetrics-predict.py should be 755" "got: $perms"
-  fi
+local helpers=(fmetrics-predict.py fmetrics-import.py)
+local bad=()
+local helper perms
+for helper in "${helpers[@]}"; do
+perms="$(stat -c '%a' "${prefix}/share/fsuite/${helper}" 2>/dev/null || echo missing)"
+[[ "$perms" == "755" ]] || bad+=("${helper}:${perms}")
+done
+if (( ${#bad[@]} == 0 )); then
+    pass "fmetrics helper Python files installed with 755 permissions"
+else
+    fail "fmetrics helper Python files should be 755" "bad: ${bad[*]}"
+fi
 }
 
 test_source_install_non_executable_py_engines_644() {
@@ -854,10 +859,10 @@ main() {
 
   echo -e "${CYAN}── §2  Source install flow ──────────────────${NC}"
   run_test "All 12 tools present in bin/"               test_source_install_all_12_tools_present
-  run_test "All 5 share files present in share/fsuite/" test_source_install_all_5_share_files_present
+run_test "All 6 share files present in share/fsuite/" test_source_install_all_6_share_files_present
   run_test "Tool permissions are 755"                   test_source_install_tool_permissions_755
   run_test "Shell lib permissions are 644"              test_source_install_shell_lib_permissions_644
-  run_test "fmetrics-predict.py is 755"                 test_source_install_fmetrics_predict_permissions_755
+run_test "fmetrics helpers are 755"                  test_source_install_fmetrics_helpers_permissions_755
   run_test "Non-exec Python engines are 644"            test_source_install_non_executable_py_engines_644
   echo ""
 
