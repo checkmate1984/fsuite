@@ -20,6 +20,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_OUTPUT="pretty"
 DEFAULT_LIMIT=20
 DEFAULT_CLEAN_DAYS=90
+DEFAULT_MIN_OCCURRENCES=1
+COLOR_ENABLED=0
+
+if [[ -n "${FORCE_COLOR:-}" || -n "${FSUITE_FORCE_COLOR:-}" ]]; then
+  COLOR_ENABLED=1
+elif [[ -z "${NO_COLOR:-}" ]]; then
+  if [[ -t 1 && "${TERM:-}" != "dumb" ]]; then
+    COLOR_ENABLED=1
+  fi
+fi
 
 # -------------------------
 # Helpers
@@ -63,6 +73,22 @@ human_bytes() {
   fi
 }
 
+paint() {
+  local code="$1" text="$2"
+  if (( COLOR_ENABLED )); then
+    printf '\033[%sm%s\033[0m' "$code" "$text"
+  else
+    printf '%s' "$text"
+  fi
+}
+
+metric_title() { paint '1;38;5;196' "$1"; }
+metric_label() { paint '1;38;5;129' "$1"; }
+metric_info() { paint '1;38;5;27' "$1"; }
+metric_good() { paint '1;38;5;46' "$1"; }
+metric_warn() { paint '1;38;5;208' "$1"; }
+metric_rule() { paint '38;5;240' "$1"; }
+
 # SQL escape helper - prevents injection, handles special chars consistently
 sql_escape() {
   local val="$1"
@@ -94,6 +120,192 @@ _find_predict_script() {
 json_get() {
   local line="$1" key="$2"
   echo "$line" | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p'
+}
+
+sanitize_project_name() {
+  local project="$1"
+  project=$(printf '%s' "$project" | tr -cd '[:alnum:]. _-')
+  project="${project//\'/\'\'}"
+  printf '%s' "$project"
+}
+
+sanitize_tool_token() {
+  printf '%s' "$1" | tr -cd '[:alnum:]._:-'
+}
+
+sanitize_tool_csv() {
+  local raw="$1"
+  local parts=()
+  local cleaned=()
+  local token
+  local old_ifs="$IFS"
+  IFS=',' read -r -a parts <<<"$raw"
+  IFS="$old_ifs"
+  for token in "${parts[@]}"; do
+    token=$(sanitize_tool_token "$token")
+    [[ -n "$token" ]] && cleaned+=("$token")
+  done
+  local joined=""
+  for token in "${cleaned[@]}"; do
+    if [[ -n "$joined" ]]; then
+      joined+=","
+    fi
+    joined+="$token"
+  done
+  printf '%s' "$joined"
+}
+
+delimited_to_json_array() {
+  local raw="$1" delimiter="$2"
+  local parts=()
+  local old_ifs="$IFS"
+  local out="["
+  local first=1
+  local part escaped
+  IFS="$delimiter" read -r -a parts <<<"$raw"
+  IFS="$old_ifs"
+  for part in "${parts[@]}"; do
+    [[ -n "$part" ]] || continue
+    escaped=$(printf '%s' "$part" | json_escape)
+    if (( ! first )); then
+      out+=","
+    fi
+    out+="\"$escaped\""
+    first=0
+  done
+  out+="]"
+  printf '%s' "$out"
+}
+
+decimal_ratio() {
+  local numerator="${1:-0}" denominator="${2:-0}"
+  if (( denominator <= 0 )); then
+    printf '0'
+    return 0
+  fi
+  awk -v n="$numerator" -v d="$denominator" 'BEGIN { printf "%.6f", n / d }'
+}
+
+combo_score() {
+  local occurrences="${1:-0}" clean_runs="${2:-0}" faulted_runs="${3:-0}" avg_duration_ms="${4:-0}"
+  awk -v occ="$occurrences" -v clean="$clean_runs" -v fault="$faulted_runs" -v avg="$avg_duration_ms" '
+    BEGIN {
+      total = clean + fault;
+      if (total <= 0) {
+        print 0;
+        exit;
+      }
+      clean_rate = clean / total;
+      fault_rate = fault / total;
+      speed_bonus = (avg <= 1000 ? 10 : (avg <= 5000 ? 5 : 0));
+      score = int((clean_rate * 60) + (occ > 5 ? 25 : occ * 5) + speed_bonus - (fault_rate * 25));
+      if (score < 0) score = 0;
+      if (score > 100) score = 100;
+      print score;
+    }'
+}
+
+combo_confidence() {
+  local support="${1:-0}" faulted_runs="${2:-0}"
+  if (( support >= 4 && faulted_runs == 0 )); then
+    printf 'high'
+  elif (( support >= 2 )); then
+    printf 'medium'
+  else
+    printf 'low'
+  fi
+}
+
+combo_because_json() {
+  local occurrences="${1:-0}" clean_runs="${2:-0}" faulted_runs="${3:-0}" avg_duration_ms="${4:-0}"
+  local reasons=()
+  if (( occurrences >= 2 )); then
+    reasons+=("repeated across multiple runs")
+  else
+    reasons+=("seen in historical telemetry")
+  fi
+  if (( faulted_runs == 0 )); then
+    reasons+=("zero-fault history")
+  elif (( faulted_runs < clean_runs )); then
+    reasons+=("fault rate stays below the clean-run count")
+  else
+    reasons+=("faults are present in this combo history")
+  fi
+  if (( avg_duration_ms > 0 && avg_duration_ms <= 1000 )); then
+    reasons+=("fast average end-to-end duration")
+  fi
+
+  local out="["
+  local first=1
+  local reason escaped
+  for reason in "${reasons[@]}"; do
+    escaped=$(printf '%s' "$reason" | json_escape)
+    if (( ! first )); then
+      out+=","
+    fi
+    out+="\"$escaped\""
+    first=0
+  done
+  out+="]"
+  printf '%s' "$out"
+}
+
+recommend_because_json() {
+  local support="${1:-0}" faulted_runs="${2:-0}" next_tool="$3"
+  local reasons=()
+  reasons+=("most common successful next step after this prefix")
+  if (( faulted_runs == 0 )); then
+    reasons+=("zero-fault history for this continuation")
+  fi
+  if (( support >= 2 )); then
+    reasons+=("stronger support than one-off continuations")
+  fi
+  reasons+=("historical continuation favors ${next_tool}")
+
+  local out="["
+  local first=1
+  local reason escaped
+  for reason in "${reasons[@]}"; do
+    escaped=$(printf '%s' "$reason" | json_escape)
+    if (( ! first )); then
+      out+=","
+    fi
+    out+="\"$escaped\""
+    first=0
+  done
+  out+="]"
+  printf '%s' "$out"
+}
+
+emit_json_error() {
+  local subcommand="$1" code="$2" message="$3" details_pairs="${4:-}"
+  local escaped_message
+  local details_json="{}"
+  escaped_message=$(printf '%s' "$message" | json_escape)
+  if [[ -n "$details_pairs" ]]; then
+    details_json="{$details_pairs}"
+  fi
+  cat <<EOF
+{"tool":"fmetrics","version":"$VERSION","subcommand":"$subcommand","error":{"code":"$code","message":"$escaped_message","details":$details_json}}
+EOF
+}
+
+ensure_analytics_populated() {
+  ensure_db
+  local telemetry_count analytics_version run_facts_count combo_count next_count
+  telemetry_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM telemetry;" 2>/dev/null) || telemetry_count=0
+  [[ "$telemetry_count" =~ ^[0-9]+$ ]] || telemetry_count=0
+  (( telemetry_count > 0 )) || return 0
+  analytics_version=$(sqlite3 "$DB_FILE" "SELECT value FROM analytics_meta WHERE key='analytics_version';" 2>/dev/null) || analytics_version=""
+  run_facts_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM run_facts_v1;" 2>/dev/null) || run_facts_count=0
+  combo_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM combo_stats_v1;" 2>/dev/null) || combo_count=0
+  next_count=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM combo_next_stats_v1;" 2>/dev/null) || next_count=0
+  [[ "$run_facts_count" =~ ^[0-9]+$ ]] || run_facts_count=0
+  [[ "$combo_count" =~ ^[0-9]+$ ]] || combo_count=0
+  [[ "$next_count" =~ ^[0-9]+$ ]] || next_count=0
+  if [[ "$analytics_version" != "2" ]] || (( run_facts_count == 0 )) || (( combo_count == 0 )) || (( next_count == 0 )); then
+    rebuild_analytics
+  fi
 }
 
 ensure_column() {
@@ -154,10 +366,47 @@ CREATE TABLE IF NOT EXISTS run_facts_v1 (
   project_name TEXT NOT NULL,
   tool_count INTEGER NOT NULL,
   nonzero_exit_count INTEGER NOT NULL,
-  tools_csv TEXT NOT NULL
+  tools_csv TEXT NOT NULL,
+  tool_sequence TEXT NOT NULL DEFAULT '',
+  total_duration_ms INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_run_facts_project ON run_facts_v1(project_name);
-  PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS run_steps_v1 (
+  run_id TEXT NOT NULL,
+  step_index INTEGER NOT NULL,
+  project_name TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  exit_code INTEGER NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  PRIMARY KEY (run_id, step_index)
+);
+CREATE INDEX IF NOT EXISTS idx_run_steps_project ON run_steps_v1(project_name);
+CREATE TABLE IF NOT EXISTS combo_stats_v1 (
+  project_name TEXT NOT NULL,
+  combo_key TEXT NOT NULL,
+  step_count INTEGER NOT NULL,
+  occurrence_count INTEGER NOT NULL,
+  clean_run_count INTEGER NOT NULL,
+  faulted_run_count INTEGER NOT NULL,
+  avg_duration_ms INTEGER NOT NULL,
+  total_duration_ms INTEGER NOT NULL,
+  PRIMARY KEY (project_name, combo_key)
+);
+CREATE INDEX IF NOT EXISTS idx_combo_stats_project ON combo_stats_v1(project_name);
+CREATE TABLE IF NOT EXISTS combo_next_stats_v1 (
+  project_name TEXT NOT NULL,
+  prefix_key TEXT NOT NULL,
+  prefix_step_count INTEGER NOT NULL,
+  next_tool TEXT NOT NULL,
+  support_count INTEGER NOT NULL,
+  clean_run_count INTEGER NOT NULL,
+  faulted_run_count INTEGER NOT NULL,
+  avg_duration_ms INTEGER NOT NULL,
+  total_duration_ms INTEGER NOT NULL,
+  PRIMARY KEY (project_name, prefix_key, next_tool)
+);
+CREATE INDEX IF NOT EXISTS idx_combo_next_project ON combo_next_stats_v1(project_name);
+PRAGMA journal_mode=WAL;
 SQL
 
   # Migrate legacy UNIQUE(timestamp,tool,path_hash) schema to run_id-based dedupe.
@@ -213,33 +462,116 @@ SQL
     ensure_column telemetry ram_total_kb "ALTER TABLE telemetry ADD COLUMN ram_total_kb INTEGER DEFAULT -1;" || true
     ensure_column telemetry ram_available_kb "ALTER TABLE telemetry ADD COLUMN ram_available_kb INTEGER DEFAULT -1;" || true
     ensure_column telemetry load_avg_1m "ALTER TABLE telemetry ADD COLUMN load_avg_1m TEXT DEFAULT '-1';" || true
-      ensure_column telemetry filesystem_type "ALTER TABLE telemetry ADD COLUMN filesystem_type TEXT DEFAULT 'unknown';" || true
-      ensure_column telemetry storage_type "ALTER TABLE telemetry ADD COLUMN storage_type TEXT DEFAULT 'unknown';" || true
-      ensure_column telemetry run_id "ALTER TABLE telemetry ADD COLUMN run_id TEXT DEFAULT '';" || true
-    fi
-  }
+    ensure_column telemetry filesystem_type "ALTER TABLE telemetry ADD COLUMN filesystem_type TEXT DEFAULT 'unknown';" || true
+    ensure_column telemetry storage_type "ALTER TABLE telemetry ADD COLUMN storage_type TEXT DEFAULT 'unknown';" || true
+    ensure_column telemetry run_id "ALTER TABLE telemetry ADD COLUMN run_id TEXT DEFAULT '';" || true
+    ensure_column run_facts_v1 tool_sequence "ALTER TABLE run_facts_v1 ADD COLUMN tool_sequence TEXT NOT NULL DEFAULT '';" || true
+    ensure_column run_facts_v1 total_duration_ms "ALTER TABLE run_facts_v1 ADD COLUMN total_duration_ms INTEGER NOT NULL DEFAULT 0;" || true
+  fi
+}
 
 rebuild_analytics() {
   ensure_db
   local rebuilt_at
   rebuilt_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-  sqlite3 "$DB_FILE" <<SQL >/dev/null 2>&1 || die "analytics rebuild failed"
+sqlite3 "$DB_FILE" <<SQL >/dev/null 2>&1 || die "analytics rebuild failed"
 BEGIN IMMEDIATE;
+DELETE FROM run_steps_v1;
 DELETE FROM run_facts_v1;
-INSERT INTO run_facts_v1 (run_id, first_timestamp, last_timestamp, project_name, tool_count, nonzero_exit_count, tools_csv)
+DELETE FROM combo_stats_v1;
+DELETE FROM combo_next_stats_v1;
+INSERT INTO run_steps_v1 (run_id, step_index, project_name, tool, exit_code, duration_ms)
 SELECT
   run_id,
-  MIN(timestamp) AS first_timestamp,
-  MAX(timestamp) AS last_timestamp,
-  COALESCE(MAX(project_name), '') AS project_name,
-  COUNT(*) AS tool_count,
-  SUM(CASE WHEN exit_code != 0 THEN 1 ELSE 0 END) AS nonzero_exit_count,
-  COALESCE(group_concat(DISTINCT tool), '') AS tools_csv
+  ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY timestamp, id) AS step_index,
+  COALESCE(project_name, '') AS project_name,
+  tool,
+  exit_code,
+  duration_ms
 FROM telemetry
 WHERE COALESCE(run_id, '') != ''
-GROUP BY run_id;
-INSERT INTO analytics_meta (key, value) VALUES ('analytics_version', '1')
+;
+INSERT INTO run_facts_v1 (run_id, first_timestamp, last_timestamp, project_name, tool_count, nonzero_exit_count, tools_csv, tool_sequence, total_duration_ms)
+SELECT
+  t.run_id,
+  MIN(t.timestamp) AS first_timestamp,
+  MAX(t.timestamp) AS last_timestamp,
+  COALESCE(MAX(t.project_name), '') AS project_name,
+  COUNT(*) AS tool_count,
+  SUM(CASE WHEN t.exit_code != 0 THEN 1 ELSE 0 END) AS nonzero_exit_count,
+  COALESCE((
+    SELECT group_concat(tool, ',')
+    FROM (
+      SELECT DISTINCT rs.tool AS tool
+      FROM run_steps_v1 rs
+      WHERE rs.run_id = t.run_id
+      ORDER BY rs.tool
+    )
+  ), '') AS tools_csv,
+  COALESCE((
+    SELECT group_concat(tool, '>')
+    FROM (
+      SELECT rs2.tool AS tool
+      FROM run_steps_v1 rs2
+      WHERE rs2.run_id = t.run_id
+      ORDER BY rs2.step_index
+    )
+  ), '') AS tool_sequence,
+  COALESCE(SUM(t.duration_ms), 0) AS total_duration_ms
+FROM telemetry t
+WHERE COALESCE(t.run_id, '') != ''
+GROUP BY t.run_id;
+INSERT INTO combo_stats_v1 (project_name, combo_key, step_count, occurrence_count, clean_run_count, faulted_run_count, avg_duration_ms, total_duration_ms)
+SELECT
+  project_name,
+  tool_sequence AS combo_key,
+  tool_count AS step_count,
+  COUNT(*) AS occurrence_count,
+  SUM(CASE WHEN nonzero_exit_count = 0 THEN 1 ELSE 0 END) AS clean_run_count,
+  SUM(CASE WHEN nonzero_exit_count != 0 THEN 1 ELSE 0 END) AS faulted_run_count,
+  CAST(AVG(total_duration_ms) AS INTEGER) AS avg_duration_ms,
+  COALESCE(SUM(total_duration_ms), 0) AS total_duration_ms
+FROM run_facts_v1
+WHERE tool_sequence != ''
+GROUP BY project_name, tool_sequence, tool_count;
+WITH prefix_edges AS (
+  SELECT
+    rs.run_id,
+    rs.project_name,
+    rs.step_index AS prefix_step_count,
+    (
+      SELECT group_concat(tool, '>')
+      FROM (
+        SELECT prefix.tool AS tool
+        FROM run_steps_v1 prefix
+        WHERE prefix.run_id = rs.run_id
+          AND prefix.step_index <= rs.step_index
+        ORDER BY prefix.step_index
+      )
+    ) AS prefix_key,
+    next_rs.tool AS next_tool
+  FROM run_steps_v1 rs
+  JOIN run_steps_v1 next_rs
+    ON next_rs.run_id = rs.run_id
+   AND next_rs.step_index = rs.step_index + 1
+)
+INSERT INTO combo_next_stats_v1 (project_name, prefix_key, prefix_step_count, next_tool, support_count, clean_run_count, faulted_run_count, avg_duration_ms, total_duration_ms)
+SELECT
+  pe.project_name,
+  COALESCE(pe.prefix_key, ''),
+  pe.prefix_step_count,
+  pe.next_tool,
+  COUNT(*) AS support_count,
+  SUM(CASE WHEN rf.nonzero_exit_count = 0 THEN 1 ELSE 0 END) AS clean_run_count,
+  SUM(CASE WHEN rf.nonzero_exit_count != 0 THEN 1 ELSE 0 END) AS faulted_run_count,
+  CAST(AVG(rf.total_duration_ms) AS INTEGER) AS avg_duration_ms,
+  COALESCE(SUM(rf.total_duration_ms), 0) AS total_duration_ms
+FROM prefix_edges pe
+JOIN run_facts_v1 rf ON rf.run_id = pe.run_id
+WHERE COALESCE(pe.prefix_key, '') != ''
+GROUP BY pe.project_name, pe.prefix_key, pe.prefix_step_count, pe.next_tool;
+INSERT INTO analytics_meta (key, value) VALUES ('analytics_version', '2')
   ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 INSERT INTO analytics_meta (key, value) VALUES ('last_rebuilt_at', '$rebuilt_at')
   ON CONFLICT(key) DO UPDATE SET value=excluded.value;
@@ -257,12 +589,14 @@ fmetrics — performance telemetry and analytics for fsuite
 USAGE
   fmetrics <subcommand> [options]
 
-SUBCOMMANDS
-  stats              Show dashboard of tool usage, runtimes, reliability
-  history            Show recent runs (filterable)
-  predict <path>     Estimate how long fsuite tools will take on <path>
-  import             Ingest telemetry.jsonl into SQLite database
-  clean              Prune old telemetry data
+  SUBCOMMANDS
+    stats              Show dashboard of tool usage, runtimes, reliability
+    history            Show recent runs (filterable)
+    combos             Show telemetry-backed combo patterns
+    recommend          Suggest the strongest next tool after a prefix
+    predict <path>     Estimate how long fsuite tools will take on <path>
+    import             Ingest telemetry.jsonl into SQLite database
+    clean              Prune old telemetry data
   profile            Show machine profile (Tier 3 telemetry)
 
 OPTIONS (global)
@@ -272,10 +606,21 @@ OPTIONS (global)
   --self-check       Verify dependencies
   --install-hints    Print install commands for missing dependencies
 
-OPTIONS (history)
-  --tool <name>      Filter by tool (ftree, fsearch, fcontent)
-  --project <name>   Filter by project name
-  --limit <N>        Max rows (default 20)
+  OPTIONS (history)
+    --tool <name>      Filter by tool (ftree, fsearch, fcontent)
+    --project <name>   Filter by project name
+    --limit <N>        Max rows (default 20)
+
+  OPTIONS (combos)
+    --project <name>           Filter by project name
+    --starts-with <tool,...>   Require combo prefix
+    --contains <tool>          Require a tool anywhere in the combo
+    --min-occurrences <N>      Minimum occurrence count (default 1)
+
+  OPTIONS (recommend)
+    --after <tool,...>         Prefix to continue from
+    --project <name>           Filter by project name
+    --limit <N>                Max recommendations (default 20)
 
 OPTIONS (predict)
   --tool <name>      Predict for specific tool only (ftree, fsearch, fcontent)
@@ -289,13 +634,15 @@ ENVIRONMENT
   FSUITE_TELEMETRY=0  Disable telemetry collection in fsuite tools
 
 EXAMPLES
-  fmetrics import              Import telemetry data into SQLite
-  fmetrics stats               Show usage dashboard
-  fmetrics stats -o json       Machine-readable stats
-  fmetrics history --tool ftree --limit 10
-  fmetrics predict /project    Estimate runtimes for /project
-  fmetrics predict --tool ftree --mode snapshot /project
-  fmetrics clean --days 30     Remove data older than 30 days
+    fmetrics import              Import telemetry data into SQLite
+    fmetrics stats               Show usage dashboard
+    fmetrics stats -o json       Machine-readable stats
+    fmetrics history --tool ftree --limit 10
+    fmetrics combos --project fsuite -o json
+    fmetrics recommend --after ftree,fsearch --project fsuite
+    fmetrics predict /project    Estimate runtimes for /project
+    fmetrics predict --tool ftree --mode snapshot /project
+    fmetrics clean --days 30     Remove data older than 30 days
 EOF
 }
 
@@ -448,12 +795,12 @@ cmd_stats() {
       echo -n "{\"name\":\"$pname\",\"runs\":$pruns}"
     done < <(sqlite3 -separator '|' "$DB_FILE" "$projects_sql" 2>/dev/null)
     echo "]}"
-  else
-    echo "fmetrics stats"
-    echo "============================================"
-    echo ""
-    printf "  %-12s %6s %10s %10s %10s %9s\n" "Tool" "Runs" "Avg" "Min" "Max" "Success"
-    echo "  ----------------------------------------------------------"
+    else
+      echo "$(metric_title 'fmetrics stats')"
+      echo "$(metric_rule '============================================')"
+      echo ""
+      printf "  %-12s %6s %10s %10s %10s %9s\n" "Tool" "Runs" "Avg" "Min" "Max" "Success"
+      echo "$(metric_rule '  ----------------------------------------------------------')"
 
     while IFS='|' read -r t runs avg_ms min_ms max_ms sr; do
       printf "  %-12s %6s %10s %10s %10s %8s%%\n" \
@@ -461,15 +808,15 @@ cmd_stats() {
     done < <(sqlite3 -separator '|' "$DB_FILE" "$stats_sql" 2>/dev/null)
 
     echo ""
-    echo "  Top Projects:"
+      echo "$(metric_label '  Top Projects:')"
     while IFS='|' read -r pname pruns; do
       printf "    %-30s %d runs\n" "$pname" "$pruns"
     done < <(sqlite3 -separator '|' "$DB_FILE" "$projects_sql" 2>/dev/null)
 
     db_size=$(du -h "$DB_FILE" 2>/dev/null | cut -f1) || db_size="?"
     echo ""
-    echo "  Telemetry: $count total runs -- $oldest to $newest"
-    echo "  Database: $DB_FILE -- $db_size"
+      echo "  $(metric_label 'Telemetry:') $count total runs -- $oldest to $newest"
+      echo "  $(metric_label 'Database:') $DB_FILE -- $db_size"
   fi
 }
 
@@ -514,15 +861,202 @@ cmd_history() {
     local title="Recent Runs"
     [[ -n "${FILTER_TOOL:-}" ]] && title="Recent $FILTER_TOOL Runs"
     [[ -n "${FILTER_PROJECT:-}" ]] && title="$title (project: $FILTER_PROJECT)"
-    echo "fmetrics history — $title (last $LIMIT)"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    printf "  %-20s %-12s %-12s %-12s %8s %6s %8s %6s\n" "Timestamp" "Tool" "Mode" "Project" "Time" "Items" "Bytes" "Exit"
-    echo "  ─────────────────────────────────────────────────────────────────────────────────────────────"
+      echo "$(metric_title "fmetrics history — $title (last $LIMIT)")"
+      echo "$(metric_rule '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')"
+      printf "  %-20s %-12s %-12s %-12s %8s %6s %8s %6s\n" "Timestamp" "Tool" "Mode" "Project" "Time" "Items" "Bytes" "Exit"
+      echo "$(metric_rule '  ─────────────────────────────────────────────────────────────────────────────────────────────')"
 
     while IFS='|' read -r ts t mode pn dur ec items bytes backend; do
       printf "  %-20s %-12s %-12s %-12s %8s %6s %8s %6s\n" \
         "$ts" "$t" "$mode" "${pn:0:12}" "$(human_ms "$dur")" "$items" "$(human_bytes "$bytes")" "$ec"
     done < <(sqlite3 -separator '|' "$DB_FILE" "SELECT timestamp,tool,mode,project_name,duration_ms,exit_code,items_scanned,bytes_scanned,backend FROM telemetry $where ORDER BY timestamp DESC LIMIT $LIMIT;" 2>/dev/null)
+  fi
+}
+
+# -------------------------
+# Subcommand: combos
+# -------------------------
+cmd_combos() {
+  ensure_analytics_populated
+
+  local safe_project safe_contains safe_starts prefix_key
+  safe_project=$(sanitize_project_name "${FILTER_PROJECT:-}")
+  safe_contains=$(sanitize_tool_token "${COMBO_CONTAINS:-}")
+  safe_starts=$(sanitize_tool_csv "${COMBO_STARTS_WITH:-}")
+  prefix_key="${safe_starts//,/>}"
+
+  local where_clauses=()
+  [[ -n "$safe_project" ]] && where_clauses+=("project_name='$safe_project'")
+  [[ -n "$prefix_key" ]] && where_clauses+=("(combo_key='$prefix_key' OR combo_key LIKE '$prefix_key>%')")
+  [[ -n "$safe_contains" ]] && where_clauses+=("('>' || combo_key || '>') LIKE '%>$safe_contains>%'")
+  where_clauses+=("occurrence_count >= ${MIN_OCCURRENCES}")
+
+  local where=""
+  if (( ${#where_clauses[@]} > 0 )); then
+    local joined="" clause
+    for clause in "${where_clauses[@]}"; do
+      [[ -n "$joined" ]] && joined+=" AND "
+      joined+="$clause"
+    done
+    where="WHERE $joined"
+  fi
+
+  local combo_rows total_rows
+  combo_rows=$(sqlite3 -separator '|' "$DB_FILE" "SELECT combo_key, step_count, occurrence_count, clean_run_count, faulted_run_count, avg_duration_ms FROM combo_stats_v1 $where ORDER BY occurrence_count DESC, clean_run_count DESC, faulted_run_count ASC, avg_duration_ms ASC, combo_key ASC LIMIT $LIMIT;" 2>/dev/null) || combo_rows=""
+  total_rows=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM combo_stats_v1 $where;" 2>/dev/null) || total_rows=0
+  [[ "$total_rows" =~ ^[0-9]+$ ]] || total_rows=0
+
+  if [[ -z "$combo_rows" ]]; then
+    local details_json
+      details_json=$(printf '"project":"%s","starts_with":%s,"contains":"%s","min_occurrences":%s,"limit":%s' \
+        "$(printf '%s' "$safe_project" | json_escape)" \
+        "$(delimited_to_json_array "$safe_starts" ',')" \
+        "$(printf '%s' "$safe_contains" | json_escape)" \
+        "$MIN_OCCURRENCES" \
+        "$LIMIT")
+    if [[ "$OUTPUT" == "json" ]]; then
+      emit_json_error "combos" "insufficient_data" "No combos matched the current filters." "$details_json"
+    else
+      echo "No combos matched the current filters."
+    fi
+    return 0
+  fi
+
+  if [[ "$OUTPUT" == "json" ]]; then
+    printf '{"tool":"fmetrics","version":"%s","subcommand":"combos","filters":{"project":"%s","starts_with":%s,"contains":"%s","limit":%s,"min_occurrences":%s},"combos":[' \
+      "$VERSION" \
+      "$(printf '%s' "$safe_project" | json_escape)" \
+      "$(delimited_to_json_array "$safe_starts" ',')" \
+      "$(printf '%s' "$safe_contains" | json_escape)" \
+      "$LIMIT" \
+      "$MIN_OCCURRENCES"
+    local first=1 combo_key step_count occurrences clean_runs faulted_runs avg_duration_ms
+    while IFS='|' read -r combo_key step_count occurrences clean_runs faulted_runs avg_duration_ms; do
+      [[ -n "$combo_key" ]] || continue
+      local steps_json fault_rate clean_rate score because_json
+      steps_json=$(delimited_to_json_array "$combo_key" '>')
+      fault_rate=$(decimal_ratio "$faulted_runs" "$occurrences")
+      clean_rate=$(decimal_ratio "$clean_runs" "$occurrences")
+      score=$(combo_score "$occurrences" "$clean_runs" "$faulted_runs" "$avg_duration_ms")
+      because_json=$(combo_because_json "$occurrences" "$clean_runs" "$faulted_runs" "$avg_duration_ms")
+      (( first )) || printf ','
+      first=0
+      printf '{"combo_key":"%s","steps":%s,"step_count":%s,"occurrences":%s,"clean_run_rate":%s,"fault_rate":%s,"avg_duration_ms":%s,"score":%s,"evidence":{"clean_runs":%s,"faulted_runs":%s,"total_runs":%s},"because":%s}' \
+        "$(printf '%s' "$combo_key" | json_escape)" \
+        "$steps_json" \
+        "$step_count" \
+        "$occurrences" \
+        "$clean_rate" \
+        "$fault_rate" \
+        "$avg_duration_ms" \
+        "$score" \
+        "$clean_runs" \
+        "$faulted_runs" \
+        "$occurrences" \
+        "$because_json"
+    done <<<"$combo_rows"
+    printf '],"total_combos":%s}\n' "$total_rows"
+    else
+      echo "$(metric_title 'fmetrics combos')"
+      echo "$(metric_rule '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')"
+      printf "  %-30s %6s %6s %8s %10s\n" "Combo" "Runs" "Clean" "Fault" "Avg Time"
+      echo "$(metric_rule '  ─────────────────────────────────────────────────────────────────────────────────────────────')"
+    local combo_key step_count occurrences clean_runs faulted_runs avg_duration_ms
+    while IFS='|' read -r combo_key step_count occurrences clean_runs faulted_runs avg_duration_ms; do
+      printf "  %-30s %6s %6s %8s %10s\n" \
+        "${combo_key:0:30}" "$occurrences" "$clean_runs" "$faulted_runs" "$(human_ms "$avg_duration_ms")"
+    done <<<"$combo_rows"
+  fi
+}
+
+# -------------------------
+# Subcommand: recommend
+# -------------------------
+cmd_recommend() {
+  ensure_analytics_populated
+
+  local safe_project safe_after prefix_key
+  safe_project=$(sanitize_project_name "${FILTER_PROJECT:-}")
+  safe_after=$(sanitize_tool_csv "${RECOMMEND_AFTER:-}")
+  [[ -n "$safe_after" ]] || die "--after requires at least one tool"
+  prefix_key="${safe_after//,/>}"
+
+  local where_clauses=("prefix_key='$prefix_key'")
+  [[ -n "$safe_project" ]] && where_clauses+=("project_name='$safe_project'")
+
+  local where=""
+  if (( ${#where_clauses[@]} > 0 )); then
+    local joined="" clause
+    for clause in "${where_clauses[@]}"; do
+      [[ -n "$joined" ]] && joined+=" AND "
+      joined+="$clause"
+    done
+    where="WHERE $joined"
+  fi
+
+  local recommendation_rows total_samples
+  recommendation_rows=$(sqlite3 -separator '|' "$DB_FILE" "SELECT next_tool, support_count, clean_run_count, faulted_run_count, avg_duration_ms FROM combo_next_stats_v1 $where ORDER BY support_count DESC, clean_run_count DESC, faulted_run_count ASC, avg_duration_ms ASC, next_tool ASC LIMIT $LIMIT;" 2>/dev/null) || recommendation_rows=""
+  total_samples=$(sqlite3 "$DB_FILE" "SELECT COALESCE(SUM(support_count), 0) FROM combo_next_stats_v1 $where;" 2>/dev/null) || total_samples=0
+  [[ "$total_samples" =~ ^[0-9]+$ ]] || total_samples=0
+
+  if [[ -z "$recommendation_rows" ]]; then
+    local details_json
+      details_json=$(printf '"project":"%s","after":%s,"limit":%s' \
+        "$(printf '%s' "$safe_project" | json_escape)" \
+        "$(delimited_to_json_array "$safe_after" ',')" \
+        "$LIMIT")
+    if [[ "$OUTPUT" == "json" ]]; then
+      emit_json_error "recommend" "insufficient_data" "No recommendation history matched this prefix." "$details_json"
+    else
+      echo "No recommendation history matched this prefix."
+    fi
+    return 0
+  fi
+
+  if [[ "$OUTPUT" == "json" ]]; then
+    printf '{"tool":"fmetrics","version":"%s","subcommand":"recommend","prefix":%s,"filters":{"project":"%s","limit":%s},"recommendations":[' \
+      "$VERSION" \
+      "$(delimited_to_json_array "$safe_after" ',')" \
+      "$(printf '%s' "$safe_project" | json_escape)" \
+      "$LIMIT"
+    local first=1 next_tool support_count clean_runs faulted_runs avg_duration_ms
+    while IFS='|' read -r next_tool support_count clean_runs faulted_runs avg_duration_ms; do
+      [[ -n "$next_tool" ]] || continue
+      local fault_rate clean_rate confidence because_json resulting_combo rejected_samples
+      fault_rate=$(decimal_ratio "$faulted_runs" "$support_count")
+      clean_rate=$(decimal_ratio "$clean_runs" "$support_count")
+      confidence=$(combo_confidence "$support_count" "$faulted_runs")
+      because_json=$(recommend_because_json "$support_count" "$faulted_runs" "$next_tool")
+      resulting_combo="$prefix_key>$next_tool"
+      rejected_samples=$(( total_samples - support_count ))
+      (( first )) || printf ','
+      first=0
+      printf '{"next_step":"%s","resulting_combo":"%s","support":%s,"clean_run_rate":%s,"fault_rate":%s,"avg_duration_ms":%s,"confidence":"%s","evidence":{"clean_runs":%s,"faulted_runs":%s,"total_runs":%s,"rejected_samples":%s},"because":%s}' \
+        "$(printf '%s' "$next_tool" | json_escape)" \
+        "$(printf '%s' "$resulting_combo" | json_escape)" \
+        "$support_count" \
+        "$clean_rate" \
+        "$fault_rate" \
+        "$avg_duration_ms" \
+        "$confidence" \
+        "$clean_runs" \
+        "$faulted_runs" \
+        "$support_count" \
+        "$rejected_samples" \
+        "$because_json"
+    done <<<"$recommendation_rows"
+    printf '],"total_historical_samples":%s}\n' "$total_samples"
+    else
+      echo "$(metric_title 'fmetrics recommend')"
+      echo "$(metric_rule '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')"
+      printf "  %s %s\n" "$(metric_label 'Prefix:')" "$prefix_key"
+      printf "  %-18s %8s %8s %10s %12s\n" "Next Tool" "Support" "Faults" "Avg Time" "Confidence"
+      echo "$(metric_rule '  ─────────────────────────────────────────────────────────────────────────────────────────────')"
+    local next_tool support_count clean_runs faulted_runs avg_duration_ms
+    while IFS='|' read -r next_tool support_count clean_runs faulted_runs avg_duration_ms; do
+      printf "  %-18s %8s %8s %10s %12s\n" \
+        "$next_tool" "$support_count" "$faulted_runs" "$(human_ms "$avg_duration_ms")" "$(combo_confidence "$support_count" "$faulted_runs")"
+    done <<<"$recommendation_rows"
   fi
 }
 
@@ -675,14 +1209,14 @@ cmd_predict() {
       echo -n "{\"tool\":\"fmetrics\",\"version\":\"$VERSION\",\"subcommand\":\"predict\","
       echo -n "\"path\":\"$target\",\"features\":{\"items\":$total_items,\"bytes\":$total_bytes},"
       echo "\"error\":\"insufficient_data\",\"total_samples\":$count,\"minimum_required\":5}"
-    else
-      echo "fmetrics predict -- $target"
-      echo ""
-      echo "  Project: $total_items entries, ${size_mb}MB"
-      echo ""
-      echo "  Insufficient telemetry data: $count runs, need at least 5."
-      echo "  Run fsuite tools more to build prediction history."
-      echo "  Then: fmetrics import && fmetrics predict $target"
+      else
+        echo "$(metric_title "fmetrics predict -- $target")"
+        echo ""
+        echo "  $(metric_label 'Project:') $total_items entries, ${size_mb}MB"
+        echo ""
+        echo "  $(metric_warn 'Insufficient telemetry data:') $count runs, need at least 5."
+        echo "  Run fsuite tools more to build prediction history."
+        echo "  Then: fmetrics import && fmetrics predict $target"
     fi
     return 0
   fi
@@ -702,14 +1236,14 @@ cmd_predict() {
       if [[ "$OUTPUT" == "json" ]]; then
         echo "$pred_json"
         else
-          echo "fmetrics predict -- $target"
-          echo "============================================"
+            echo "$(metric_title "fmetrics predict -- $target")"
+            echo "$(metric_rule '============================================')"
+            echo ""
+            echo "$(metric_label '  Project Characteristics:')"
+          echo "    $(metric_info 'Items:') $total_items"
+          echo "    $(metric_info 'Size:')  ${size_mb}MB"
           echo ""
-          echo "  Project Characteristics:"
-        echo "    Items: $total_items"
-        echo "    Size:  ${size_mb}MB"
-        echo ""
-        echo "  Estimated Runtimes:"
+          echo "$(metric_label '  Estimated Runtimes:')"
         local formatted_predictions=""
           formatted_predictions=$(printf '%s' "$pred_json" | python3 -c '
 import json, sys
@@ -866,12 +1400,12 @@ PY
     [[ -n "$predictions_json" ]] || predictions_json=$(_predict_json_average_fallback "$target" "$total_items" "$total_bytes" "$count")
     echo "$predictions_json"
   else
-    echo "fmetrics predict -- $target"
-    echo "============================================"
-    echo ""
-    echo "  Project: $total_items entries, ${size_mb}MB"
-    echo ""
-    echo "  Estimated Runtimes - based on historical averages:"
+      echo "$(metric_title "fmetrics predict -- $target")"
+      echo "$(metric_rule '============================================')"
+      echo ""
+      echo "  $(metric_label 'Project:') $total_items entries, ${size_mb}MB"
+      echo ""
+      echo "$(metric_label '  Estimated Runtimes — based on historical averages:')"
     local t avg_ms mode
     local _predict_tools=(ftree fsearch fcontent)
     [[ -n "${PREDICT_TOOL:-}" ]] && _predict_tools=("$PREDICT_TOOL")
@@ -923,9 +1457,9 @@ cmd_clean() {
     if [[ "$OUTPUT" == "json" ]]; then
       echo "{\"tool\":\"fmetrics\",\"version\":\"$VERSION\",\"subcommand\":\"clean\",\"dry_run\":true,\"days\":$days,\"cutoff\":\"$cutoff\",\"would_delete\":$to_delete,\"would_keep\":$to_keep}"
     else
-      echo "fmetrics clean (dry run)"
-      echo "  Would delete $to_delete records older than $days days"
-      echo "  Would keep $to_keep records"
+        echo "$(metric_title 'fmetrics clean (dry run)')"
+        echo "  Would delete $to_delete records older than $days days"
+        echo "  Would keep $to_keep records"
     fi
     return 0
   fi
@@ -947,10 +1481,10 @@ cmd_clean() {
   else
     local db_size
     db_size=$(du -h "$DB_FILE" 2>/dev/null | cut -f1) || db_size="?"
-    echo "Cleaning telemetry older than $days days..."
-    echo "  Deleted $to_delete records"
-    echo "  Kept $to_keep records"
-    echo "  Database: $DB_FILE ($db_size)"
+      echo "$(metric_title "Cleaning telemetry older than $days days...")"
+      echo "  Deleted $to_delete records"
+      echo "  Kept $to_keep records"
+      echo "  $(metric_label 'Database:') $DB_FILE ($db_size)"
   fi
 }
 
@@ -964,7 +1498,7 @@ cmd_profile() {
     if [[ "$OUTPUT" == "json" ]]; then
       echo "{\"tool\":\"fmetrics\",\"version\":\"$VERSION\",\"subcommand\":\"profile\",\"error\":\"no profile\",\"hint\":\"Run any fsuite tool with FSUITE_TELEMETRY=3 to generate\"}"
     else
-      echo "No machine profile found."
+      echo "$(metric_warn 'No machine profile found.')"
       echo "Generate one by running any fsuite tool with FSUITE_TELEMETRY=3"
       echo "Example: FSUITE_TELEMETRY=3 ftree ."
     fi
@@ -974,9 +1508,9 @@ cmd_profile() {
   if [[ "$OUTPUT" == "json" ]]; then
     cat "$profile_file"
   else
-    echo "Machine Profile ($profile_file)"
-    echo "================================"
-    cat "$profile_file" | sed 's/[{}",]//g' | sed 's/^ */  /' | grep -v '^$'
+      echo "$(metric_title "Machine Profile ($profile_file)")"
+      echo "$(metric_rule '================================')"
+      cat "$profile_file" | sed 's/[{}",]//g' | sed 's/^ */  /' | grep -v '^$'
   fi
 }
 
@@ -1042,6 +1576,10 @@ FILTER_PROJECT=""
 PREDICT_MODE=""
 PREDICT_PATH=""
 CLEAN_DAYS="$DEFAULT_CLEAN_DAYS"
+COMBO_STARTS_WITH=""
+COMBO_CONTAINS=""
+MIN_OCCURRENCES="$DEFAULT_MIN_OCCURRENCES"
+RECOMMEND_AFTER=""
 DRY_RUN=0
 
 POSITIONAL=()
@@ -1068,6 +1606,20 @@ while [[ $# -gt 0 ]]; do
       LIMIT="$2"
       [[ "$LIMIT" =~ ^[0-9]+$ ]] || die "--limit must be a positive integer"
       shift 2 ;;
+    --starts-with)
+      [[ -n "${2:-}" ]] || die "Missing value for $1"
+      COMBO_STARTS_WITH="$2"; shift 2 ;;
+    --contains)
+      [[ -n "${2:-}" ]] || die "Missing value for $1"
+      COMBO_CONTAINS="$2"; shift 2 ;;
+    --min-occurrences)
+      [[ -n "${2:-}" ]] || die "Missing value for $1"
+      MIN_OCCURRENCES="$2"
+      [[ "$MIN_OCCURRENCES" =~ ^[0-9]+$ ]] || die "--min-occurrences must be a positive integer"
+      shift 2 ;;
+    --after)
+      [[ -n "${2:-}" ]] || die "Missing value for $1"
+      RECOMMEND_AFTER="$2"; shift 2 ;;
     --days)
       [[ -n "${2:-}" ]] || die "Missing value for $1"
       CLEAN_DAYS="$2"
@@ -1091,10 +1643,18 @@ SUBCOMMAND="${POSITIONAL[0]:-}"
 if [[ -n "$PREDICT_MODE" && "$SUBCOMMAND" != "predict" ]]; then
   die "--mode is only valid with the predict subcommand"
 fi
+if [[ -n "$COMBO_STARTS_WITH" || -n "$COMBO_CONTAINS" || "$MIN_OCCURRENCES" != "$DEFAULT_MIN_OCCURRENCES" ]] && [[ "$SUBCOMMAND" != "combos" ]]; then
+  die "--starts-with, --contains, and --min-occurrences are only valid with the combos subcommand"
+fi
+if [[ -n "$RECOMMEND_AFTER" && "$SUBCOMMAND" != "recommend" ]]; then
+  die "--after is only valid with the recommend subcommand"
+fi
 
 case "$SUBCOMMAND" in
   stats)   cmd_stats ;;
   history) cmd_history ;;
+  combos)  cmd_combos ;;
+  recommend) cmd_recommend ;;
   predict)
     PREDICT_PATH="${POSITIONAL[1]:-}"
     [[ -n "$PREDICT_PATH" ]] || die "predict requires a path argument"

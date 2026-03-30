@@ -104,6 +104,32 @@ INSERT INTO telemetry (timestamp,tool,version,mode,path_hash,project_name,durati
 SQL
 }
 
+seed_combo_fixture_db() {
+  mkdir -p "$HOME/.fsuite"
+  rm -f "$HOME/.fsuite/telemetry.jsonl" "$HOME/.fsuite/telemetry.db"
+  : > "$HOME/.fsuite/telemetry.jsonl"
+  run_fmetrics import >/dev/null 2>&1 || true
+
+  sqlite3 "$HOME/.fsuite/telemetry.db" <<'SQL'
+DELETE FROM telemetry;
+INSERT INTO telemetry (timestamp,tool,version,mode,path_hash,project_name,duration_ms,exit_code,depth,items_scanned,bytes_scanned,flags,backend,run_id) VALUES
+  ('2026-03-20T00:00:00Z','ftree','2.3.0','snapshot','combo-a1','ComboProj',10,0,1,10,1000,'--snapshot','tree','run-alpha'),
+  ('2026-03-20T00:00:01Z','fsearch','2.3.0','glob','combo-a2','ComboProj',20,0,1,8,800,'*.rs','find','run-alpha'),
+  ('2026-03-20T00:00:02Z','fmap','2.3.0','map','combo-a3','ComboProj',30,0,1,6,600,'','map','run-alpha'),
+  ('2026-03-20T00:01:00Z','ftree','2.3.0','snapshot','combo-b1','ComboProj',11,0,1,10,1000,'--snapshot','tree','run-bravo'),
+  ('2026-03-20T00:01:01Z','fsearch','2.3.0','glob','combo-b2','ComboProj',21,0,1,8,800,'*.rs','find','run-bravo'),
+  ('2026-03-20T00:01:02Z','fmap','2.3.0','map','combo-b3','ComboProj',29,0,1,6,600,'','map','run-bravo'),
+  ('2026-03-20T00:02:00Z','ftree','2.3.0','snapshot','combo-c1','ComboProj',12,0,1,10,1000,'--snapshot','tree','run-charlie'),
+  ('2026-03-20T00:02:01Z','fsearch','2.3.0','glob','combo-c2','ComboProj',19,0,1,8,800,'*.rs','find','run-charlie'),
+  ('2026-03-20T00:02:02Z','fread','2.3.0','lines','combo-c3','ComboProj',40,1,1,6,600,'--around auth','read','run-charlie'),
+  ('2026-03-20T00:03:00Z','ftree','2.3.0','snapshot','combo-d1','OtherProj',9,0,1,10,1000,'--snapshot','tree','run-delta'),
+  ('2026-03-20T00:03:01Z','fsearch','2.3.0','glob','combo-d2','OtherProj',16,0,1,8,800,'*.py','find','run-delta'),
+  ('2026-03-20T00:03:02Z','fread','2.3.0','lines','combo-d3','OtherProj',25,0,1,6,600,'--around main','read','run-delta');
+SQL
+
+  run_fmetrics clean --days 9999 >/dev/null 2>&1
+}
+
 test_import_rebuilds_run_facts_analytics() {
   mkdir -p "$HOME/.fsuite"
   cat > "$HOME/.fsuite/telemetry.jsonl" <<'JSONL'
@@ -141,6 +167,88 @@ SQL
     pass "Clean rebuilds run_facts_v1 after direct seed"
   else
     fail "Clean should rebuild run_facts_v1 after direct seed" "Got: $row"
+  fi
+}
+
+test_v17_combos_reports_ordered_sequences() {
+  seed_combo_fixture_db
+  local output
+  output=$(run_fmetrics combos --project ComboProj -o json 2>&1) || true
+
+  if python3 -c '
+import json, sys
+data = json.loads(sys.stdin.read())
+assert data["subcommand"] == "combos"
+target = next(c for c in data["combos"] if c["combo_key"] == "ftree>fsearch>fmap")
+assert target["steps"] == ["ftree", "fsearch", "fmap"]
+assert target["occurrences"] == 2
+assert target["evidence"]["clean_runs"] == 2
+assert target["evidence"]["faulted_runs"] == 0
+assert abs(float(target["fault_rate"])) < 1e-9
+assert target["because"]
+' <<<"$output" 2>/dev/null; then
+    pass "fmetrics combos reports ordered sequences with evidence"
+  else
+    fail "combos should report ordered sequences with evidence" "Got: $output"
+  fi
+}
+
+test_v17_combos_filters_and_errors() {
+  seed_combo_fixture_db
+  local filtered missing
+  filtered=$(run_fmetrics combos --project ComboProj --starts-with ftree,fsearch --contains fmap -o json 2>&1) || true
+  missing=$(run_fmetrics combos --project ComboProj --min-occurrences 5 -o json 2>&1) || true
+
+  if python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+assert len(data["combos"]) == 1
+assert data["combos"][0]["combo_key"] == "ftree>fsearch>fmap"
+err = json.loads(sys.argv[2])
+assert err["error"]["code"] == "insufficient_data"
+' "$filtered" "$missing" 2>/dev/null; then
+    pass "fmetrics combos supports filters and structured insufficient-data errors"
+  else
+    fail "combos filters or error envelope are wrong" "filtered=$filtered missing=$missing"
+  fi
+}
+
+test_v17_recommend_suggests_next_step() {
+  seed_combo_fixture_db
+  local output
+  output=$(run_fmetrics recommend --after ftree,fsearch --project ComboProj -o json 2>&1) || true
+
+  if python3 -c '
+import json, sys
+data = json.loads(sys.stdin.read())
+assert data["subcommand"] == "recommend"
+assert data["prefix"] == ["ftree", "fsearch"]
+top = data["recommendations"][0]
+assert top["next_step"] == "fmap"
+assert top["support"] == 2
+assert abs(float(top["fault_rate"])) < 1e-9
+assert top["confidence"] in {"medium", "high"}
+assert top["because"]
+' <<<"$output" 2>/dev/null; then
+    pass "fmetrics recommend suggests the strongest next step"
+  else
+    fail "recommend should suggest the strongest next step" "Got: $output"
+  fi
+}
+
+test_v17_recommend_returns_structured_error_without_next_step() {
+  seed_combo_fixture_db
+  local output
+  output=$(run_fmetrics recommend --after ftree,fsearch,fmap --project ComboProj -o json 2>&1) || true
+
+  if python3 -c '
+import json, sys
+data = json.loads(sys.stdin.read())
+assert data["error"]["code"] == "insufficient_data"
+' <<<"$output" 2>/dev/null; then
+    pass "fmetrics recommend returns structured error when no next step exists"
+  else
+    fail "recommend should return structured insufficient-data error" "Got: $output"
   fi
 }
 
@@ -1039,6 +1147,10 @@ main() {
   run_test "Migration rollback on failure preserves data" test_migration_atomicity
   run_test "Import rebuilds run_facts_v1 analytics" test_import_rebuilds_run_facts_analytics
   run_test "Clean rebuilds run_facts_v1 after direct seed" test_clean_rebuilds_run_facts_after_direct_seed
+  run_test "fmetrics combos reports ordered sequences" test_v17_combos_reports_ordered_sequences
+  run_test "fmetrics combos filters and errors" test_v17_combos_filters_and_errors
+  run_test "fmetrics recommend suggests next step" test_v17_recommend_suggests_next_step
+  run_test "fmetrics recommend structured no-next-step error" test_v17_recommend_returns_structured_error_without_next_step
 
   echo ""
   echo "== Metacharacter Warning =="
