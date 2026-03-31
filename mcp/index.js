@@ -1105,7 +1105,7 @@ server.registerTool(
         intent: z.enum(["auto", "file", "content", "symbol", "nav"]).optional()
           .describe("Override auto-classification. Default: auto"),
         compact: z.boolean().optional()
-          .describe("Compact mode: relative paths, no next_hints, minimal per-hit data. Saves tokens."),
+          .describe("Nav-only compact mode: relative paths, no next_hint, minimal per-hit data. Ignored for non-nav intents."),
       }),
       // outputSchema removed: 2.1.88 StructuredOutput schema cache bug
   },

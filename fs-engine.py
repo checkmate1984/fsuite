@@ -611,11 +611,20 @@ def orchestrate(request):
         compact_hits = []
         for h in hits:
             ch = {"path": os.path.relpath(h.get("path", ""), base), "kind": h.get("kind", "file")}
-            if "preview" in h:
-                ch["preview"] = [
-                    {"name": c.get("name", ""), "kind": c.get("kind", "file")}
-                    for c in h["preview"] if isinstance(c, dict)
-                ]
+            preview_items = h.get("preview")
+            if isinstance(preview_items, (list, tuple)):
+                compact_preview = []
+                for c in preview_items:
+                    if not isinstance(c, dict):
+                        continue
+                    name = c.get("name")
+                    if not isinstance(name, str) or not name:
+                        continue
+                    kind = c.get("kind")
+                    if not isinstance(kind, str) or not kind:
+                        kind = "file"
+                    compact_preview.append({"name": name, "kind": kind})
+                ch["preview"] = compact_preview
             compact_hits.append(ch)
         hits = compact_hits
 

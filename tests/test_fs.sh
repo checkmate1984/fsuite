@@ -693,6 +693,44 @@ else
   echo -e "${RED}✗${NC} 8.3 compact should be ignored for symbol: check=$symbol_check"
 fi
 
+# 8.4 — compact nav tolerates malformed preview containers/items
+TESTS_RUN=$((TESTS_RUN + 1))
+preview_check=$(python3 - "$ENGINE" 2>/dev/null <<'PY'
+import importlib.util
+import json
+import sys
+
+engine_path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("fs_engine_test", engine_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+mod.run_fsearch_json = lambda query, path, max_results=None, timeout=None: ({}, False)
+mod.shape_nav_hits = lambda result: [
+    {"path": "/tmp/docs", "kind": "dir", "preview": None},
+    {"path": "/tmp/api", "kind": "dir", "preview": ["bad", {"name": "ok"}, {"kind": "dir"}, {"name": "fine", "kind": "dir"}]},
+]
+
+out = mod.orchestrate({"query": "docs", "path": "/tmp", "intent": "nav", "compact": True})
+hits = out["hits"]
+print(
+    ("preview" not in hits[0]) and
+    (hits[1].get("preview") == [{"name": "ok", "kind": "file"}, {"name": "fine", "kind": "dir"}])
+)
+PY
+)
+preview_rc=$?
+if [[ $preview_rc -ne 0 ]]; then
+  preview_check="FAIL"
+fi
+if [[ "$preview_check" == "True" ]]; then
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+  echo -e "${GREEN}✓${NC} 8.4 compact nav tolerates malformed preview data"
+else
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  echo -e "${RED}✗${NC} 8.4 compact nav should skip malformed preview data: check=$preview_check"
+fi
+
 # ============================================================================
 # Results
 # ============================================================================
