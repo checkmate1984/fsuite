@@ -571,7 +571,7 @@ test_max_limit_with_include_filter_total_count() {
   output=$("${FSEARCH}" --output json --max 10 --include "*/z/*" "*.log" "${scoped}" 2>&1)
   # total_found is the collected count (MAX+1=11) when truncated, not an
   # exact recount.  shown should be capped at MAX (10).
-  if [[ "$output" =~ \"total_found\":11 ]] && [[ "$output" =~ \"shown\":10 ]]; then
+  if [[ "$output" =~ \"total_found\":11 ]] && [[ "$output" =~ \"shown\":10 ]] && [[ "$output" =~ \"count_mode\":\"lower_bound\" ]]; then
     pass "JSON filtered total_found reports capped count with max cap"
   else
     fail "Filtered max JSON count is incorrect" "Output: $output"
@@ -895,59 +895,71 @@ test_default_flag_seeding() {
 # ============================================================================
 
 test_match_both_excludes_node_modules() {
-  # Create a node_modules subtree where the query matches only via path.
-  # The bug was that find enumerated node_modules contents even though
-  # EXCLUDE_PATTERNS should prune them.  The test detects this by checking
-  # that node_modules items never reach the find output at all — not just
-  # that they're absent from final JSON (filter_results_stream hid them
-  # even in the broken version).
-  mkdir -p "${TEST_DIR}/node_modules/auth-lib/src"
-  touch "${TEST_DIR}/node_modules/auth-lib/src/handler.ts"
-  touch "${TEST_DIR}/node_modules/auth-lib/index.js"
+  # The bug: run_find in path/both mode ran bare `find` with no prune,
+  # so it traversed all of node_modules.  filter_results_stream hid them
+  # from output, making result-based assertions useless.
+  #
+  # This test uses the FSEARCH_META debug hook to observe how many items
+  # the pipeline actually enumerated BEFORE filtering.  With prune, find
+  # never enters node_modules so items_enumerated stays small.  Without
+  # prune, find enumerates every file in node_modules even though the
+  # filter later removes them.
+  mkdir -p "${TEST_DIR}/node_modules/xyzzy-pkg/lib"
+  for i in $(seq 1 100); do : > "${TEST_DIR}/node_modules/xyzzy-pkg/lib/f${i}.js"; done
+  mkdir -p "${TEST_DIR}/src/xyzzy"
+  touch "${TEST_DIR}/src/xyzzy/real.ts"
 
-  # Trace: run fsearch with strace/ltrace is overkill; instead count
-  # how many paths the internal find actually emits by temporarily
-  # making the query match everything in node_modules via path.
-  # If prune works, find never enters node_modules at all, so the
-  # total_found should equal only the src/auth hits.
-  local output total
-  output=$("${FSEARCH}" -o json --type both --match both -m 200 auth "${TEST_DIR}" 2>&1)
-  total=$(echo "$output" | python3 -c 'import sys,json; print(json.load(sys.stdin)["total_found"])')
+  local meta_file
+  meta_file=$(mktemp)
+  FSEARCH_META="$meta_file" "${FSEARCH}" -o json --type both --match both -m 200 xyzzy "${TEST_DIR}" >/dev/null 2>&1
 
-  # Only src/auth and src/auth/index.ts should match.  If node_modules
-  # paths leaked into the pipeline, total would be higher (5+).
-  if (( total <= 3 )); then
-    pass "match-both excludes node_modules path hits (total=$total)"
+  local enumerated
+  enumerated=$(python3 -c "import sys,json; print(json.load(open('$meta_file'))['items_enumerated'])")
+  rm -f "$meta_file"
+
+  # With prune: find never enters node_modules, so enumerated should be
+  # very small (just the src/xyzzy tree + a few top-level items).
+  # Without prune: find lists 100+ files in node_modules/xyzzy-pkg/lib,
+  # so enumerated would be >100.
+  if (( enumerated < 30 )); then
+    pass "match-both prunes node_modules at find level (enumerated=$enumerated)"
   else
-    fail "match-both excludes node_modules path hits" "total_found=$total; node_modules items leaked into pipeline"
+    fail "match-both prunes node_modules at find level" "items_enumerated=$enumerated (want <30; find is traversing excluded dirs)"
   fi
+
+  rm -rf "${TEST_DIR}/node_modules/xyzzy-pkg" "${TEST_DIR}/src/xyzzy"
 }
 
 test_match_both_no_recount_on_truncation() {
   # The old code ran the full search pipeline TWICE when results > MAX:
   # once for results (head -n MAX+1), again unbounded for wc -l.
   # On large trees this doubled runtime.  After the fix, total_found
-  # should equal the collected count (MAX+1) when truncated, NOT an
-  # exact full count.  This test creates more matches than MAX (50)
-  # and asserts total_found == 51 (the capped count), not the exact
-  # count.  If someone reintroduces the recount, total_found will
-  # be the exact number (e.g. 60) and this test will fail.
+  # is the collected count (MAX+1) when truncated, and total_found_exact
+  # is false.  If someone reintroduces the recount, total_found will be
+  # the exact number (60) and/or total_found_exact will be true/missing.
   local matchdir="${TEST_DIR}/many_matches"
   mkdir -p "$matchdir"
   for i in $(seq 1 60); do
     touch "$matchdir/item_${i}.txt"
   done
 
-  local output total
+  local output total count_mode truncated has_more
   output=$("${FSEARCH}" -o json --match both -m 50 item "${matchdir}" 2>&1)
-  total=$(echo "$output" | python3 -c 'import sys,json; print(json.load(sys.stdin)["total_found"])')
+  total=$(echo "$output" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["total_found"])')
+  count_mode=$(echo "$output" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("count_mode","MISSING"))')
+  truncated=$(echo "$output" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("truncated","MISSING"))')
+  has_more=$(echo "$output" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("has_more","MISSING"))')
 
-  # With no recount, total_found should be 51 (MAX+1 collected).
-  # With the old recount, it would be 60 (exact).
-  if (( total == 51 )); then
-    pass "Truncated search reports capped total (no recount)"
+  local ok=1
+  (( total == 51 )) || ok=0
+  [[ "$count_mode" == "lower_bound" ]] || ok=0
+  [[ "$truncated" == "True" ]] || ok=0
+  [[ "$has_more" == "True" ]] || ok=0
+
+  if (( ok )); then
+    pass "Truncated search: count_mode=lower_bound, truncated=true, has_more=true"
   else
-    fail "Truncated search reports capped total (no recount)" "total_found=$total; expected 51 (recount may have been reintroduced)"
+    fail "Truncated search contract" "total=$total (want 51), count_mode=$count_mode, truncated=$truncated, has_more=$has_more"
   fi
 }
 

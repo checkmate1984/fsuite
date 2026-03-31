@@ -191,8 +191,10 @@ path_matches_filter() {
 
 filter_results_stream() {
   local item pattern include_match exclude_match
+  local _enumerated=0 _passed=0
   while IFS= read -r item; do
     [[ -z "$item" ]] && continue
+    (( _enumerated++ )) || true
 
     if (( ${#INCLUDE_PATTERNS[@]} > 0 )); then
       include_match=0
@@ -216,8 +218,13 @@ filter_results_stream() {
       (( exclude_match == 1 )) && continue
     fi
 
+    (( _passed++ )) || true
     printf "%s\n" "$item"
   done
+  # Write pipeline counters when FSEARCH_META is set (test/debug hook).
+  if [[ -n "${FSEARCH_META:-}" ]]; then
+    printf '{"items_enumerated":%d,"items_after_filter":%d}\n' "$_enumerated" "$_passed" > "$FSEARCH_META"
+  fi
 }
 
 usage() {
@@ -817,10 +824,16 @@ else
 fi
 
 TOTAL_FOUND="${#RESULTS[@]}"
-# When results exceed MAX, report the collected count (MAX+1) rather than
-# rerunning the entire search pipeline unbounded just to get an exact total.
-# The recount was O(2N) and caused 10s+ timeouts on large trees.
-# Callers already have "truncated: true" to know there are more.
+TRUNCATED=false
+COUNT_MODE="exact"
+HAS_MORE=false
+# When results exceed MAX, we know there are more but don't recount the
+# entire pipeline (was O(2N) and caused 10s+ timeouts on large trees).
+if (( TOTAL_FOUND > MAX )); then
+  TRUNCATED=true
+  COUNT_MODE="lower_bound"
+  HAS_MORE=true
+fi
 SHOWN="$TOTAL_FOUND"
 if (( SHOWN > MAX )); then SHOWN="$MAX"; fi
 
@@ -855,6 +868,9 @@ if [[ "$OUTPUT" == "json" ]]; then
   echo -n "\"preview_limit\":$PREVIEW,"
   echo -n "\"total_found\":$TOTAL_FOUND,"
   echo -n "\"shown\":$SHOWN,"
+  echo -n "\"truncated\":$TRUNCATED,"
+  echo -n "\"count_mode\":\"$COUNT_MODE\","
+  echo -n "\"has_more\":$HAS_MORE,"
   echo -n "\"results\":["
   for ((i=0; i<SHOWN; i++)); do
     p="$(printf "%s" "${RESULTS[i]}" | json_escape)"
@@ -902,7 +918,11 @@ fi
 # pretty output
 if (( QUIET == 0 )); then
   echo "Search(pattern: \"$PATTERN\" -> name \"$NAME_GLOB\", path: \"$SEARCH_PATH\")"
-  echo "  ⎿ Found $TOTAL_FOUND results (backend: $BACKEND_BIN)"
+  if [[ "$COUNT_MODE" == "exact" ]]; then
+    echo "  ⎿ Found $TOTAL_FOUND results (backend: $BACKEND_BIN)"
+  else
+    echo "  ⎿ Found ${TOTAL_FOUND}+ results (backend: $BACKEND_BIN)"
+  fi
 fi
 if (( TOTAL_FOUND == 0 )); then exit 0; fi
 for ((i=0; i<SHOWN; i++)); do
