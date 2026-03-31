@@ -656,14 +656,13 @@ async function cli(tool, args, renderAs) {
       const pretty = renderer(raw);
       if (pretty) {
         const result = { content: [{ type: "text", text: pretty }] };
-        // structuredContent disabled: 2.1.88 hides text when present
-        // if (parsed !== undefined) result.structuredContent = parsed;
+        if (parsed !== undefined) result.structuredContent = parsed;
         return result;
       }
     }
 
     const result = { content: [{ type: "text", text: raw }] };
-    // if (parsed !== undefined) result.structuredContent = parsed;
+    if (parsed !== undefined) result.structuredContent = parsed;
     return result;
   } catch (err) {
     return { content: [{ type: "text", text: `Error running ${tool}: ${err.stderr || err.stdout || err.message}` }], isError: true };
@@ -809,8 +808,7 @@ server.registerTool(
         }
         return {
           content: [{ type: "text", text: rendered }],
-          // structuredContent disabled: 2.1.88 hides text when present
-          // structuredContent: parsed,
+          structuredContent: parsed,
         };
       } catch (renderErr) {
         console.error("fsearch render error:", renderErr);
@@ -1172,8 +1170,7 @@ const parsed = JSON.parse(stdout);
 
       return {
         content: [{ type: "text", text: lines.join("\n") }],
-        // structuredContent disabled: 2.1.88 hides text when present
-        // structuredContent: parsed,
+        structuredContent: parsed,
       };
       } catch (renderErr) {
         console.error("fs render error:", renderErr);
