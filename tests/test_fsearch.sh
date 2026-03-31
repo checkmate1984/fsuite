@@ -912,7 +912,7 @@ test_match_both_excludes_node_modules() {
 
   local meta_file
   meta_file=$(mktemp)
-  FSEARCH_META="$meta_file" "${FSEARCH}" -o json --type both --match both -m 200 xyzzy "${TEST_DIR}" >/dev/null 2>&1
+FSEARCH_META="$meta_file" "${FSEARCH}" -o json --type both --match both --backend find -m 200 xyzzy "${TEST_DIR}" >/dev/null 2>&1
 
   local enumerated
   enumerated=$(python3 -c "import sys,json; print(json.load(open('$meta_file'))['items_enumerated'])")

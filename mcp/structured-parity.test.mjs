@@ -15,6 +15,10 @@ function textContent(result) {
   return result.content?.map((item) => item.text ?? "").join("\n") ?? "";
 }
 
+function stripAnsi(str) {
+  return str.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 function makeFixture() {
   const dir = mkdtempSync(join(tmpdir(), "fsuite-mcp-structured-"));
   mkdirSync(join(dir, "src"));
@@ -60,7 +64,11 @@ async function callTool(name, args) {
   return withClient((client) => client.callTool({ name, arguments: args }));
 }
 
-test("ftree MCP preserves snapshot JSON as structured content", async () => {
+// ─── Tools WITH renderers return pretty ANSI in content[text] ───
+// structuredContent is intentionally omitted to work around the
+// Claude Code 2.1.88 outputSchema safeParse bug.
+
+test("ftree MCP returns pretty-rendered content", async () => {
   const fixture = makeFixture();
   try {
     const result = await callTool("ftree", {
@@ -70,15 +78,15 @@ test("ftree MCP preserves snapshot JSON as structured content", async () => {
     });
 
     assert.ok(!result.isError, textContent(result));
-    assert.equal(result.structuredContent.tool, "ftree");
-    assert.equal(result.structuredContent.snapshot.tree.path, fixture);
-    assert.ok(Array.isArray(result.structuredContent.snapshot.tree.tree_json));
+    const text = textContent(result);
+    assert.ok(text.length > 0, "ftree should return non-empty content");
+    assert.ok(!result.structuredContent, "rendered tools should not return structuredContent");
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
 });
 
-test("fcontent MCP preserves JSON match metadata as structured content", async () => {
+test("fcontent MCP returns pretty-rendered content", async () => {
   const fixture = makeFixture();
   try {
     const result = await callTool("fcontent", {
@@ -88,14 +96,15 @@ test("fcontent MCP preserves JSON match metadata as structured content", async (
     });
 
     assert.ok(!result.isError, textContent(result));
-    assert.equal(result.structuredContent.tool, "fcontent");
-    assert.deepEqual(result.structuredContent.matched_files, [join(fixture, "docs", "notes.md")]);
+    const text = stripAnsi(textContent(result));
+    assert.ok(text.includes("notes.md"), "fcontent should mention the matched file");
+    assert.ok(!result.structuredContent, "rendered tools should not return structuredContent");
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
 });
 
-test("fmap MCP preserves JSON symbol maps as structured content", async () => {
+test("fmap MCP returns pretty-rendered content", async () => {
   const fixture = makeFixture();
   try {
     const result = await callTool("fmap", {
@@ -103,14 +112,15 @@ test("fmap MCP preserves JSON symbol maps as structured content", async () => {
     });
 
     assert.ok(!result.isError, textContent(result));
-    assert.equal(result.structuredContent.tool, "fmap");
-    assert.equal(result.structuredContent.files[0].symbols[0].type, "function");
+    const text = stripAnsi(textContent(result));
+    assert.ok(text.includes("greet"), "fmap should mention the greet function");
+    assert.ok(!result.structuredContent, "rendered tools should not return structuredContent");
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
 });
 
-test("fread MCP preserves JSON chunks as structured content", async () => {
+test("fread MCP returns pretty-rendered content", async () => {
   const fixture = makeFixture();
   try {
     const result = await callTool("fread", {
@@ -119,12 +129,15 @@ test("fread MCP preserves JSON chunks as structured content", async () => {
     });
 
     assert.ok(!result.isError, textContent(result));
-    assert.equal(result.structuredContent.tool, "fread");
-    assert.match(result.structuredContent.chunks[0].content[0], /def greet/);
+    const text = stripAnsi(textContent(result));
+    assert.ok(text.includes("def greet"), "fread should contain the function definition");
+    assert.ok(!result.structuredContent, "rendered tools should not return structuredContent");
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
 });
+
+// ─── Tools WITHOUT renderers still return structuredContent ───
 
 test("fprobe MCP preserves JSON arrays as structured content", async () => {
   const fixture = makeFixture();
@@ -143,7 +156,7 @@ test("fprobe MCP preserves JSON arrays as structured content", async () => {
   }
 });
 
-test("fedit and fwrite MCP preserve dry-run JSON as structured content", async () => {
+test("fedit and fwrite MCP return pretty-rendered content", async () => {
   const fixture = makeFixture();
   try {
     const editResult = await callTool("fedit", {
@@ -154,8 +167,9 @@ test("fedit and fwrite MCP preserve dry-run JSON as structured content", async (
     });
 
     assert.ok(!editResult.isError, textContent(editResult));
-    assert.equal(editResult.structuredContent.tool, "fedit");
-    assert.equal(editResult.structuredContent.dry_run, true);
+    const editText = textContent(editResult);
+    assert.ok(editText.length > 0, "fedit should return non-empty content");
+    assert.ok(!editResult.structuredContent, "rendered tools should not return structuredContent");
 
     const writeResult = await callTool("fwrite", {
       path: join(fixture, "generated.txt"),
@@ -164,8 +178,9 @@ test("fedit and fwrite MCP preserve dry-run JSON as structured content", async (
     });
 
     assert.ok(!writeResult.isError, textContent(writeResult));
-    assert.equal(writeResult.structuredContent.tool, "fedit");
-    assert.equal(writeResult.structuredContent.dry_run, true);
+    const writeText = textContent(writeResult);
+    assert.ok(writeText.length > 0, "fwrite should return non-empty content");
+    assert.ok(!writeResult.structuredContent, "rendered tools should not return structuredContent");
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
