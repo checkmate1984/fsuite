@@ -128,7 +128,7 @@ test_empty_dir() {
   empty=$(mktemp -d)
   output=$("${FLS}" -o json "${empty}" 2>&1)
   files=$(echo "$output" | python3 -c 'import sys,json; print(json.load(sys.stdin)["total_files"])')
-  rmdir "$empty"
+  rm -rf "$empty"
   [[ "$files" == "0" ]] && pass "Empty dir returns 0 files" || fail "Empty dir" "total_files=$files"
 }
 
