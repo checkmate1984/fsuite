@@ -1209,6 +1209,33 @@ const parsed = JSON.parse(stdout);
   }
 );
 
+// ─── fls (thin ftree router for directory listing) ──────────────
+server.registerTool(
+  "fls",
+  {
+    title: coloredTitle("fls"),
+    description:
+      "Quick directory listing — thin ftree router. Use instead of bash ls. " +
+      "Default: list direct children. -t: shallow tree (depth 2). -r: recon with sizes/counts. " +
+      "Output is ftree's JSON contract — parse the same fields.",
+    inputSchema: z.object({
+      path: z.string().optional().describe("Directory to list (default: cwd)"),
+      mode: z.enum(["list", "tree", "recon"]).optional()
+        .describe("list (depth 1), tree (depth 2), or recon (sizes/counts). Default: list"),
+      output: z.enum(["pretty", "json"]).optional()
+        .describe("Output format. Default: pretty"),
+    }),
+  },
+  async ({ path, mode, output }) => {
+    const args = [];
+    if (mode === "tree") args.push("-t");
+    if (mode === "recon") args.push("-r");
+    if (output) args.push("-o", output);
+    if (path) args.push(path);
+    return cli("fls", args);
+  }
+);
+
 // ─── Start ───────────────────────────────────────────────────────
 const transport = new StdioServerTransport();
 await server.connect(transport);
