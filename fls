@@ -71,7 +71,7 @@ while (( $# > 0 )); do
   case "$1" in
     -t|--tree)   MODE="tree"; shift ;;
     -r|--recon)  MODE="recon"; shift ;;
-    -o|--output) FTREE_ARGS+=(-o "$2"); shift 2 ;;
+    -o|--output) [[ -n "${2:-}" ]] || { echo "fls: error: -o requires an argument" >&2; exit 1; }; FTREE_ARGS+=(-o "$2"); shift 2 ;;
     -h|--help)   usage; exit 0 ;;
     --version)   echo "fls $VERSION"; exit 0 ;;
     -*)          echo "fls: error: unknown option: $1" >&2; exit 1 ;;

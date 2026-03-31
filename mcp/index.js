@@ -623,6 +623,7 @@ const RENDERERS = {
   fmap: renderFmapResult,
   fcontent: renderFcontentResult,
   ftree: renderFtreeResult,
+  fls: renderFtreeResult,
   fsearch: renderFsearchResult,
 };
 

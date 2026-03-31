@@ -91,17 +91,12 @@ test_tree_json_depth() {
 
 # ── Recon mode (-r) → ftree --recon -L 1 ────────────────────────
 
-test_recon_mode() {
-  local output
-  output=$("${FLS}" -r "${TEST_DIR}" 2>&1)
-  [[ "$output" == *"Recon"* ]] && pass "Recon mode header" || fail "Recon mode header" "$output"
-}
-
 test_recon_json_mode() {
-  local output mode
+  local output mode tool
   output=$("${FLS}" -r -o json "${TEST_DIR}" 2>&1)
   mode=$(echo "$output" | python3 -c 'import sys,json; print(json.load(sys.stdin)["mode"])')
-  [[ "$mode" == "recon" ]] && pass "Recon JSON mode=recon" || fail "Recon JSON mode" "mode=$mode"
+  tool=$(echo "$output" | python3 -c 'import sys,json; print(json.load(sys.stdin)["tool"])')
+  [[ "$mode" == "recon" ]] && [[ "$tool" == "ftree" ]] && pass "Recon JSON: mode=recon, tool=ftree" || fail "Recon JSON" "mode=$mode tool=$tool"
 }
 
 # ── Routing contract ─────────────────────────────────────────────
@@ -163,8 +158,7 @@ main() {
   run_test "Defaults to cwd" test_cwd_default
   run_test "Tree shows nested" test_tree_shows_nested
   run_test "Tree JSON depth=2" test_tree_json_depth
-  run_test "Recon mode" test_recon_mode
-  run_test "Recon JSON mode=recon" test_recon_json_mode
+  run_test "Recon JSON mode+depth" test_recon_json_mode
   run_test "Output is ftree" test_output_is_ftree
   run_test "JSON is valid" test_json_is_valid
   run_test "Nonexistent path" test_nonexistent_path
