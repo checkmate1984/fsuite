@@ -656,13 +656,14 @@ async function cli(tool, args, renderAs) {
       const pretty = renderer(raw);
       if (pretty) {
         const result = { content: [{ type: "text", text: pretty }] };
-        if (parsed !== undefined) result.structuredContent = parsed;
+        // structuredContent disabled: 2.1.88 hides text when present
+        // if (parsed !== undefined) result.structuredContent = parsed;
         return result;
       }
     }
 
     const result = { content: [{ type: "text", text: raw }] };
-    if (parsed !== undefined) result.structuredContent = parsed;
+    // if (parsed !== undefined) result.structuredContent = parsed;
     return result;
   } catch (err) {
     return { content: [{ type: "text", text: `Error running ${tool}: ${err.stderr || err.stdout || err.message}` }], isError: true };
@@ -787,25 +788,8 @@ server.registerTool(
       preview: z.number().optional()
         .describe("Directory preview child limit. Default: 0"),
     }),
-    outputSchema: z.object({
-      tool: z.literal("fsearch"),
-      version: z.string(),
-      pattern: z.string(),
-      name_glob: z.string(),
-      path: z.string(),
-      backend: z.string(),
-      search_type: z.enum(["file", "dir", "both"]),
-      match_mode: z.enum(["name", "path", "both"]),
-      preview_limit: z.number(),
-      total_found: z.number(),
-      shown: z.number(),
-      truncated: z.boolean(),
-      count_mode: z.enum(["exact", "lower_bound"]),
-      has_more: z.boolean(),
-      results: z.array(z.string()),
-      hits: z.array(fsearchHitSchema),
-      next_hint: fsearchNextHintSchema.nullable(),
-    }),
+    // outputSchema removed: 2.1.88 StructuredOutput schema cache bug
+    // causes silent failures with multiple schemas across tools.
   },
   async ({ query, path, type, match, mode, preview }) => {
     const args = ["-o", "json"];
@@ -825,7 +809,8 @@ server.registerTool(
         }
         return {
           content: [{ type: "text", text: rendered }],
-          structuredContent: parsed,
+          // structuredContent disabled: 2.1.88 hides text when present
+          // structuredContent: parsed,
         };
       } catch (renderErr) {
         console.error("fsearch render error:", renderErr);
@@ -1059,12 +1044,12 @@ server.registerTool(
     {
       title: coloredTitle("fprobe"),
       description:
-        "Binary/opaque file reconnaissance. Extracts printable strings, scans for literal " +
-        "byte patterns with context, and reads raw byte windows at known offsets. Works on " +
-        "compiled binaries, SEA bundles, packed assets — anything with embedded text.",
+        "Binary reconnaissance and surgical patching. Scan for patterns, read byte windows, " +
+        "extract strings, and patch binaries with same-length replacements. Works on compiled " +
+        "binaries, SEA bundles, packed assets — anything with embedded text.",
       inputSchema: z.object({
-        action: z.enum(["strings", "scan", "window"]).describe("Subcommand"),
-        file: z.string().describe("File to probe"),
+        action: z.enum(["strings", "scan", "window", "patch"]).describe("Subcommand"),
+        file: z.string().describe("File to probe or patch"),
         filter: z.string().optional().describe("Filter strings to those containing this literal (strings mode)"),
         pattern: z.string().optional().describe("Literal pattern to find (scan mode)"),
         context: z.number().optional().describe("Bytes of context around match (scan mode, default 300)"),
@@ -1073,14 +1058,20 @@ server.registerTool(
         after: z.number().optional().describe("Bytes after offset (window mode, default 200)"),
         decode: z.enum(["printable", "utf8", "hex"]).optional().describe("Decode mode (window mode, default printable)"),
         ignore_case: z.boolean().optional().describe("Case-insensitive matching"),
+        target: z.string().optional().describe("Literal text to find and replace (patch mode)"),
+        replacement: z.string().optional().describe("Replacement text, padded with spaces if shorter (patch mode)"),
+        dry_run: z.boolean().optional().describe("Preview patch without writing (patch mode)"),
       }),
     },
-    async ({ action, file, filter, pattern, context, offset, before, after, decode, ignore_case }) => {
+    async ({ action, file, filter, pattern, context, offset, before, after, decode, ignore_case, target, replacement, dry_run }) => {
       if (action === "scan" && !pattern) {
         return { content: [{ type: "text", text: "fprobe scan requires pattern" }], isError: true };
       }
       if (action === "window" && offset === undefined) {
         return { content: [{ type: "text", text: "fprobe window requires offset" }], isError: true };
+      }
+      if (action === "patch" && (!target || !replacement)) {
+        return { content: [{ type: "text", text: "fprobe patch requires --target and --replacement" }], isError: true };
       }
       const args = [action, file];
       if (action === "strings" && filter) args.push("--filter", filter);
@@ -1091,6 +1082,9 @@ server.registerTool(
       if (after !== undefined) args.push("--after", String(after));
       if (decode) args.push("--decode", decode);
       if (ignore_case) args.push("--ignore-case");
+      if (action === "patch" && target) args.push("--target", target);
+      if (action === "patch" && replacement) args.push("--replacement", replacement);
+      if (action === "patch" && dry_run) args.push("--dry-run");
       args.push("-o", "json");
       return cli("fprobe", args);
     }
@@ -1113,27 +1107,7 @@ server.registerTool(
         intent: z.enum(["auto", "file", "content", "symbol", "nav"]).optional()
           .describe("Override auto-classification. Default: auto"),
       }),
-      outputSchema: z.object({
-        query: z.string(),
-        path: z.string(),
-        scope: z.string().optional(),
-        intent: z.enum(["auto", "file", "content", "symbol", "nav"]),
-        resolved_intent: z.enum(["file", "content", "symbol", "nav"]),
-        route_reason: z.string(),
-        route_confidence: z.enum(["high", "medium", "low"]),
-      selected_chain: z.array(z.string()),
-      hits: z.array(z.object({}).passthrough()),
-      truncated: z.boolean(),
-      budget: z.object({
-        candidate_files: z.number(),
-        enriched_files: z.number(),
-        time_ms: z.number(),
-      }),
-      next_hint: z.object({
-        tool: z.string(),
-        args: z.object({}).passthrough(),
-      }).nullable(),
-    }),
+      // outputSchema removed: 2.1.88 StructuredOutput schema cache bug
   },
   async ({ query, path, scope, intent }) => {
     // fs bypasses cli() — returns both pretty ANSI content AND typed
@@ -1198,7 +1172,8 @@ const parsed = JSON.parse(stdout);
 
       return {
         content: [{ type: "text", text: lines.join("\n") }],
-        structuredContent: parsed,
+        // structuredContent disabled: 2.1.88 hides text when present
+        // structuredContent: parsed,
       };
       } catch (renderErr) {
         console.error("fs render error:", renderErr);

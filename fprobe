@@ -48,17 +48,21 @@ USAGE
   fprobe strings <file> [--filter <literal>] [--ignore-case] [-o pretty|json]
   fprobe scan    <file> --pattern <literal> [--context N] [--ignore-case] [-o pretty|json]
   fprobe window  <file> --offset N [--before N] [--after N] [--decode printable|utf8|hex] [-o pretty|json]
+  fprobe patch   <file> --target <text> --replacement <text> [--dry-run]
 
   fprobe --version
   fprobe --help
 
 DESCRIPTION
-  Read-only reconnaissance for opaque files — compiled binaries, SEA bundles,
-  packed assets. Finds markers, inspects byte neighborhoods, extracts strings.
+  Binary reconnaissance and surgical patching for opaque files — compiled
+  binaries, SEA bundles, packed assets.
 
   strings   Extract printable ASCII runs (≥6 chars). --filter narrows to matches.
   scan      Find literal byte patterns. Returns offset + surrounding context.
   window    Read raw bytes at a known offset. Decode as printable, utf8, or hex.
+  patch     Find and replace a literal byte pattern. Same-length enforced (pads
+            with spaces if replacement is shorter). Creates .bak backup on first
+            write. Uses rename for atomic swap (handles "Text file busy").
 
 OUTPUT MODES
   -o pretty   Human-readable (default for terminal)
@@ -69,6 +73,8 @@ EXAMPLES
   fprobe scan claude-binary --pattern "userFacingName" --context 500
   fprobe window claude-binary --offset 112202147 --before 200 --after 3000
   fprobe window claude-binary --offset 0 --after 16 --decode hex
+  fprobe patch claude-binary --target 'if(P&&!P.success)return null' --replacement 'if(0&&!P.success)return null'
+  fprobe patch claude-binary --target 'old text' --replacement 'new text' --dry-run
 EOF
 }
 
@@ -163,6 +169,23 @@ print(w.get('text', ''))
 " || { echo "fprobe: error rendering window output" >&2; return 1; }
 }
 
+pretty_patch() {
+  local json_data="$1"
+  python3 -c "
+import sys, json
+d = json.loads('''$json_data''')
+if 'error' in d and d.get('patched', 0) == 0:
+    print(f'fprobe patch: {d[\"error\"]}')
+    sys.exit(1)
+dry = ' (dry run)' if d.get('dry_run') else ''
+print(f'Patched {d[\"patched\"]} location(s){dry}')
+for off in d.get('offsets', []):
+    print(f'  offset {off}')
+if d.get('backup'):
+    print(f'Backup: {d[\"backup\"]}')
+" || { echo "fprobe: error rendering patch output" >&2; return 1; }
+}
+
 # ── Main dispatch ────────────────────────────────────────────────
 
 # Parse top-level flags
@@ -181,8 +204,8 @@ SUBCMD="$1"
 shift
 
 case "$SUBCMD" in
-  strings|scan|window) ;;
-  *) die "unknown subcommand: $SUBCMD (use strings, scan, or window)" ;;
+  strings|scan|window|patch) ;;
+  *) die "unknown subcommand: $SUBCMD (use strings, scan, window, or patch)" ;;
 esac
 
 # ── Pre-parse -o flag; pass remaining args to engine ─────────────
@@ -221,5 +244,6 @@ else
     strings) pretty_strings "$json_output" ;;
     scan)    pretty_scan "$json_output" ;;
     window)  pretty_window "$json_output" ;;
+    patch)   pretty_patch "$json_output" ;;
   esac
 fi

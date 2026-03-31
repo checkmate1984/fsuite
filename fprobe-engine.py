@@ -88,6 +88,65 @@ def scan_pattern(data, pattern, context=300, ignore_case=False):
     return results
 
 
+def patch_binary(file_path, target_str, replacement_str, dry_run=False):
+    """Find and replace a byte pattern in a binary file. Same-length enforced."""
+    target = target_str.encode("utf-8", errors="replace")
+    replacement = replacement_str.encode("utf-8", errors="replace")
+
+    if len(replacement) > len(target):
+        return {"error": f"replacement ({len(replacement)} bytes) exceeds target ({len(target)} bytes)", "patched": 0}
+    # Pad replacement with spaces to match target length
+    if len(replacement) < len(target):
+        replacement = replacement + b" " * (len(target) - len(replacement))
+
+    with open(file_path, "rb") as f:
+        data = bytearray(f.read())
+
+    file_size = len(data)
+    offsets = []
+    pos = 0
+    while True:
+        idx = data.find(target, pos)
+        if idx == -1:
+            break
+        offsets.append(idx)
+        if not dry_run:
+            data[idx:idx + len(target)] = replacement
+        pos = idx + len(target)
+
+    if not offsets:
+        return {
+            "patched": 0,
+            "dry_run": dry_run,
+            "target_size": len(target),
+            "file_size": file_size,
+            "error": "target pattern not found",
+        }
+
+    backup_path = None
+    if not dry_run and offsets:
+        backup_path = file_path + ".bak"
+        if not os.path.exists(backup_path):
+            import shutil
+            shutil.copy2(file_path, backup_path)
+        # Write via temp file + rename to handle "Text file busy"
+        tmp_path = file_path + ".fprobe-tmp"
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        os.chmod(tmp_path, os.stat(file_path).st_mode)
+        os.rename(tmp_path, file_path)
+
+    return {
+        "patched": len(offsets),
+        "offsets": offsets,
+        "dry_run": dry_run,
+        "target_size": len(target),
+        "replacement_size": len(replacement),
+        "file_size": file_size,
+        "backup": backup_path,
+    }
+
+
 def read_window(data, offset, before=0, after=200, decode="printable"):
     """Read a window of bytes around a given offset."""
     file_size = len(data)
@@ -156,6 +215,13 @@ def main():
     p_win.add_argument("--after", type=nonneg_int, default=200)
     p_win.add_argument("--decode", choices=["printable", "utf8", "hex"], default="printable")
 
+    # patch
+    p_patch = sub.add_parser("patch")
+    p_patch.add_argument("file")
+    p_patch.add_argument("--target", required=True, help="Literal text to find in binary")
+    p_patch.add_argument("--replacement", required=True, help="Replacement text (padded with spaces if shorter)")
+    p_patch.add_argument("--dry-run", action="store_true", help="Show what would be patched without writing")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -166,6 +232,12 @@ def main():
     if not os.path.exists(file_path):
         json.dump({"error": f"file not found: {file_path}"}, sys.stdout)
         sys.exit(1)
+
+    # patch handles its own file I/O (needs write access)
+    if args.command == "patch":
+        result = patch_binary(file_path, args.target, args.replacement, args.dry_run)
+        json.dump(result, sys.stdout)
+        sys.exit(0 if result["patched"] > 0 else 1)
 
     file_size = os.path.getsize(file_path)
     if file_size == 0:
