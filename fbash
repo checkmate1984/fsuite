@@ -588,10 +588,14 @@ poll_background_job() {
     return 1
   fi
 
-  if [[ -f "$rc_file" ]]; then
+if [[ -f "$rc_file" ]]; then
     # Job complete
     local exit_code
     exit_code=$(cat "$rc_file" 2>/dev/null || echo 1)
+    local poll_rc=1
+    if [[ "$exit_code" =~ ^[0-9]+$ ]]; then
+      poll_rc=$exit_code
+    fi
     local stdout_content="" stderr_content=""
 
     if [[ -f "$JOBS_DIR/${job_id}.out" ]]; then
@@ -658,6 +662,7 @@ else
         echo "$stderr_content"
       fi
     fi
+    return "$poll_rc"
   else
     # Job still running
     local pid

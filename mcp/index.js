@@ -1024,34 +1024,36 @@ async function cli(tool, args, renderAs, renderContext) {
     // Try to parse JSON from stdout first, then stderr, then fall back to plain text
     let errorText = err.message;
     let parsed = undefined;
+    const parsedErrorText = (value) => {
+      if (!value || typeof value !== "object") return "";
+      if (value.errors?.length) {
+        return value.errors.map((e) => e.error_detail || e.error || e).join("; ");
+      }
+      if (value.error_detail) return value.error_detail;
+      if (value.error) return value.error;
+      if (typeof value.stderr === "string" && value.stderr.trim()) return value.stderr;
+      if (typeof value.stdout === "string" && value.stdout.trim()) return value.stdout;
+      return "";
+    };
 
     if (err.stdout) {
       try {
         parsed = JSON.parse(err.stdout);
-        if (parsed.errors?.length) {
-          errorText = parsed.errors.map(e => e.error_detail || e.error || e).join("; ");
-        } else if (parsed.error_detail) {
-          errorText = parsed.error_detail;
-        } else if (parsed.error) {
-          errorText = parsed.error;
-        }
+        const message = parsedErrorText(parsed);
+        if (message) errorText = message;
       } catch { /* not JSON in stdout, try stderr */ }
     }
 
-    if (!parsed && err.stderr) {
+    if ((errorText === err.message || !parsed) && err.stderr) {
       try {
-        parsed = JSON.parse(err.stderr);
-        if (parsed.errors?.length) {
-          errorText = parsed.errors.map(e => e.error_detail || e.error || e).join("; ");
-        } else if (parsed.error_detail) {
-          errorText = parsed.error_detail;
-        } else if (parsed.error) {
-          errorText = parsed.error;
-        }
+        const stderrParsed = JSON.parse(err.stderr);
+        if (!parsed) parsed = stderrParsed;
+        const message = parsedErrorText(stderrParsed);
+        if (message) errorText = message;
       } catch { /* not JSON in stderr, use plain text */ }
     }
 
-    if (!parsed) {
+    if (errorText === err.message) {
       errorText = err.stderr || err.stdout || err.message;
     }
 

@@ -502,6 +502,23 @@ test("fbash pretty output does not color exit=null as an error", async () => {
   );
 });
 
+test("fbash MCP error path falls back to parsed stderr when errors are empty", async () => {
+  const result = await callTool("fbash", {
+    command: "printf 'mcp-fbash-stderr\\n' >&2; exit 7",
+  });
+
+  const plain = stripAnsi(textContent(result));
+  assert.equal(result.isError, true, `expected MCP error result, got: ${plain}`);
+  assert.ok(
+    plain.includes("mcp-fbash-stderr"),
+    `expected fbash stderr to surface in MCP error text, got: ${plain}`,
+  );
+  assert.ok(
+    !plain.includes("Command failed:"),
+    `expected MCP error text to avoid generic execFile failure message, got: ${plain}`,
+  );
+});
+
 // ─── colorPath: filename highlighting in renderer output ───
 
 test("fread pretty output includes colored filename from path", async () => {

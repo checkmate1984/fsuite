@@ -21,20 +21,31 @@ skip() { echo -e "\033[0;33m⊘\033[0m $1 (skipped)"; (( SKIP_COUNT++ )) || true
 
 poll_background_job() {
   local job_id="$1"
-  local poll_out=""
+  local __outvar="$2"
+  local __rcvar="$3"
+  local response=""
+  local response_rc=""
   local status=""
   local attempt
+
+  printf -v "$__outvar" '%s' ""
+  printf -v "$__rcvar" '%s' ""
+
   for attempt in {1..40}; do
-    if ! poll_out=$("$FBASH" --command "__fbash_poll $job_id" -o json 2>/dev/null); then
+    response=""
+    response_rc=0
+    response=$("$FBASH" --command "__fbash_poll $job_id" -o json 2>/dev/null) || response_rc=$?
+    if [[ -z "$response" ]]; then
       sleep 0.1
       continue
     fi
-    status=$(echo "$poll_out" | jq -r '.metadata.background_status // empty')
-    if [[ "$status" == "running" ]]; then
+    status=$(echo "$response" | jq -r '.metadata.background_status // empty')
+    if [[ "$status" == "running" || -z "$status" ]]; then
       sleep 0.1
       continue
     fi
-    printf '%s\n' "$poll_out"
+    printf -v "$__outvar" '%s' "$response"
+    printf -v "$__rcvar" '%s' "$response_rc"
     return 0
   done
   return 1
@@ -168,7 +179,9 @@ fi
 job_id=$(echo "$bg_out" | jq -r '.metadata.background_job_id // empty')
 
 if [[ -n "$job_id" ]]; then
-  if poll_out=$(poll_background_job "$job_id"); then
+  poll_out=""
+  poll_shell_rc=""
+  if poll_background_job "$job_id" poll_out poll_shell_rc; then
     bg_stdout=$(echo "$poll_out" | jq -r '.stdout // empty')
     if echo "$bg_stdout" | grep -q "rabbit_fix_4"; then
       pass "bug4_bg_env: background job received FBASH_TEST_VAR=rabbit_fix_4"
@@ -191,13 +204,15 @@ fi
 job_id=$(echo "$bg_out" | jq -r '.metadata.background_job_id // empty')
 
 if [[ -n "$job_id" ]]; then
-  if poll_out=$(poll_background_job "$job_id"); then
+  poll_out=""
+  poll_shell_rc=""
+  if poll_background_job "$job_id" poll_out poll_shell_rc; then
     poll_exit_code=$(echo "$poll_out" | jq -r '.exit_code')
     poll_stdout=$(echo "$poll_out" | jq -r '.stdout // empty')
-    if [[ "$poll_exit_code" == "9" ]] && [[ "$poll_stdout" != *'"exit_code":9'* ]]; then
+    if [[ "$poll_shell_rc" == "9" ]] && [[ "$poll_exit_code" == "9" ]] && [[ "$poll_stdout" != *'"exit_code":9'* ]]; then
       pass "bug4_poll_exit_code: polled exit_code surfaced at top level"
     else
-      fail "bug4_poll_exit_code: expected top-level exit_code=9 from __fbash_poll" "exit_code=$poll_exit_code stdout=$poll_stdout response=$poll_out"
+      fail "bug4_poll_exit_code: expected shell rc and top-level exit_code=9 from __fbash_poll" "shell_rc=$poll_shell_rc exit_code=$poll_exit_code stdout=$poll_stdout response=$poll_out"
     fi
   else
     fail "bug4_poll_exit_code: polling timed out" "job_id=$job_id"
