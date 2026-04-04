@@ -574,7 +574,8 @@ function renderFtreeResult(jsonStr) {
     }
     return out;
   } catch {
-    return null;
+    // fls outputs pre-rendered text (not JSON) — pass through as-is
+    return jsonStr || null;
   }
 }
 
