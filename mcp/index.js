@@ -805,7 +805,7 @@ function renderFprobeResult(jsonStr, ctx = {}) {
       const noun = patchedCount === 1 ? "replacement" : "replacements";
       const status = d.dry_run ? `${fg(255,200,50)}Dry run${RESET}` : patchedCount > 0 ? `${fg(80,200,80)}Patched${RESET}` : `${fg(255,80,80)}Failed${RESET}`;
       let out = `${status} ${patchedCount} ${noun}`;
-      if (d.file) out += ` in ${d.file}`;
+      if (d.file) out += ` in ${colorPath(d.file)}`;
       out += "\n";
       return out;
     }
