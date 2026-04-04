@@ -354,7 +354,10 @@ function renderFeditResult(jsonStr) {
 
     return out;
   } catch {
-    return null;
+    // Non-JSON output (shell error, binary crash). Return a plain-text fallback
+    // so cli() never falls through to the raw JSON dump path for fedit/fwrite calls.
+    const preview = (jsonStr || "").slice(0, 200).replace(/\n/g, " ").trim();
+    return `${theme.error("fedit: unexpected output")} \u2014 ${preview || "(empty)"}\n`;
   }
 }
 
@@ -1009,17 +1012,24 @@ async function cli(tool, args, renderAs, renderContext) {
       if (renderer) {
         const pretty = renderer(raw, renderContext);
         if (pretty) {
-            // When renderer produces pretty ANSI, return content[text] only.
-            // Claude Code's "early return blender" discards content[text]
-            // when structuredContent exists — so we must omit it here.
-            const result = { content: [{ type: "text", text: pretty }] };
-            return result;
+          // When renderer produces pretty ANSI, return content[text] only.
+          // Claude Code's "early return blender" discards content[text]
+          // when structuredContent exists — so we must omit it here.
+          const result = { content: [{ type: "text", text: pretty }] };
+          return result;
         }
+        // Renderer existed but returned null (unexpected tool output or wrong tool field).
+        // Do NOT fall through to content[text]=raw — that dumps the full raw JSON to the user.
+        // Return structuredContent only (slim metadata) with a minimal placeholder text.
+        const result = { content: [{ type: "text", text: `(${renderAs || tool}: renderer yielded no output)\n` }] };
+        if (parsed !== undefined) result.structuredContent = parsed;
+        return result;
       }
 
-    const result = { content: [{ type: "text", text: raw }] };
-    if (parsed !== undefined) result.structuredContent = parsed;
-    return result;
+      // No renderer registered for this tool — pass raw output + structuredContent to caller.
+      const noRendererResult = { content: [{ type: "text", text: raw }] };
+      if (parsed !== undefined) noRendererResult.structuredContent = parsed;
+      return noRendererResult;
   } catch (err) {
     // Try to parse JSON from stdout first, then stderr, then fall back to plain text
     let errorText = err.message;
