@@ -1063,11 +1063,18 @@ async function cli(tool, args, renderAs, renderContext) {
     if (err.stdout) {
       try {
         parsed = JSON.parse(err.stdout);
+        // fbash: non-zero exit is normal (command failed, not tool failed)
+        // Return as success with the structured JSON so renderers can display it
+        if (parsed && typeof parsed.exit_code === "number" && tool === "fbash") {
+          const raw = err.stdout;
+          const pretty = RENDERERS[renderAs || tool]?.(raw, renderContext);
+          if (pretty) return { content: [{ type: "text", text: pretty }] };
+          return { content: [{ type: "text", text: raw }] };
+        }
         const message = parsedErrorText(parsed);
         if (message) errorText = message;
       } catch { /* not JSON in stdout, try stderr */ }
     }
-
     if ((errorText === err.message || !parsed) && err.stderr) {
       try {
         const stderrParsed = JSON.parse(err.stderr);
