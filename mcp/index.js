@@ -1015,7 +1015,8 @@ function slimStructuredContent(obj) {
 // ─── Helper: run CLI tool, pretty-render if possible ─────────────
 async function cli(tool, args, renderAs, renderContext) {
   try {
-    const { stdout, stderr } = await run(resolveTool(tool), args, EXEC_OPTS);
+    const opts = tool === "fbash" ? { ...EXEC_OPTS, timeout: 120_000 } : EXEC_OPTS;
+    const { stdout, stderr } = await run(resolveTool(tool), args, opts);
     const raw = stdout || stderr || "(no output)";
     const parsed = slimStructuredContent(normalizeStructuredContent(maybeParseJson(raw)));
 
