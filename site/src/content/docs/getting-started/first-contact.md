@@ -69,6 +69,6 @@ fcase resolve first-contact --summary "Got the vibe. Moving on."
 
 ## What to do next
 
-- [Read the mental model](/getting-started/mental-model/) — the discipline that makes the chain work
-- [Browse the command reference](/commands/fs/) — one page per tool, with live `--help` output
-- [Read Episode 0](/story/episode-0/) — how fsuite came to be and what it was trying to fix
+- [Read the mental model](/fsuite/getting-started/mental-model/) — the discipline that makes the chain work
+- [Browse the command reference](/fsuite/commands/fs/) — one page per tool, with live `--help` output
+- [Read Episode 0](/fsuite/story/episode-0/) — how fsuite came to be and what it was trying to fix

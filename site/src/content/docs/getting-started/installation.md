@@ -50,8 +50,8 @@ ftree --help
 
 ## MCP adapter (optional)
 
-If you want to expose fsuite tools to Claude Code or other MCP-aware agents, see the [MCP adapter page](/architecture/mcp/).
+If you want to expose fsuite tools to Claude Code or other MCP-aware agents, see the [MCP adapter page](/fsuite/architecture/mcp/).
 
 ## Claude Code hook enforcement (optional)
 
-If you want your Claude Code agents to be *forced* to use fsuite instead of their native `Read`, `Write`, `Edit`, `Grep`, and `Glob` tools, see the [hooks page](/architecture/hooks/).
+If you want your Claude Code agents to be *forced* to use fsuite instead of their native `Read`, `Write`, `Edit`, `Grep`, and `Glob` tools, see the [hooks page](/fsuite/architecture/hooks/).

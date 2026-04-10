@@ -63,6 +63,6 @@ NOTES
 
 ## See also
 
-- [fsuite mental model](/getting-started/mental-model/) — how fread fits into the toolchain
-- [Cheat sheet](/reference/cheatsheet/) — one-line recipes for every tool
+- [fsuite mental model](/fsuite/getting-started/mental-model/) — how fread fits into the toolchain
+- [Cheat sheet](/fsuite/reference/cheatsheet/) — one-line recipes for every tool
 - [View source on GitHub](https://github.com/lliWcWill/fsuite/blob/master/fread)

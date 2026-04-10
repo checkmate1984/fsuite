@@ -51,4 +51,4 @@ It didn't just say "nice tools." It wrote a full self-assessment. The headline f
 
 The chaos converged on solving the real problem. We just got there backwards.
 
-[Read Episode 0 →](/story/episode-0/) for the original framing, the version we wrote before we knew hooks existed.
+[Read Episode 0 →](/fsuite/story/episode-0/) for the original framing, the version we wrote before we knew hooks existed.

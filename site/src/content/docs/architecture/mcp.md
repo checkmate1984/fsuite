@@ -11,7 +11,7 @@ The MCP adapter (`mcp/index.js`) wraps every fsuite CLI tool in a Model Context 
 
 ## Why it exists
 
-See [the lightbulb moment](/story/lightbulb/). Short version: the MCP was built so agents wouldn't need to pipe through their native `Bash` tool to run fsuite commands. It also adds Monokai-themed structured output rendering, which is the part of fsuite that the author loves the most about the MCP path.
+See [the lightbulb moment](/fsuite/story/lightbulb/). Short version: the MCP was built so agents wouldn't need to pipe through their native `Bash` tool to run fsuite commands. It also adds Monokai-themed structured output rendering, which is the part of fsuite that the author loves the most about the MCP path.
 
 ## Installation
 
@@ -44,6 +44,6 @@ Then register the server with your MCP-aware client. For Claude Code, add to `~/
 ## What it does NOT replace
 
 - `fbash` still exists and is still the right tool for shell execution. The MCP wraps `fbash`, it doesn't bypass it.
-- The hooks layer ([hooks page](/architecture/hooks/)) is orthogonal — use hooks to *block* native tools, use MCP to *expose* fsuite tools cleanly.
+- The hooks layer ([hooks page](/fsuite/architecture/hooks/)) is orthogonal — use hooks to *block* native tools, use MCP to *expose* fsuite tools cleanly.
 
 > **TODO:** expand this page with auto-generated tool schema reference once the MCP index.js output format stabilizes.
