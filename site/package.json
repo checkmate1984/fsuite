@@ -1,0 +1,21 @@
+{
+  "name": "fsuite-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "fsuite knowledge base — Starlight site, auto-synced with the CLI tools",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "npm run gen:commands && astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "gen:commands": "node scripts/gen-commands.mjs",
+    "gen:story": "node scripts/gen-story.mjs"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.30.0",
+    "astro": "^5.0.0",
+    "sharp": "^0.33.0"
+  }
+}
