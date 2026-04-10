@@ -235,8 +235,7 @@ if scope:
 if config_only:
     print(f'{DIM}preset: config-only{NC}')
 chain = data.get('selected_chain', [])
-print(f'{DIM}chain: {\" → \".join(chain)}{NC}')
-print(f'{DIM}{budget.get(\"candidate_files\", 0)} candidates, {budget.get(\"enriched_files\", 0)} enriched, {budget.get(\"time_ms\", 0)}ms{NC}')
+print(f'{DIM}chain: {\" → \".join(chain)} | {budget.get(\"candidate_files\", 0)} candidates, {budget.get(\"enriched_files\", 0)} enriched, {budget.get(\"time_ms\", 0)}ms{NC}')
 if truncated:
     print(f'{DIM}(truncated){NC}')
 print()
