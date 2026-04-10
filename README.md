@@ -8,6 +8,10 @@
   <em>Deploy the drones. Map the terrain. Return with intel.</em>
 </p>
 
+<p align="center">
+<strong>📚 <a href="https://lliwcwill.github.io/fsuite/">Full documentation at lliwcwill.github.io/fsuite</a></strong>
+</p>
+
 [![Release](https://img.shields.io/github/v/release/lliWcWill/fsuite?display_name=tag)](https://github.com/lliWcWill/fsuite/releases)
 ![Debian Package](https://img.shields.io/badge/deb-package%20available-A81D33)
 ![Shell](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white)
