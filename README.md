@@ -156,7 +156,7 @@ verify the replay, then measure what actually happened and plan the next pass.
 
 > **Proof callout — Nightfox investigation:** In a live Nightfox runtime incident, the breakthrough came when the operator coached the agent to stop overcompensating and trust fsuite's direct contracts. The useful path was not a sacred sequence. It was a clean combination of `fsearch`, `fmap`, `fread`, and targeted `fcontent` that surfaced a real subprocess-lifecycle bug. The milestone was not just that the tools worked. It was that the agent stopped fighting them.
 
-The full unedited analysis is in **[AGENT-ANALYSIS.md](docs/AGENT-ANALYSIS.md)** — the raw self-assessment, exactly as Claude Code wrote it after studying and testing every tool in this repo.
+The full unedited analysis is in **[AGENT-ANALYSIS.md](docs/internal/AGENT-ANALYSIS.md)** — the raw self-assessment, exactly as Claude Code wrote it after studying and testing every tool in this repo.
 
 That document is the pitch. Not because we wrote it, but because the agent did.
 

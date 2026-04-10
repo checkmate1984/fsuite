@@ -4,7 +4,7 @@ __pycache__/
 .worktrees/
 *.deb
 vm/state/
-docs/plans/
+docs/internal/plans/
 mcp/node_modules/
 
 # Debian package staging dir — never commit
