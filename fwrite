@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# fwrite — Atomic file creation for fsuite
+# ═══════════════════════════════════════════════════════════════════════════════
+# Creates new files or overwrites existing ones. Routes through fedit for
+# modifications. This is the "create" counterpart to fedit's "modify."
+#
+# Usage:
+#   fwrite <path> --content <text>           Create new file
+#   fwrite <path> --content <text> --overwrite   Overwrite existing
+#   fwrite <path> --stdin                    Read content from stdin
+#   fwrite <path> --from <source>            Copy from source file
+#
+# Flags:
+#   --content <text>    File content (required unless --stdin or --from)
+#   --overwrite         Allow overwriting existing files (default: deny)
+#   --stdin             Read content from stdin (for piping)
+#   --from <path>       Copy content from another file
+#   --mkdir             Create parent directories (default: true)
+#   --no-mkdir          Don't create parent directories
+#   --dry-run           Show what would happen without writing
+#   --json              Output result as JSON
+#   -q, --quiet         Suppress output, exit code only
+#
+# Exit codes:
+#   0  Success
+#   1  Missing arguments
+#   2  File exists (no --overwrite)
+#   3  Parent directory doesn't exist (--no-mkdir)
+#   4  Write failed
+#   5  Source file not found (--from)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+FSUITE_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ─── Defaults ────────────────────────────────────────────────────────────────
+TARGET=""
+CONTENT=""
+OVERWRITE=false
+FROM_STDIN=false
+FROM_FILE=""
+MKDIR=true
+DRY_RUN=false
+JSON_OUT=false
+QUIET=false
+
+# ─── Parse args ──────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --content)    CONTENT="$2"; shift 2 ;;
+    --overwrite)  OVERWRITE=true; shift ;;
+    --stdin)      FROM_STDIN=true; shift ;;
+    --from)       FROM_FILE="$2"; shift 2 ;;
+    --mkdir)      MKDIR=true; shift ;;
+    --no-mkdir)   MKDIR=false; shift ;;
+    --dry-run)    DRY_RUN=true; shift ;;
+    --json|-j)    JSON_OUT=true; shift ;;
+    --quiet|-q)   QUIET=true; shift ;;
+    --help|-h)
+      head -35 "$0" | tail -30
+      exit 0
+      ;;
+    -*)
+      echo "fwrite: unknown flag: $1" >&2
+      exit 1
+      ;;
+    *)
+      if [[ -z "$TARGET" ]]; then
+        TARGET="$1"
+      else
+        echo "fwrite: unexpected argument: $1" >&2
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+# ─── Validate ────────────────────────────────────────────────────────────────
+if [[ -z "$TARGET" ]]; then
+  echo "fwrite: target path is required" >&2
+  echo "Usage: fwrite <path> --content <text> [--overwrite]" >&2
+  exit 1
+fi
+
+# Resolve to absolute path
+if [[ "$TARGET" != /* ]]; then
+  TARGET="$(pwd)/$TARGET"
+fi
+
+# Get content from source
+if $FROM_STDIN; then
+  CONTENT="$(cat)"
+elif [[ -n "$FROM_FILE" ]]; then
+  if [[ ! -f "$FROM_FILE" ]]; then
+    if $JSON_OUT; then
+      echo "{\"error\":\"source file not found: $FROM_FILE\",\"exit\":5}"
+    else
+      echo "fwrite: source file not found: $FROM_FILE" >&2
+    fi
+    exit 5
+  fi
+  CONTENT="$(cat "$FROM_FILE")"
+fi
+
+if [[ -z "$CONTENT" ]] && ! $FROM_STDIN; then
+  echo "fwrite: content is required (use --content, --stdin, or --from)" >&2
+  exit 1
+fi
+
+# Check if file exists
+FILE_EXISTS=false
+if [[ -f "$TARGET" ]]; then
+  FILE_EXISTS=true
+  if ! $OVERWRITE; then
+    if $JSON_OUT; then
+      echo "{\"error\":\"file exists, use --overwrite to replace\",\"path\":\"$TARGET\",\"exit\":2}"
+    else
+      echo "fwrite: file exists: $TARGET (use --overwrite to replace)" >&2
+    fi
+    exit 2
+  fi
+fi
+
+# Check parent directory
+PARENT_DIR="$(dirname "$TARGET")"
+if [[ ! -d "$PARENT_DIR" ]]; then
+  if $MKDIR; then
+    if $DRY_RUN; then
+      $QUIET || echo "[dry-run] would create directory: $PARENT_DIR"
+    else
+      mkdir -p "$PARENT_DIR"
+    fi
+  else
+    if $JSON_OUT; then
+      echo "{\"error\":\"parent directory does not exist\",\"dir\":\"$PARENT_DIR\",\"exit\":3}"
+    else
+      echo "fwrite: parent directory does not exist: $PARENT_DIR (use --mkdir)" >&2
+    fi
+    exit 3
+  fi
+fi
+
+# ─── Dry run ─────────────────────────────────────────────────────────────────
+if $DRY_RUN; then
+  BYTE_COUNT=${#CONTENT}
+  LINE_COUNT=$(echo "$CONTENT" | wc -l)
+  ACTION=$($FILE_EXISTS && echo "overwrite" || echo "create")
+  if $JSON_OUT; then
+    echo "{\"dry_run\":true,\"action\":\"$ACTION\",\"path\":\"$TARGET\",\"bytes\":$BYTE_COUNT,\"lines\":$LINE_COUNT}"
+  else
+    echo "[dry-run] would $ACTION: $TARGET ($BYTE_COUNT bytes, $LINE_COUNT lines)"
+  fi
+  exit 0
+fi
+
+# ─── Write ───────────────────────────────────────────────────────────────────
+# Atomic write: write to temp, then move (prevents partial writes)
+TMPFILE="$(mktemp "${PARENT_DIR}/.fwrite.XXXXXX")"
+trap 'rm -f "$TMPFILE"' EXIT
+
+printf '%s' "$CONTENT" > "$TMPFILE"
+sync "$TMPFILE" 2>/dev/null || true
+mv -f "$TMPFILE" "$TARGET"
+trap - EXIT  # Clear trap — file is written
+
+# ─── Output ──────────────────────────────────────────────────────────────────
+BYTE_COUNT=${#CONTENT}
+LINE_COUNT=$(echo "$CONTENT" | wc -l)
+ACTION=$($FILE_EXISTS && echo "overwrite" || echo "create")
+
+if $QUIET; then
+  exit 0
+fi
+
+if $JSON_OUT; then
+  cat <<ENDJSON
+{"result":"ok","action":"$ACTION","path":"$TARGET","bytes":$BYTE_COUNT,"lines":$LINE_COUNT}
+ENDJSON
+else
+  echo "fwrite: ${ACTION}d $TARGET ($BYTE_COUNT bytes, $LINE_COUNT lines)"
+fi
+
+# ─── Telemetry (fire and forget) ─────────────────────────────────────────────
+if [[ -f "$FSUITE_DIR/_fsuite_db.sh" ]]; then
+  source "$FSUITE_DIR/_fsuite_db.sh" 2>/dev/null || true
+  _fsuite_log_event "fwrite" "$ACTION" "$TARGET" "$BYTE_COUNT" 2>/dev/null &
+fi
