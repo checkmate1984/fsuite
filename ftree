@@ -1133,7 +1133,7 @@ run_tree_pretty() {
     if (( truncated == 1 )); then
       echo "  ⎿ $count_label (showing $shown_lines of $total_content lines, truncated)"
     else
-      echo "  ⎿ $count_label (showing $shown_lines of $total_content lines)"
+      echo "  ⎿ $count_label"
     fi
     echo ""
   fi

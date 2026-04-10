@@ -958,8 +958,7 @@ render_pretty() {
     content="${CHUNK_CONTENTS[$i]}"
 
     if (( QUIET == 0 )); then
-      echo "Read($path)"
-      echo "  ⎿ lines $start-$end | $lines lines | $bytes bytes | ~$(token_estimate_from_bytes "$bytes") tokens"
+      echo "Read($path) lines $start-$end | $lines lines | $bytes bytes | ~$(token_estimate_from_bytes "$bytes") tokens"
     fi
     [[ -n "$content" ]] && printf '%s\n' "$content"
   done
