@@ -973,8 +973,8 @@ extract_symbols() {
         "class:^[[:space:]]*package[[:space:]]+[a-zA-Z_]"
         "import:^[[:space:]]*use[[:space:]]+[a-zA-Z_]"
         "import:^[[:space:]]*require[[:space:]]"
-        "constant:^[[:space:]]*our[[:space:]]+\\$[a-zA-Z_]"
-        "constant:^[[:space:]]*my[[:space:]]+\\$[a-zA-Z_]"
+        'constant:^[[:space:]]*our[[:space:]]+\$[a-zA-Z_]'
+        'constant:^[[:space:]]*my[[:space:]]+\$[a-zA-Z_]'
       )
     ;;
     rlang)
