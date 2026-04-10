@@ -1,0 +1,81 @@
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'site/**'
+      - '.github/workflows/deploy-docs.yml'
+      # Rebuild when tool binaries change — gen:commands reads their --help
+      - 'fs'
+      - 'ftree'
+      - 'fls'
+      - 'fsearch'
+      - 'fcontent'
+      - 'fmap'
+      - 'fread'
+      - 'fedit'
+      - 'fwrite'
+      - 'fbash'
+      - 'fcase'
+      - 'freplay'
+      - 'fprobe'
+      - 'fmetrics'
+      - 'fsuite'
+      - 'docs/EPISODE-*.md'  # gen:story mirrors these into the site
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make fsuite tool binaries executable
+        run: chmod +x fs ftree fls fsearch fcontent fmap fread fedit fwrite fbash fcase freplay fprobe fmetrics fsuite
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Build site (gen:commands + gen:story + astro build)
+        working-directory: site
+        run: |
+          node scripts/gen-story.mjs
+          npm run build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

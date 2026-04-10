@@ -4,7 +4,8 @@ import starlight from '@astrojs/starlight';
 
 // https://astro.build/config
 export default defineConfig({
-  site: 'https://docs.fsuite.ai',
+  site: 'https://lliwcwill.github.io',
+  base: '/fsuite',
   integrations: [
     starlight({
       title: 'fsuite',
