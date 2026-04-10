@@ -34,6 +34,7 @@
 set -euo pipefail
 
 FSUITE_DIR="$(cd "$(dirname "$0")" && pwd)"
+VERSION="3.3.0"
 
 # ─── Defaults ────────────────────────────────────────────────────────────────
 TARGET=""
@@ -60,6 +61,10 @@ while [[ $# -gt 0 ]]; do
     --quiet|-q)   QUIET=true; shift ;;
     --help|-h)
       head -35 "$0" | tail -30
+      exit 0
+      ;;
+    --version|-V)
+      echo "fwrite $VERSION"
       exit 0
       ;;
     -*)
