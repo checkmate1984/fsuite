@@ -154,23 +154,39 @@ test("fbash renderer: stderr-only error renders stderr block + red exit", async 
 });
 
 // ──────────────────────────────────────────────────────────────
-// 6. Long output truncation
+// 6. Long output truncation (default — no max_lines param)
 // ──────────────────────────────────────────────────────────────
-test("fbash renderer: long stdout is truncated with '... N more lines' trailer", async () => {
+test("fbash renderer: long stdout is truncated at default 30 lines when max_lines not set", async () => {
   const result = await callFbash({
     command: "seq 1 500",
-    max_lines: 500,
   });
   assert.ok(!result.isError, textContent(result));
   const plain = stripAnsi(textContent(result));
 
   // Should include early lines
-  assert.ok(plain.includes("\n  1\n") || plain.startsWith("  1\n") || plain.includes("  1"),
+  assert.ok(plain.includes("  1"),
     "first line of seq must appear");
   // Truncation trailer
   assert.match(plain, /\.\.\. \d+ more lines/, "truncation trailer must appear for long stdout");
   // Should not actually contain all 500 lines — sample a very late number
   assert.ok(!plain.includes("\n  499\n"), "far-later line should have been truncated");
+});
+
+// ──────────────────────────────────────────────────────────────
+// 6b. Explicit max_lines lifts render cap
+// ──────────────────────────────────────────────────────────────
+test("fbash renderer: explicit max_lines lifts render truncation", async () => {
+  const result = await callFbash({
+    command: "seq 1 100",
+    max_lines: 200,
+  });
+  assert.ok(!result.isError, textContent(result));
+  const plain = stripAnsi(textContent(result));
+
+  // With max_lines=200 and only 100 lines of output, all lines should appear
+  assert.ok(plain.includes("  100"), "line 100 must appear when max_lines is high enough");
+  // No truncation trailer
+  assert.ok(!/\.\.\. \d+ more lines/.test(plain), "no truncation trailer when output fits within max_lines");
 });
 
 // ──────────────────────────────────────────────────────────────

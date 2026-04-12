@@ -374,7 +374,7 @@ function renderFeditResult(jsonStr) {
   }
 }
 
-function renderFreadResult(jsonStr) {
+function renderFreadResult(jsonStr, ctx = {}) {
   try {
     const d = JSON.parse(jsonStr);
     if (!d.tool || d.tool !== "fread") return null;
@@ -405,7 +405,7 @@ function renderFreadResult(jsonStr) {
     const lang = detectLang(d.symbol_resolution?.path || d.files?.[0]?.path || "");
 
 // Cap pretty output at 8 lines — user can Ctrl+O to see full output
-const MAX_PRETTY_LINES = 8;
+const MAX_PRETTY_LINES = ctx.maxLines ?? 8;
 let lineCount = 0;
 let totalLines = 0;
 for (const chunk of (d.chunks || [])) {
@@ -856,7 +856,7 @@ function renderFprobeResult(jsonStr, ctx = {}) {
 }
 
 // ─── fbash pretty renderer ──────────────────────────────────────
-function renderFbashResult(jsonStr) {
+function renderFbashResult(jsonStr, ctx = {}) {
   const d = maybeParseJson(jsonStr);
   if (!d || d.tool !== "fbash") return null;
 
@@ -869,8 +869,8 @@ function renderFbashResult(jsonStr) {
   const MUTE    = fg(170, 160, 140);   // stderr body (muted warm — distinct from stdout without screaming)
   const GRAY    = fg(150, 150, 150);   // dim labels
 
-  const MAX_STDOUT_LINES = 30;
-  const MAX_STDERR_LINES = 10;
+  const MAX_STDOUT_LINES = ctx.maxLines ?? 30;
+  const MAX_STDERR_LINES = ctx.maxLines != null ? Math.max(Math.round(ctx.maxLines / 3), 10) : 10;
 
   const out = [];
 
@@ -1242,7 +1242,7 @@ server.registerTool(
     if (tail !== undefined) args.push("--tail", String(tail));
     if (max_lines !== undefined) args.push("--max-lines", String(max_lines));
     args.push("-o", "json");
-    return cli("fread", args);
+    return cli("fread", args, undefined, { maxLines: max_lines });
   }
 );
 
@@ -1832,7 +1832,7 @@ server.registerTool(
     if (params.background) args.push("--background");
     if (params.tail) args.push("--tail");
     args.push("-o", "json");
-    return cli("fbash", args);
+    return cli("fbash", args, undefined, { maxLines: params.max_lines });
   }
 );
 
