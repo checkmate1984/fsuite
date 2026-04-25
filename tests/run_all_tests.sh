@@ -5,7 +5,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGINAL_HOME="${HOME:-}"
+RUN_ALL_TEST_HOME="$(mktemp -d)"
 export FSUITE_TELEMETRY="${FSUITE_TELEMETRY:-1}"
+export HOME="$RUN_ALL_TEST_HOME"
+mkdir -p "$HOME/.fsuite"
+
+cleanup() {
+  if [[ -n "${RUN_ALL_TEST_HOME:-}" && -d "$RUN_ALL_TEST_HOME" && "$RUN_ALL_TEST_HOME" != "${ORIGINAL_HOME:-}" ]]; then
+    rm -rf "$RUN_ALL_TEST_HOME"
+  fi
+}
+trap cleanup EXIT
 
 # Colors for output
 RED='\033[0;31m'
@@ -49,6 +60,7 @@ main() {
   echo -e "${BLUE}  fsuite Master Test Runner${NC}"
   echo -e "${BLUE}============================================${NC}"
   echo -e "Telemetry tier: ${FSUITE_TELEMETRY}"
+  echo -e "Sandbox HOME: ${HOME}"
   echo ""
 
   local failed_suites=()

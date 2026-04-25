@@ -353,14 +353,31 @@ test("fedit and fwrite MCP return pretty-rendered content", async () => {
 });
 
 test("fmetrics MCP preserves stats JSON as structured content", async () => {
-  const result = await callTool("fmetrics", {
-    action: "stats",
-  });
+  const fixture = makeFixture();
+  try {
+    const seedResult = await callTool("fcontent", {
+      query: "agent",
+      path: fixture,
+      max_matches: 5,
+    });
+    assert.ok(!seedResult.isError, textContent(seedResult));
 
-  assert.ok(!result.isError, textContent(result));
-  assert.ok(result.structuredContent, "fmetrics should have structuredContent");
-  // tool field is stripped by slimStructuredContent — check tools array instead
-  assert.ok(Array.isArray(result.structuredContent.tools), "fmetrics stats should have tools array");
+    const importResult = await callTool("fmetrics", {
+      action: "import",
+    });
+    assert.ok(!importResult.isError, textContent(importResult));
+
+    const result = await callTool("fmetrics", {
+      action: "stats",
+    });
+
+    assert.ok(!result.isError, textContent(result));
+    assert.ok(result.structuredContent, "fmetrics should have structuredContent");
+    // tool field is stripped by slimStructuredContent — check tools array instead
+    assert.ok(Array.isArray(result.structuredContent.tools), "fmetrics stats should have tools array");
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("fmetrics MCP preserves nested per-run fields in history", async () => {
@@ -372,6 +389,11 @@ test("fmetrics MCP preserves nested per-run fields in history", async () => {
       max_matches: 5,
     });
     assert.ok(!seedResult.isError, textContent(seedResult));
+
+    const importResult = await callTool("fmetrics", {
+      action: "import",
+    });
+    assert.ok(!importResult.isError, textContent(importResult));
 
     const result = await callTool("fmetrics", {
       action: "history",

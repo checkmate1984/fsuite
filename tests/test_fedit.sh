@@ -725,17 +725,18 @@ test_tier3_telemetry() {
     return 0
   fi
   reset_fixture "single.py"
-  rm -f "$HOME/.fsuite/telemetry.jsonl" "$HOME/.fsuite/telemetry.db"
-  FSUITE_TELEMETRY=3 "${FEDIT}" "${TEST_DIR}/single.py" --replace 'return False' --with 'return deny()' >/dev/null 2>&1 || {
+  local telemetry_home="${TEST_DIR}/telemetry-home"
+  mkdir -p "$telemetry_home"
+  HOME="$telemetry_home" FSUITE_TELEMETRY=3 "${FEDIT}" "${TEST_DIR}/single.py" --replace 'return False' --with 'return deny()' >/dev/null 2>&1 || {
     fail "Tier 3 telemetry dry-run should succeed"
     return
   }
-  FSUITE_TELEMETRY=0 "${FMETRICS}" import >/dev/null 2>&1 || {
+  HOME="$telemetry_home" FSUITE_TELEMETRY=0 "${FMETRICS}" import >/dev/null 2>&1 || {
     fail "fmetrics import should ingest fedit telemetry"
     return
   }
   local stats
-  stats=$(FSUITE_TELEMETRY=0 "${FMETRICS}" stats -o json 2>/dev/null || true)
+  stats=$(HOME="$telemetry_home" FSUITE_TELEMETRY=0 "${FMETRICS}" stats -o json 2>/dev/null || true)
   if [[ "$stats" == *'"name":"fedit"'* ]]; then
     pass "Tier 3 telemetry is recorded and imported for fedit"
   else
