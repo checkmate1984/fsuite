@@ -323,8 +323,10 @@ class PopplerBackend:
                 raise RuntimeError(
                     f"pdftotext failed on page {p}: {stderr_text[:200]}"
                 )
-            except Exception:
-                results.append("")
+            except OSError as e:
+                raise RuntimeError(f"pdftotext failed to start on page {p}: {e}") from e
+            except Exception as e:
+                raise RuntimeError(f"pdftotext failed unexpectedly on page {p}: {e}") from e
         return results
 
     def render_page(self, path: str, page: int, dpi: int = 100) -> bytes:
@@ -812,7 +814,9 @@ def cmd_pdf(args):
         lowered = msg.lower()
         if "encrypted" in lowered or "password" in lowered:
             err(msg, "PDF_ENCRYPTED")
-        if isinstance(backend, PopplerBackend) and "pdfinfo" in lowered:
+        if isinstance(backend, PopplerBackend) and (
+            "pdfinfo" in lowered or "pdftotext" in lowered
+        ):
             err(msg, "PDF_BACKEND_ERROR")
         raise exc
 

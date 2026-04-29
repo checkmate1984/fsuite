@@ -1414,9 +1414,16 @@ function utf8Bytes(value) {
 function truncateUtf8(value, maxBytes) {
   const text = String(value ?? "");
   if (!Number.isFinite(maxBytes) || maxBytes <= 0) return text;
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return text;
-  return buf.subarray(0, maxBytes).toString("utf8");
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  let out = "";
+  let usedBytes = 0;
+  for (const ch of text) {
+    const bytes = Buffer.byteLength(ch, "utf8");
+    if (usedBytes + bytes > maxBytes) break;
+    out += ch;
+    usedBytes += bytes;
+  }
+  return out;
 }
 
 function appendBudgetedText(blocks, budget, text) {
@@ -2411,6 +2418,7 @@ export const __test__ = {
   buildMediaContent,
   buildFreadMcpContent,
   mediaByteBudget,
+  truncateUtf8,
 };
 
 // ─── Start ───────────────────────────────────────────────────────

@@ -1580,6 +1580,51 @@ fi
 pass "Poppler pdfinfo failure surfaces PDF_BACKEND_ERROR"
 }
 
+# L3. Unexpected Poppler pdftotext failures are surfaced, not converted to empty text
+test_media_poppler_extract_unexpected_failure() {
+local result engine
+engine="${SCRIPT_DIR}/../fread-media.py"
+result=$(python3 - "$engine" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+engine = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("fread_media", engine)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+backend = mod.PopplerBackend()
+old_check_output = mod.subprocess.check_output
+
+def boom(*args, **kwargs):
+    cmd = args[0] if args else []
+    if cmd and cmd[0] == "pdftotext":
+        raise OSError("spawn failed")
+    return old_check_output(*args, **kwargs)
+
+mod.subprocess.check_output = boom
+try:
+    backend.extract_text("sample.pdf", [0])
+except RuntimeError as exc:
+    msg = str(exc)
+    if "pdftotext failed to start" in msg and "spawn failed" in msg:
+        print("OK")
+    else:
+        print("FAIL:" + msg)
+else:
+    print("FAIL:no error")
+finally:
+    mod.subprocess.check_output = old_check_output
+PY
+)
+if [[ "$result" == "OK" ]]; then
+pass "Poppler unexpected pdftotext failure surfaces RuntimeError"
+else
+fail "Poppler unexpected pdftotext failure should not emit empty text" "$result"
+fi
+}
+
 # M. PDF invalid backend
 test_media_backend_force_invalid() {
 local rc=0 combined
@@ -1944,6 +1989,7 @@ run_test "Media error files[].status" test_media_error_populates_files_status
 run_test "PDF encrypted" test_media_pdf_encrypted
 run_test "PDF backend fallback (poppler)" test_media_backend_fallback
 run_test "Poppler pdfinfo failure" test_media_poppler_pdfinfo_failure
+run_test "Poppler pdftotext unexpected failure" test_media_poppler_extract_unexpected_failure
 run_test "PDF invalid backend" test_media_backend_force_invalid
 run_test "No-ingest flag" test_media_no_ingest_flag
 run_test "Ingest helper failure status log" test_media_ingest_logs_helper_failure_status

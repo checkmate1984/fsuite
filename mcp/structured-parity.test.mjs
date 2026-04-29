@@ -822,6 +822,19 @@ test("fread media MCP content honors max_bytes budget", () => {
   assert.ok(Buffer.byteLength(text, "utf8") <= 40, `text should respect maxBytes cap, got ${Buffer.byteLength(text, "utf8")}`);
 });
 
+test("fread media MCP text truncates on UTF-8 boundaries", () => {
+  const truncate = mcpInternals.truncateUtf8;
+  assert.equal(truncate("éé", 1), "");
+  assert.equal(truncate("éé", 2), "é");
+  assert.equal(truncate("éé", 3), "é");
+  assert.equal(truncate("hello", 4), "hell");
+
+  const out = truncate("你好world", 7);
+  assert.equal(out, "你好w");
+  assert.equal(out.includes("\uFFFD"), false, `should not emit replacement char: ${out}`);
+  assert.ok(Buffer.byteLength(out, "utf8") <= 7, `text should fit maxBytes, got ${Buffer.byteLength(out, "utf8")}`);
+});
+
 test("fread media MCP content preserves text chunks in mixed batches", () => {
   const mediaPayload = {
     type: "image",
