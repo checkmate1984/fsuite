@@ -9,6 +9,42 @@ sidebar:
 
 `fbash` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">fbash</span>
+    <span class="fs-drone-tagline">Token-budgeted shell · classification · session state · MCP escape hatch</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-edit">EXEC</span></div>
+    <div><b>Chain position</b><span>specialist</span></div>
+    <div><b>MCP advantage</b><span>shells out to all CLI tools</span></div>
+    <div><b>Output</b><span>budgeted · classified</span></div>
+  </div>
+</div>
+
+`fbash` is `bash` with the same agent-aware budget discipline as the rest of fsuite. Output is capped, classified (stdout vs stderr vs status), and session state persists between calls so you can `cd`, set environment variables, and chain commands across invocations.
+
+**The MCP escape hatch.** If you're calling fsuite tools through the MCP server, every call is sequential — MCP doesn't pipe. But `fbash` runs a real shell, which means real Unix pipes work inside it. Wrap your chain in one `fbash` call and get full pipeline speed back, even from MCP-only agents.
+
+## Canonical chains
+
+```bash
+# Run a real Unix pipe from inside MCP — the escape hatch
+fbash "fsearch -o paths '*.py' src | fmap -o json"
+
+# Triple-chain inside one fbash call
+fbash "fsearch -o paths '*.py' src \
+       | fcontent -o paths 'class' \
+       | fmap -o json"
+
+# Stateful session — cd persists to the next call
+fbash "cd /project && export DEBUG=1"
+fbash "pwd && env | grep DEBUG"
+
+# Long-running with cap
+fbash "find / -name '*.log' 2>/dev/null"   # output capped automatically
+```
+
 ## Help output
 
 The content below is the **live** `--help` output of `fbash`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.

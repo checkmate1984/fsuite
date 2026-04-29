@@ -9,6 +9,42 @@ sidebar:
 
 `freplay` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">freplay</span>
+    <span class="fs-drone-tagline">Derivation chain replay · deterministic rerun</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-state">REPLAY</span></div>
+    <div><b>Chain position</b><span>specialist</span></div>
+    <div><b>Pairs with</b><span>fcase</span></div>
+    <div><b>Use for</b><span>post-mortems · regression</span></div>
+  </div>
+</div>
+
+`freplay` records the exact tool-call sequence inside a case, so you can rerun the chain deterministically later. Useful for post-mortems ("how did the agent reach this conclusion?"), regression tests, and onboarding ("here's the exact recon path I took to find this bug").
+
+It pairs with `fcase` — every replay step belongs to a case, and the recorded chain is part of the handoff envelope.
+
+## Canonical chains
+
+```bash
+# Record a step under a case (with purpose annotation)
+freplay record auth-seam --purpose "Traced denial branch" \
+  -- fread /project/src/auth.py --around 'def auth'
+
+# Record without purpose
+freplay record auth-seam \
+  -- fcontent -o paths "auth" /project/src
+
+# Show the full chain
+freplay show auth-seam
+freplay show auth-seam -o json
+
+# List cases that have a replay chain
+freplay list -o json
+```
+
 ## Help output
 
 The content below is the **live** `--help` output of `freplay`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.

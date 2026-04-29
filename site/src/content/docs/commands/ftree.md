@@ -9,6 +9,45 @@ sidebar:
 
 `ftree` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">ftree</span>
+    <span class="fs-drone-tagline">Territory scout · directory recon · the first move</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-recon">RECON</span></div>
+    <div><b>Chain position</b><span>2 (scout)</span></div>
+    <div><b>Pipe</b><span>not chainable (arg-based)</span></div>
+    <div><b>Output</b><span>pretty · paths · json</span></div>
+  </div>
+</div>
+
+`ftree` is the territory map. Before you guess at what's in a project, drop a tree-snapshot — see what dirs exist, what's loud (lots of files), what's lean, and where the surface area really is. The `--recon` mode adds per-directory item counts and sizes so you can prioritize where to dig.
+
+Use it once at the start of every investigation. Use `--snapshot` when you want recon + a tree excerpt in one envelope.
+
+## Canonical chains
+
+`ftree` doesn't pipe (its output is a tree, not a list of paths) — it sits at the start of a chain to give context, then you act on what it shows.
+
+```bash
+# Default scout — 3-level tree, sensible excludes
+ftree /project
+
+# Recon mode — per-dir item counts + sizes
+ftree --recon /project
+
+# Snapshot — recon inventory + tree excerpt, agent-ready
+ftree --snapshot -o json /project
+
+# Deep dive into a specific subdir
+ftree -L5 /project/src
+
+# Full follow-up: scout, then map symbols of what looks promising
+ftree --recon /project
+fmap -o json /project/src/auth
+```
+
 ## Help output
 
 The content below is the **live** `--help` output of `ftree`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.

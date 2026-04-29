@@ -9,6 +9,54 @@ sidebar:
 
 `fedit` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">fedit</span>
+    <span class="fs-drone-tagline">Surgical patches · line-range · symbol-scoped · anchor-based</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-edit">PATCH</span></div>
+    <div><b>Chain position</b><span>7 (act)</span></div>
+    <div><b>Default</b><span>dry-run (CLI)</span></div>
+    <div><b>Guard</b><span>--expect · --expect-sha256</span></div>
+  </div>
+</div>
+
+`fedit` makes edits without ambiguity. Three modes: **line-range** (`--lines 71:73`), **symbol-scoped** (`--function auth`, `--class AuthHandler`), and **anchor-based** (`--after 'def auth(...):'`). No more failed matches because of whitespace drift or an agent picking the wrong block of identical-looking code.
+
+Default is dry-run on the CLI — you see the diff, then add `--apply` to commit. Guard rails: `--expect` requires a literal string to be present first; `--expect-sha256` requires the file to match a known content hash.
+
+## Canonical chains
+
+```bash
+# Surgical replace — preview first
+fedit /project/src/auth.py --replace 'old text' --with 'new text'
+fedit /project/src/auth.py --replace 'old text' --with 'new text' --apply
+
+# Line-range replace
+fedit /project/src/auth.py --lines 71:73 --with "    return deny()\n"
+
+# Symbol-scoped — function or class block
+fedit /project/src/auth.py --function authenticate --replace 'X' --with 'Y'
+fedit /project/src/auth.py --class AuthHandler --after '...' --with '...'
+
+# Anchor-based insert
+fedit /project/src/auth.py --after 'def authenticate(user):' --content-file patch.txt
+
+# Batch patch via pipe
+fsearch -o paths '*.py' /project \
+  | fedit --targets-file - --targets-format paths \
+          --replace 'x' --with 'y' --apply
+
+# Symbol-scoped batch from fmap output
+fedit --targets-file map.json --targets-format fmap-json \
+      --function auth --replace 'X' --with 'Y' --apply
+
+# Guarded edit — refuses if file content drifted
+fedit /project/src/auth.py --expect-sha256 abc123 \
+      --replace 'X' --with 'Y' --apply
+```
+
 ## Help output
 
 The content below is the **live** `--help` output of `fedit`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.

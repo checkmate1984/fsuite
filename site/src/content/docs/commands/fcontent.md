@@ -9,6 +9,47 @@ sidebar:
 
 `fcontent` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">fcontent</span>
+    <span class="fs-drone-tagline">Bounded content search · token-capped ripgrep</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-recon">NARROW</span></div>
+    <div><b>Chain position</b><span>3 (narrow content)</span></div>
+    <div><b>Pipe</b><span>producer + consumer</span></div>
+    <div><b>Output</b><span>pretty · paths · json</span></div>
+  </div>
+</div>
+
+`fcontent` is `ripgrep` with a token budget. Same speed, same regex power, but capped output so a single grep doesn't blow your context. Use it when you know what's inside a file but not which file.
+
+It's both a producer (`-o paths` outputs file paths that matched) and a consumer (reads paths from stdin to narrow within a previously-filtered set). That makes it the bridge tool in 3-step chains.
+
+## Canonical chains
+
+```bash
+# Search for a literal in a project
+fcontent "ERROR" /var/log
+
+# Get only file paths that matched (pipe currency)
+fcontent -o paths "TODO" /project
+
+# Pipe to fmap — find files containing a keyword, map their symbols
+fcontent -o paths "authenticate" /project | fmap -o json
+
+# Progressive narrowing — chain two fcontents
+fsearch -o paths '*.py' /project \
+  | fcontent -o paths "import" \
+  | fcontent "authenticate"
+
+# Cap match output explicitly
+fcontent -m 20 "debug" /project
+
+# Case-insensitive (passthrough to ripgrep)
+fcontent --rg-args "-i" "error" /var/log
+```
+
 ## Help output
 
 The content below is the **live** `--help` output of `fcontent`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.
