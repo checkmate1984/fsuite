@@ -789,6 +789,9 @@ fi
         err_code="$(printf '%s' "$engine_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('code','INTERNAL_ERROR'))" 2>/dev/null || echo "INTERNAL_ERROR")"
         err_msg="$(printf '%s' "$engine_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('error','unknown error'))" 2>/dev/null || echo "unknown error")"
         add_error "$path" "$err_code" "$err_msg"
+        # Mirror the contract used by other failure paths (not_found, not_regular, etc.):
+        # populate files[].status so downstream callers can correlate errors[] with paths.
+        upsert_file_summary "$path" "$detected" "true" "0" "" "media_error"
         return 0
     fi
 

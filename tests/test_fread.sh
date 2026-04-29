@@ -1355,6 +1355,29 @@ fi
 pass "PDF invalid pages: abc:xyz and 10:20 both give INVALID_PAGE_RANGE"
 }
 
+# J2. Media engine error populates files[].status (mirrors not_found/not_regular contract)
+test_media_error_populates_files_status() {
+  local out rc=0
+  out=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" \
+    "${MEDIA_FIXTURES}/sample.pdf" --pages "abc:xyz" -o json 2>/dev/null) || rc=$?
+  if (( rc == 0 )); then
+    fail "PDF --pages abc:xyz should exit non-zero in JSON mode"
+    return
+  fi
+  local status err_count
+  status=$(printf '%s' "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['files'][0]['status'] if d.get('files') else 'NO_FILES')" 2>/dev/null || echo "PARSE_ERROR")
+  err_count=$(printf '%s' "$out" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('errors',[])))" 2>/dev/null || echo "0")
+  if [[ "$status" != "media_error" ]]; then
+    fail "Media error should set files[0].status=media_error" "Got: $status"
+    return
+  fi
+  if [[ "$err_count" != "1" ]]; then
+    fail "Media error should record exactly 1 entry in errors[]" "Got: $err_count"
+    return
+  fi
+  pass "Media engine error populates files[].status='media_error' alongside errors[]"
+}
+
 # K. PDF encrypted
 test_media_pdf_encrypted() {
 local enc_pdf="${TEST_DIR}/encrypted.pdf"
@@ -1762,6 +1785,7 @@ run_test "PDF meta-only" test_media_pdf_meta_only
 run_test "PDF render pages" test_media_pdf_render_pages
 run_test "PDF render cap" test_media_pdf_render_cap
 run_test "PDF invalid pages" test_media_pdf_invalid_pages
+run_test "Media error files[].status" test_media_error_populates_files_status
 run_test "PDF encrypted" test_media_pdf_encrypted
 run_test "PDF backend fallback (poppler)" test_media_backend_fallback
 run_test "PDF invalid backend" test_media_backend_force_invalid
