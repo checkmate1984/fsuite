@@ -55,6 +55,8 @@ def _effective_pdf_backend():
         if shutil.which("pdftotext") and shutil.which("pdftoppm"):
             return "poppler", "poppler"
         return None, "poppler"
+    if force and force not in ("pymupdf", "poppler"):
+        return None, force
     return BACKEND_PDF, BACKEND_PDF
 
 
@@ -99,9 +101,18 @@ def iso_mtime(path: str) -> str:
     return datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc).isoformat()
 
 
-def tokens_from_b64(data: bytes) -> int:
-    """Estimate LLM token cost from raw bytes (base64 expands ~4/3, then /8 per token)."""
+def tokens_from_b64_bytes_proxy(data: bytes) -> int:
+    """Coarse byte-proxy budget for environments without Pillow.
+
+    NOT a real token estimate — used only as a last-resort budget guard for the
+    stdlib image fallback where dimensions can't be reliably extracted.
+    """
     return int(len(base64.b64encode(data)) * 0.125)
+
+
+# Anthropic Claude vision: ~(w*h)/750 tokens per image
+def tokens_from_dimensions(width: int, height: int) -> int:
+    return max(1, (width * height) // 750)
 
 
 def tokens_from_text(text: str) -> int:
@@ -121,7 +132,7 @@ def build_ingest_payload(
     mem_type = "long_term" if kind == "pdf-text" else "short_term"
 
     lines = [
-        f"Path: {os.path.abspath(path)}",
+        f"Path: {os.path.realpath(path)}",
         f"Format: {fmt}",
         f"Bytes: {size}",
     ]
@@ -163,6 +174,9 @@ class PyMuPDFBackend:
 
     def extract_text(self, path: str, pages: list) -> list:
         doc = fitz.open(path)
+        if doc.is_encrypted and doc.needs_pass:
+            doc.close()
+            raise RuntimeError("PDF is encrypted and requires a password")
         results = []
         for i in pages:
             if 0 <= i < doc.page_count:
@@ -172,12 +186,16 @@ class PyMuPDFBackend:
         doc.close()
         return results
 
-    def render_page(self, path: str, page: int, dpi: int = 100) -> bytes:
+    def render_page(self, path: str, page: int, dpi: int = 100):
         doc = fitz.open(path)
+        if doc.is_encrypted and doc.needs_pass:
+            doc.close()
+            raise RuntimeError("PDF is encrypted and requires a password")
         pix = doc[page].get_pixmap(dpi=dpi)
+        width, height = pix.width, pix.height
         data = pix.tobytes("jpeg")
         doc.close()
-        return data
+        return data, width, height
 
     def get_page_dims(self, path: str, page: int) -> dict:
         doc = fitz.open(path)
@@ -187,6 +205,9 @@ class PyMuPDFBackend:
 
     def metadata(self, path: str) -> dict:
         doc = fitz.open(path)
+        if doc.is_encrypted and doc.needs_pass:
+            doc.close()
+            raise RuntimeError("PDF is encrypted and requires a password")
         pc = doc.page_count
         encrypted = doc.is_encrypted
         page_size = {}
@@ -213,10 +234,51 @@ class PyMuPDFBackend:
 # ── Poppler backend ───────────────────────────────────────────────────────────
 
 class PopplerBackend:
+    def _pdfinfo(self, path: str) -> str:
+        try:
+            return subprocess.check_output(
+                ["pdfinfo", path],
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"pdfinfo timed out: {(e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, (bytes, bytearray)) else (e.stderr or ''))[:200]}"
+            )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"pdfinfo failed: {e.stderr.decode('utf-8', errors='replace')[:200] if isinstance(e.stderr, (bytes, bytearray)) else str(e.stderr or '')[:200]}"
+            )
+
+    def _is_encrypted(self, path: str) -> bool:
+        try:
+            out = self._pdfinfo(path)
+        except RuntimeError as exc:
+            # pdfinfo refuses encrypted PDFs with "Incorrect password" on stderr.
+            msg = str(exc).lower()
+            if "password" in msg or "encrypted" in msg:
+                return True
+            return False
+        except Exception:
+            return False
+        for line in out.splitlines():
+            if line.startswith("Encrypted:"):
+                value = line.split(":", 1)[1].strip().lower()
+                return not value.startswith("no")
+        return False
+
+    def _check_encrypted(self, path: str):
+        if self._is_encrypted(path):
+            raise RuntimeError("PDF is encrypted and requires a password")
+
     def page_count(self, path: str) -> int:
         try:
             out = subprocess.check_output(
-                ["pdfinfo", path], stderr=subprocess.DEVNULL, text=True
+                ["pdfinfo", path],
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
             )
             for line in out.splitlines():
                 if line.startswith("Pages:"):
@@ -226,34 +288,77 @@ class PopplerBackend:
         return 0
 
     def extract_text(self, path: str, pages: list) -> list:
+        self._check_encrypted(path)
         results = []
         for i in pages:
             p = i + 1  # pdftotext is 1-indexed
             try:
                 out = subprocess.check_output(
                     ["pdftotext", "-f", str(p), "-l", str(p), path, "-"],
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=30,
                 )
                 results.append(out.decode("utf-8", errors="replace"))
+            except subprocess.TimeoutExpired as e:
+                stderr_text = (
+                    e.stderr.decode("utf-8", errors="replace")
+                    if isinstance(e.stderr, (bytes, bytearray))
+                    else str(e.stderr or "")
+                )
+                raise RuntimeError(
+                    f"pdftotext timed out on page {p}: {stderr_text[:200]}"
+                )
+            except subprocess.CalledProcessError as e:
+                stderr_text = (
+                    e.stderr.decode("utf-8", errors="replace")
+                    if isinstance(e.stderr, (bytes, bytearray))
+                    else str(e.stderr or "")
+                )
+                raise RuntimeError(
+                    f"pdftotext failed on page {p}: {stderr_text[:200]}"
+                )
             except Exception:
                 results.append("")
         return results
 
     def render_page(self, path: str, page: int, dpi: int = 100) -> bytes:
         import tempfile
+        self._check_encrypted(path)
         p = page + 1  # pdftoppm is 1-indexed
         with tempfile.TemporaryDirectory() as tmp:
             prefix = os.path.join(tmp, "pg")
-            subprocess.check_call(
-                ["pdftoppm", "-jpeg", "-r", str(dpi), "-f", str(p), "-l", str(p),
-                 path, prefix],
-                stderr=subprocess.DEVNULL,
-            )
+            try:
+                subprocess.check_call(
+                    ["pdftoppm", "-jpeg", "-r", str(dpi), "-f", str(p), "-l", str(p),
+                     path, prefix],
+                    stderr=subprocess.PIPE,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(f"pdftoppm timed out on page {p}")
+            except subprocess.CalledProcessError as e:
+                stderr_text = (
+                    e.stderr.decode("utf-8", errors="replace")
+                    if isinstance(e.stderr, (bytes, bytearray))
+                    else str(e.stderr or "")
+                )
+                raise RuntimeError(
+                    f"pdftoppm failed on page {p}: {stderr_text[:200]}"
+                )
             files = sorted(f for f in os.listdir(tmp) if f.endswith(".jpg"))
             if not files:
                 raise RuntimeError(f"pdftoppm produced no output for page {p}")
-            with open(os.path.join(tmp, files[0]), "rb") as f:
-                return f.read()
+            jpeg_path = os.path.join(tmp, files[0])
+            with open(jpeg_path, "rb") as f:
+                data = f.read()
+            width, height = 0, 0
+            if _PilImage is not None:
+                try:
+                    with _PilImage.open(io.BytesIO(data)) as _im:
+                        width, height = _im.size
+                except Exception:
+                    width, height = 0, 0
+            return data, width, height
 
     def get_page_dims(self, path: str, page: int) -> dict:
         # pdfinfo gives page size in points for all pages — not per-page easily
@@ -265,15 +370,29 @@ class PopplerBackend:
         try:
             out = subprocess.check_output(
                 ["pdftotext", "-f", "1", "-l", "1", path, "-"],
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=30,
             )
             has_text = bool(out.strip())
+        except subprocess.TimeoutExpired as e:
+            stderr_text = (
+                e.stderr.decode("utf-8", errors="replace")
+                if isinstance(e.stderr, (bytes, bytearray))
+                else str(e.stderr or "")
+            )
+            raise RuntimeError(
+                f"pdftotext timed out reading page 1: {stderr_text[:200]}"
+            )
         except Exception:
             pass
         page_size = {}
+        encrypted = None
         try:
             out = subprocess.check_output(
-                ["pdfinfo", path], stderr=subprocess.DEVNULL, text=True
+                ["pdfinfo", path],
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
             )
             for line in out.splitlines():
                 if line.startswith("Page size:"):
@@ -286,13 +405,25 @@ class PopplerBackend:
                             }
                         except ValueError:
                             pass
+                if line.startswith("Encrypted:"):
+                    value = line.split(":", 1)[1].strip().lower()
+                    encrypted = not value.startswith("no")
+        except subprocess.TimeoutExpired as e:
+            stderr_text = (
+                e.stderr.decode("utf-8", errors="replace")
+                if isinstance(e.stderr, (bytes, bytearray))
+                else str(e.stderr or "")
+            )
+            raise RuntimeError(
+                f"pdfinfo timed out: {stderr_text[:200]}"
+            )
         except Exception:
             pass
         return {
             "page_count": pc,
-            "encrypted": False,
+            "encrypted": encrypted,
             "has_text": has_text,
-            "embedded_image_count": 0,
+            "embedded_image_count": None,
             "page_size": page_size,
             "mtime": iso_mtime(path),
         }
@@ -301,6 +432,12 @@ class PopplerBackend:
 def get_pdf_backend():
     effective, requested = _effective_pdf_backend()
     if effective is None:
+        if requested and requested not in ("pymupdf", "poppler"):
+            err(
+                f"Forced backend '{requested}' is not recognized. "
+                "Valid values: pymupdf, poppler.",
+                "BACKEND_MISSING",
+            )
         if requested:
             err(
                 f"Forced backend '{requested}' is not available. "
@@ -326,43 +463,58 @@ def fit_to_token_budget(img, target_format: str, max_tokens: int):
     """Iteratively resize/compress image to fit within max_tokens.
 
     Halves dimensions at each step, tries JPEG quality 90 → 70 → 50.
-    Returns (encoded_bytes, info_dict).
+    Final fallback at smallest size + quality 50.
+    Returns (encoded_bytes, info_dict). info_dict["budget_exceeded"] is True
+    when the smallest attempt still exceeds max_tokens.
     """
     from PIL import Image
+    use_jpeg = target_format in ("jpeg", "webp", "gif")
+
+    def _encode(current_img, quality):
+        buf = io.BytesIO()
+        if use_jpeg:
+            current_img.convert("RGB").save(buf, format="JPEG", quality=quality)
+        else:
+            current_img.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+
     resized = False
     current = img.copy()
 
-    for quality in (90, 70, 50):
-        buf = io.BytesIO()
-        use_jpeg = target_format in ("jpeg", "webp", "gif")
-        if use_jpeg:
-            current.convert("RGB").save(buf, format="JPEG", quality=quality)
-        else:
-            current.save(buf, format="PNG", optimize=True)
-        data = buf.getvalue()
-        if tokens_from_b64(data) <= max_tokens:
-            w, h = current.size
+    # Quality ramp: halve dimensions per step for the first three; the final
+    # attempt re-encodes the already-smallest image at quality 50.
+    plan = [(90, False), (70, True), (50, True), (50, False)]
+    last_data = None
+    last_quality = None
+    for quality, halve_first in plan:
+        if halve_first:
+            new_w = max(1, current.width // 2)
+            new_h = max(1, current.height // 2)
+            current = current.resize((new_w, new_h), Image.LANCZOS)
+            resized = True
+        data = _encode(current, quality)
+        last_data = data
+        last_quality = quality
+        w, h = current.size
+        estimate_tokens = tokens_from_dimensions(w, h)
+        if estimate_tokens <= max_tokens:
             return data, {
-                "width": w, "height": h,
+                "width": w,
+                "height": h,
                 "quality": quality if use_jpeg else None,
                 "resized": resized,
+                "budget_exceeded": False,
             }
-        # Halve and loop
-        new_w = max(1, current.width // 2)
-        new_h = max(1, current.height // 2)
-        current = current.resize((new_w, new_h), Image.LANCZOS)
-        resized = True
 
-    # Final attempt
-    buf = io.BytesIO()
-    use_jpeg = target_format in ("jpeg", "webp", "gif")
-    if use_jpeg:
-        current.convert("RGB").save(buf, format="JPEG", quality=50)
-    else:
-        current.save(buf, format="PNG", optimize=True)
-    data = buf.getvalue()
+    # Smallest + quality 50 still exceeds budget — return it anyway, flagged.
     w, h = current.size
-    return data, {"width": w, "height": h, "quality": 50 if use_jpeg else None, "resized": resized}
+    return last_data, {
+        "width": w,
+        "height": h,
+        "quality": last_quality if use_jpeg else None,
+        "resized": resized,
+        "budget_exceeded": True,
+    }
 
 
 # ── Probe subcommand ──────────────────────────────────────────────────────────
@@ -459,24 +611,24 @@ def cmd_image(args):
             },
             "backend": BACKEND_IMAGE,
         })
+        return
 
     # ── full extraction with Pillow ────────────────────────────────────────────
     if BACKEND_IMAGE == "pillow":
         from PIL import Image
-        with Image.open(path) as img:
-            orig_w, orig_h = img.size
-            img_copy = img.copy()
-
         if args.no_resize:
-            with open(path, "rb") as f:
-                raw = f.read()
-            estimate = tokens_from_b64(raw)
+            with Image.open(path) as img:
+                orig_w, orig_h = img.size
+            estimate = tokens_from_dimensions(orig_w, orig_h)
             if estimate > args.max_tokens:
                 err(
-                    f"Raw image token estimate ({estimate}) exceeds budget ({args.max_tokens}). "
+                    f"Image dimensions {orig_w}x{orig_h} estimate to "
+                    f"{estimate} tokens, exceeding budget ({args.max_tokens}). "
                     "Remove --no-resize to allow automatic resizing.",
                     "TOKEN_BUDGET_EXCEEDED",
                 )
+            with open(path, "rb") as f:
+                raw = f.read()
             b64 = base64.b64encode(raw).decode("ascii")
             ingest_summary = f"Image {fmt} {orig_w}x{orig_h}, {size} bytes"
             emit({
@@ -495,11 +647,15 @@ def cmd_image(args):
                     path, fmt, "image", ingest_summary, {}
                 ),
             })
+            return
 
-        # Default: fit to token budget
+        # Default: fit to token budget — only path that needs the copy.
+        with Image.open(path) as img:
+            orig_w, orig_h = img.size
+            img_copy = img.copy()
         encoded, info = fit_to_token_budget(img_copy, fmt, args.max_tokens)
         b64 = base64.b64encode(encoded).decode("ascii")
-        estimate = tokens_from_b64(encoded)
+        estimate = tokens_from_dimensions(info["width"], info["height"])
         use_jpeg = fmt in ("jpeg", "webp", "gif")
         out_mime = "image/jpeg" if (use_jpeg or info.get("quality") is not None) else mime_type
         ingest_summary = f"Image {fmt} {orig_w}x{orig_h}, {size} bytes"
@@ -513,17 +669,19 @@ def cmd_image(args):
                 "dimensions": {"width": info["width"], "height": info["height"]},
                 "resized": info["resized"],
                 "tokens_estimate": estimate,
+                "budget_exceeded": info.get("budget_exceeded", False),
             },
             "backend": BACKEND_IMAGE,
             "ingest_payload": build_ingest_payload(
                 path, fmt, "image", ingest_summary, {}
             ),
         })
+        return
 
     # ── stdlib fallback ────────────────────────────────────────────────────────
     with open(path, "rb") as f:
         raw = f.read()
-    estimate = tokens_from_b64(raw)
+    estimate = tokens_from_b64_bytes_proxy(raw)
     if estimate > args.max_tokens and not args.no_resize:
         err(
             f"Pillow not installed; cannot resize. "
@@ -548,20 +706,53 @@ def cmd_image(args):
         "backend": BACKEND_IMAGE,
         "ingest_payload": build_ingest_payload(path, fmt, "image", ingest_summary, {}),
     })
+    return
 
 
 # ── PDF subcommand ────────────────────────────────────────────────────────────
 
 def _parse_page_range(pages_str: str, total: int) -> list:
-    """Parse 'X:Y' (1-indexed, inclusive) into 0-indexed list."""
+    """Parse 'X:Y' (1-indexed, inclusive) into 0-indexed list.
+
+    Strict: raises ValueError on malformed input. Empty string returns all
+    pages. A single number 'X' returns only that page (single-page form, not
+    'from X to end'). A trailing colon 'X:' means 'from X to end'. The end is
+    clamped to total, but the start must be within document length.
+    """
     if not pages_str:
         return list(range(total))
     parts = pages_str.split(":")
-    try:
-        lo = max(1, int(parts[0]))
-        hi = int(parts[1]) if len(parts) > 1 and parts[1] else total
-    except ValueError:
-        return list(range(total))
+    if len(parts) > 2:
+        raise ValueError("Invalid page range: too many colons")
+
+    # Parse lo
+    if len(parts) == 2 and parts[0] == "":
+        lo = 1  # leading colon ":Y" → from page 1
+    else:
+        try:
+            lo = int(parts[0])
+        except ValueError:
+            raise ValueError(f"Invalid page range start: {parts[0]!r}")
+
+    # Parse hi
+    if len(parts) == 1:
+        hi = lo  # single page like "3" → only that page
+    elif parts[1] == "":
+        hi = total  # trailing colon "3:" → to end
+    else:
+        try:
+            hi = int(parts[1])
+        except ValueError:
+            raise ValueError(f"Invalid page range end: {parts[1]!r}")
+
+    if lo < 1:
+        raise ValueError(f"Page numbers must be >= 1; got {lo}")
+    if lo > hi:
+        raise ValueError(f"Page range start ({lo}) cannot exceed end ({hi})")
+    if lo > total:
+        raise ValueError(
+            f"Page range start ({lo}) exceeds document length ({total} pages)"
+        )
     hi = min(hi, total)
     return list(range(lo - 1, hi))
 
@@ -584,15 +775,33 @@ def cmd_pdf(args):
     size = os.path.getsize(path)
     total_pages = backend.page_count(path)
 
+    # Early encryption check for PopplerBackend: page_count silently returns 0
+    # on encrypted PDFs because pdfinfo refuses, so we'd otherwise mislead the
+    # caller. PyMuPDF backend raises inside extract_text/render_page/metadata.
+    if isinstance(backend, PopplerBackend) and backend._is_encrypted(path):
+        err("PDF is encrypted and requires a password", "PDF_ENCRYPTED")
+    def _surface_runtime(exc: Exception):
+        msg = str(exc)
+        if "encrypted" in msg.lower():
+            err(msg, "PDF_ENCRYPTED")
+        raise exc
+
     # ── meta-only ──────────────────────────────────────────────────────────────
     if args.meta_only:
-        meta = backend.metadata(path)
+        try:
+            meta = backend.metadata(path)
+        except RuntimeError as exc:
+            _surface_runtime(exc)
         emit({"type": "pdf-meta", "file": meta, "backend": backend_name})
+        return
 
     # ── render mode ───────────────────────────────────────────────────────────
     if args.render:
         pages_str = args.pages or "1:5"
-        page_indices = _parse_page_range(pages_str, total_pages)
+        try:
+            page_indices = _parse_page_range(pages_str, total_pages)
+        except ValueError as exc:
+            err(str(exc), "INVALID_PAGE_RANGE")
 
         if len(page_indices) > 10 and args.max_pages is None:
             err(
@@ -606,9 +815,15 @@ def cmd_pdf(args):
 
         pages_out = []
         for i in page_indices:
-            jpeg_bytes = backend.render_page(path, i, dpi=100)
+            try:
+                jpeg_bytes, w_render, h_render = backend.render_page(path, i, dpi=100)
+            except RuntimeError as exc:
+                _surface_runtime(exc)
             b64 = base64.b64encode(jpeg_bytes).decode("ascii")
-            estimate = tokens_from_b64(jpeg_bytes)
+            if w_render and h_render:
+                estimate = tokens_from_dimensions(w_render, h_render)
+            else:
+                estimate = tokens_from_b64_bytes_proxy(jpeg_bytes)
             dims = backend.get_page_dims(path, i)
             pages_out.append({
                 "page": i + 1,
@@ -633,18 +848,25 @@ def cmd_pdf(args):
                 {"page_count": total_pages},
             ),
         })
+        return
 
     # ── default: text extraction ───────────────────────────────────────────────
     pages_str = args.pages or None
     if pages_str:
-        page_indices = _parse_page_range(pages_str, total_pages)
+        try:
+            page_indices = _parse_page_range(pages_str, total_pages)
+        except ValueError as exc:
+            err(str(exc), "INVALID_PAGE_RANGE")
     else:
         page_indices = list(range(total_pages))
 
     per_page_cap_tokens = 5000
     total_cap_tokens = args.token_budget
 
-    raw_texts = backend.extract_text(path, page_indices)
+    try:
+        raw_texts = backend.extract_text(path, page_indices)
+    except RuntimeError as exc:
+        _surface_runtime(exc)
 
     assembled_parts = []
     total_tokens = 0
@@ -662,8 +884,8 @@ def cmd_pdf(args):
             remaining = total_cap_tokens - total_tokens
             if remaining > 0:
                 text = text[: remaining * 4]
-                assembled_parts.append(f"--- page {pg_idx + 1} ---\n{text}")
-                pages_returned.append(pg_idx + 1)
+            assembled_parts.append(f"--- page {pg_idx + 1} ---\n{text}")
+            pages_returned.append(pg_idx + 1)
             truncated = True
             break
         assembled_parts.append(f"--- page {pg_idx + 1} ---\n{text}")
@@ -692,6 +914,7 @@ def cmd_pdf(args):
             {"page_count": total_pages},
         ),
     })
+    return
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -749,8 +972,7 @@ def main():
     args = parser.parse_args()
 
     if not args.command:
-        parser.print_help(sys.stderr)
-        sys.exit(1)
+        err("No subcommand specified. Use: probe, image, or pdf.", "MISSING_SUBCOMMAND")
 
     try:
         if args.command == "probe":
