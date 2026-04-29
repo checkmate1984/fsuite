@@ -653,7 +653,12 @@ start_background_job() {
   else
     nohup "$runner" </dev/null >/dev/null 2>&1 &
   fi
-  echo $! > "$JOBS_DIR/${job_id}.pid"
+  local launcher_pid=$!
+  for _ in {1..20}; do
+    [[ -s "$JOBS_DIR/${job_id}.pid" ]] && break
+    sleep 0.01
+  done
+  [[ -s "$JOBS_DIR/${job_id}.pid" ]] || echo "$launcher_pid" > "$JOBS_DIR/${job_id}.pid"
 
   # Set permissions
   chmod 600 "$JOBS_DIR/${job_id}"* 2>/dev/null || true
