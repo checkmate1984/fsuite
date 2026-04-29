@@ -1446,8 +1446,9 @@ function appendBudgetedImage(blocks, budget, data, mimeType) {
 
 function buildMediaContent(payload, opts) {
   if (!payload || typeof payload !== "object") return null;
-  const maxLines = opts && Number.isFinite(opts.maxLines) && opts.maxLines > 0 ? opts.maxLines : 0;
-  const budget = opts?.budget || mediaByteBudget(opts?.maxBytes);
+  const full = Boolean(opts?.full);
+  const maxLines = !full && opts && Number.isFinite(opts.maxLines) && opts.maxLines > 0 ? opts.maxLines : 0;
+  const budget = opts?.budget || mediaByteBudget(full ? 0 : opts?.maxBytes);
   switch (payload.type) {
     case "image": {
       const f = payload.file || {};
@@ -1565,7 +1566,7 @@ function renderFreadTextResult(raw, parsed, opts = {}) {
 }
 
 function buildFreadMcpContent(raw, parsed, opts = {}) {
-  const mediaBudget = opts.budget || mediaByteBudget(opts.maxBytes);
+  const mediaBudget = opts.full ? mediaByteBudget(0) : (opts.budget || mediaByteBudget(opts.maxBytes));
   const mediaPayloads = parsed && Array.isArray(parsed.media_payloads) && parsed.media_payloads.length > 0
     ? parsed.media_payloads
     : (parsed && parsed.media_payload ? [parsed.media_payload] : []);
@@ -1741,7 +1742,7 @@ server.registerTool(
       pages: z.string().optional().describe("Media: PDF page range, e.g. '1:5'. With render, picks which pages to rasterize; with text mode, restricts extraction."),
       no_resize: z.boolean().optional().describe("Media: image — return raw base64 without auto-resize. Refused if estimated tokens exceed budget."),
       max_pages: z.number().int().positive().optional().describe("Media: PDF — raise the 10-page render cap."),
-      max_tokens: z.number().int().positive().optional().describe("Media: image — token budget for the resize loop (default 6000)."),
+      max_tokens: z.number().int().nonnegative().optional().describe("Media: image — token budget for the resize loop (default 6000; 0 disables the cap)."),
       no_ingest: z.boolean().optional().describe("Media: skip the ShieldCortex memory-ingest spawn for this read."),
       max_bytes: z.number().int().nonnegative().optional().describe("Cap total bytes emitted (0/default = uncapped)"),
       token_budget: z.number().int().nonnegative().optional().describe("Cap by estimated tokens"),

@@ -780,6 +780,7 @@ test("fread MCP schema exposes media flags", async () => {
   assert.equal(props.no_resize.type, "boolean");
   assert.equal(props.max_pages.type, "integer");
   assert.equal(props.max_tokens.type, "integer");
+  assert.equal(props.max_tokens.minimum, 0);
   assert.equal(props.no_ingest.type, "boolean");
 });
 
@@ -877,4 +878,24 @@ test("fread media MCP content preserves text chunks in mixed batches", () => {
   assert.ok(text.includes("# Notes"), `expected rendered markdown chunk, got: ${text}`);
   assert.ok(text.includes("keep this text"), `expected text content from mixed batch, got: ${text}`);
   assert.equal(text.includes("\"base64\""), false, `media JSON chunk should not be rendered as text: ${text}`);
+});
+
+test("fread media MCP content honors full mode by disabling preview caps", () => {
+  const payload = {
+    type: "pdf-text",
+    file: {
+      text: "first\nsecond\nthird",
+      page_count: 1,
+      pages_returned: 1,
+      truncated: false,
+    },
+    backend: "pymupdf",
+  };
+
+  const result = mcpInternals.buildMediaContent(payload, { maxLines: 1, maxBytes: 8, full: true });
+  const text = textContent(result);
+  assert.ok(text.includes("first"), `expected first line, got: ${text}`);
+  assert.ok(text.includes("second"), `full mode should not apply max_lines, got: ${text}`);
+  assert.ok(text.includes("third"), `full mode should not apply max_lines, got: ${text}`);
+  assert.equal(text.includes("truncated:"), false, `full mode should not append preview truncation note: ${text}`);
 });
