@@ -762,3 +762,38 @@ test("fedit pretty output includes colored filename from path", async () => {
     rmSync(fixture, { recursive: true, force: true });
   }
 });
+
+// ─── PR #38 round-2 review: media flag schema + error envelope shape ───
+
+test("fread MCP schema exposes media flags", async () => {
+  const tools = await withClient((client) => client.listTools());
+  const fread = tools.tools.find((t) => t.name === "fread");
+  assert.ok(fread, "fread tool should be registered");
+  const props = fread.inputSchema?.properties ?? {};
+  for (const flag of ["meta_only", "render", "pages", "no_resize", "max_pages", "max_tokens", "no_ingest"]) {
+    assert.ok(flag in props, `fread inputSchema missing ${flag}`);
+  }
+  assert.equal(props.meta_only.type, "boolean");
+  assert.equal(props.render.type, "boolean");
+  assert.equal(props.pages.type, "string");
+  assert.equal(props.no_resize.type, "boolean");
+  assert.equal(props.max_pages.type, "integer");
+  assert.equal(props.max_tokens.type, "integer");
+  assert.equal(props.no_ingest.type, "boolean");
+});
+
+test("fread MCP error path returns isError envelope (formatExecError shape)", async () => {
+  // Trigger a clean engine error: missing file. The catch path now goes through
+  // formatExecError instead of double-spawning fread. Verify the envelope shape:
+  // { content: [{ type: 'text', text: 'Error running fread: ...' }], isError: true }
+  const result = await callTool("fread", { path: "/nonexistent/__pr38_definitely_missing__.xyz" });
+  assert.equal(result.isError, true, `expected isError=true, got ${JSON.stringify(result)}`);
+  assert.ok(Array.isArray(result.content) && result.content.length > 0, "result.content should be non-empty array");
+  const text = textContent(result);
+  assert.ok(text.includes("fread"), `error text should mention tool, got: ${text.slice(0, 200)}`);
+  // Sanity: structuredContent is optional but should NOT throw shape errors when absent.
+  // (If present, it should be an object — never a primitive.)
+  if (result.structuredContent !== undefined) {
+    assert.equal(typeof result.structuredContent, "object", "structuredContent should be object when present");
+  }
+});

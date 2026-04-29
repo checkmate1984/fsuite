@@ -1579,7 +1579,59 @@ fail "Engine probe missing file: expected FILE_NOT_FOUND error" "$r4"
 return
 fi
 
-pass "Engine standalone probe: image/pdf/big.pdf/missing all correct"
+  pass "Engine standalone probe: image/pdf/big.pdf/missing all correct"
+}
+
+# P2 #1: Budget-blocked media must be marked budget_skipped (not "read") and emit no media_payload.
+test_media_budget_skipped_status() {
+  local output rc=0
+  output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.png" --max-bytes 10 -o json 2>/dev/null) || rc=$?
+  if (( rc != 0 )); then
+    fail "Budget-skipped media should still exit 0" "exit=$rc"
+    return
+  fi
+  local result
+  result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+files = d.get('files', [])
+mp = d.get('media_payload')
+ok = (
+  len(files) == 1 and
+  files[0].get('status') == 'budget_skipped' and
+  mp in (None, {})
+)
+print('OK' if ok else 'FAIL: status=%s media_payload_present=%s' % (
+  files[0].get('status') if files else 'missing',
+  mp is not None and mp != {}))
+" 2>/dev/null || echo "PARSE_ERROR")
+  if [[ "$result" == "OK" ]]; then
+    pass "Budget-skipped media: status=budget_skipped, no media_payload"
+  else
+    fail "Budget-skipped media: wrong shape" "$result"
+  fi
+}
+
+# P2 #4: --self-check must surface media-deps probe with PIL + fitz lines.
+test_self_check_media_probe() {
+  local output
+  output=$("${FREAD}" --self-check 2>&1)
+  if [[ "$output" == *"PIL"* ]] && [[ "$output" == *"fitz"* ]]; then
+    pass "Self-check surfaces PIL and fitz probes"
+  else
+    fail "Self-check missing media probe" "Got: $output"
+  fi
+}
+
+# P2 #4: --install-hints must include media support section + pymupdf install line.
+test_install_hints_media_section() {
+  local output
+  output=$("${FREAD}" --install-hints 2>&1)
+  if [[ "$output" == *"Media support"* ]] && [[ "$output" == *"pymupdf"* ]]; then
+    pass "Install-hints includes Media support and pymupdf"
+  else
+    fail "Install-hints missing media section" "Got: $output"
+  fi
 }
 
 # ============================================================================
@@ -1716,6 +1768,10 @@ run_test "PDF invalid backend" test_media_backend_force_invalid
 run_test "No-ingest flag" test_media_no_ingest_flag
 run_test "PDF token budget truncation" test_media_pdf_token_budget_truncation
 run_test "Engine standalone probe" test_media_python_engine_standalone
+
+run_test "Budget-skipped media status" test_media_budget_skipped_status
+run_test "Self-check media probe" test_self_check_media_probe
+run_test "Install-hints media section" test_install_hints_media_section
   echo ""
   echo "======================================"
   echo "  Test Results"

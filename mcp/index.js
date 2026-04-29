@@ -1434,6 +1434,53 @@ function buildMediaContent(payload) {
 }
 
 // ─── Helper: run CLI tool, pretty-render if possible ─────────────
+function formatExecError(err, tool, renderAs, renderContext) {
+  // Try to parse JSON from stdout first, then stderr, then fall back to plain text
+  let errorText = err.message;
+  let parsed = undefined;
+  const parsedErrorText = (value) => {
+    if (!value || typeof value !== "object") return "";
+    if (value.errors?.length) {
+      return value.errors.map((e) => e.error_detail || e.error || e).join("; ");
+    }
+    if (value.error_detail) return value.error_detail;
+    if (value.error) return value.error;
+    if (typeof value.stderr === "string" && value.stderr.trim()) return value.stderr;
+    if (typeof value.stdout === "string" && value.stdout.trim()) return value.stdout;
+    return "";
+  };
+
+  if (err.stdout) {
+    try {
+      parsed = JSON.parse(err.stdout);
+      // fbash: non-zero exit is normal (command failed, not tool failed)
+      // Return as success with the structured JSON so renderers can display it
+      if (parsed && typeof parsed.exit_code === "number" && tool === "fbash") {
+        const raw = err.stdout;
+        const pretty = RENDERERS[renderAs || tool]?.(raw, renderContext);
+        if (pretty) return { content: [{ type: "text", text: pretty }] };
+        return { content: [{ type: "text", text: raw }] };
+      }
+      const message = parsedErrorText(parsed);
+      if (message) errorText = message;
+    } catch { /* not JSON in stdout, try stderr */ }
+  }
+  if ((errorText === err.message || !parsed) && err.stderr) {
+    try {
+      const stderrParsed = JSON.parse(err.stderr);
+      if (!parsed) parsed = stderrParsed;
+      const message = parsedErrorText(stderrParsed);
+      if (message) errorText = message;
+    } catch { /* not JSON in stderr, use plain text */ }
+  }
+
+  if (errorText === err.message) {
+    errorText = err.stderr || err.stdout || err.message;
+  }
+
+  return { content: [{ type: "text", text: `Error running ${tool}: ${errorText}` }], isError: true };
+}
+
 async function cli(tool, args, renderAs, renderContext) {
   try {
     const opts = execOptsFor(tool);
@@ -1467,50 +1514,7 @@ async function cli(tool, args, renderAs, renderContext) {
       if (parsed !== undefined) noRendererResult.structuredContent = parsed;
       return noRendererResult;
   } catch (err) {
-    // Try to parse JSON from stdout first, then stderr, then fall back to plain text
-    let errorText = err.message;
-    let parsed = undefined;
-    const parsedErrorText = (value) => {
-      if (!value || typeof value !== "object") return "";
-      if (value.errors?.length) {
-        return value.errors.map((e) => e.error_detail || e.error || e).join("; ");
-      }
-      if (value.error_detail) return value.error_detail;
-      if (value.error) return value.error;
-      if (typeof value.stderr === "string" && value.stderr.trim()) return value.stderr;
-      if (typeof value.stdout === "string" && value.stdout.trim()) return value.stdout;
-      return "";
-    };
-
-    if (err.stdout) {
-      try {
-        parsed = JSON.parse(err.stdout);
-        // fbash: non-zero exit is normal (command failed, not tool failed)
-        // Return as success with the structured JSON so renderers can display it
-        if (parsed && typeof parsed.exit_code === "number" && tool === "fbash") {
-          const raw = err.stdout;
-          const pretty = RENDERERS[renderAs || tool]?.(raw, renderContext);
-          if (pretty) return { content: [{ type: "text", text: pretty }] };
-          return { content: [{ type: "text", text: raw }] };
-        }
-        const message = parsedErrorText(parsed);
-        if (message) errorText = message;
-      } catch { /* not JSON in stdout, try stderr */ }
-    }
-    if ((errorText === err.message || !parsed) && err.stderr) {
-      try {
-        const stderrParsed = JSON.parse(err.stderr);
-        if (!parsed) parsed = stderrParsed;
-        const message = parsedErrorText(stderrParsed);
-        if (message) errorText = message;
-      } catch { /* not JSON in stderr, use plain text */ }
-    }
-
-    if (errorText === err.message) {
-      errorText = err.stderr || err.stdout || err.message;
-    }
-
-    return { content: [{ type: "text", text: `Error running ${tool}: ${errorText}` }], isError: true };
+    return formatExecError(err, tool, renderAs, renderContext);
   }
 }
 
@@ -1575,14 +1579,21 @@ server.registerTool(
       after: z.number().optional().describe("Lines of context after match (default 10)"),
       head: z.number().optional().describe("Read first N lines"),
       tail: z.number().optional().describe("Read last N lines"),
-        max_lines: z.number().int().nonnegative().optional().describe("Cap total lines emitted (0/default = uncapped)"),
+      max_lines: z.number().int().nonnegative().optional().describe("Cap total lines emitted (0/default = uncapped)"),
+      no_truncate: z.boolean().optional().describe("Alias for full; disable fread budgets and MCP preview truncation"),
+      meta_only: z.boolean().optional().describe("Media: skip body, return metadata only (image dimensions / PDF page count + encryption + page size)"),
+      render: z.boolean().optional().describe("Media: PDF — render pages to images instead of extracting text. Capped at 10 pages without max_pages."),
+      pages: z.string().optional().describe("Media: PDF page range, e.g. '1:5'. With render, picks which pages to rasterize; with text mode, restricts extraction."),
+      no_resize: z.boolean().optional().describe("Media: image — return raw base64 without auto-resize. Refused if estimated tokens exceed budget."),
+      max_pages: z.number().int().positive().optional().describe("Media: PDF — raise the 10-page render cap."),
+      max_tokens: z.number().int().positive().optional().describe("Media: image — token budget for the resize loop (default 6000)."),
+      no_ingest: z.boolean().optional().describe("Media: skip the ShieldCortex memory-ingest spawn for this read."),
         max_bytes: z.number().int().nonnegative().optional().describe("Cap total bytes emitted (0/default = uncapped)"),
         token_budget: z.number().int().nonnegative().optional().describe("Cap by estimated tokens"),
         full: z.boolean().optional().describe("Disable fread budgets and MCP preview truncation"),
-        no_truncate: z.boolean().optional().describe("Alias for full; disable fread budgets and MCP preview truncation"),
       }),
     },
-    async ({ path, paths, symbol, lines, around, around_line, before, after, head, tail, max_lines, max_bytes, token_budget, full, no_truncate }) => {
+    async ({ path, paths, symbol, lines, around, around_line, before, after, head, tail, max_lines, max_bytes, token_budget, full, no_truncate, meta_only, render, pages, no_resize, max_pages, max_tokens, no_ingest }) => {
       const args = [];
     if (paths && paths.length > 0) {
       args.push("--paths", paths.map((p) => p.replace(/,/g, "\\,")).join(","));
@@ -1602,6 +1613,13 @@ server.registerTool(
       if (max_lines !== undefined) args.push("--max-lines", String(max_lines));
       if (max_bytes !== undefined) args.push("--max-bytes", String(max_bytes));
       if (token_budget !== undefined) args.push("--token-budget", String(token_budget));
+      if (meta_only) args.push("--meta-only");
+      if (render) args.push("--render");
+      if (pages) args.push("--pages", pages);
+      if (no_resize) args.push("--no-resize");
+      if (max_pages !== undefined) args.push("--max-pages", String(max_pages));
+      if (max_tokens !== undefined) args.push("--max-tokens", String(max_tokens));
+      if (no_ingest) args.push("--no-ingest");
       const wantsFull = Boolean(full || no_truncate);
       if (wantsFull) args.push("--no-truncate");
       args.push("-o", "json");
@@ -1634,10 +1652,9 @@ try {
   const noRendererResult = { content: [{ type: "text", text: raw }] };
   if (slim !== undefined) noRendererResult.structuredContent = slim;
   return noRendererResult;
-} catch {
-  // fall through to standard cli() path (engine error, missing file, etc.)
-}
-return cli("fread", args, undefined, { maxLines: max_lines, full: wantsFull });
+      } catch (err) {
+        return formatExecError(err, "fread", undefined, { maxLines: max_lines, full: wantsFull });
+      }
     }
   );
 
