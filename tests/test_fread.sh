@@ -67,8 +67,11 @@ PYEOF
   # Empty file
   touch "${TEST_DIR}/empty.txt"
 
-  # Binary file (contains NUL bytes)
-  printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR' > "${TEST_DIR}/image.png"
+# Non-media binary file (raw NUL bytes, no media magic header).
+# Phase 2 added media dispatch ahead of binary-skip; this fixture deliberately
+# uses NUL bytes with no PNG/PDF/JPEG magic so it still hits the skipped_binary
+# path rather than the media engine.
+printf '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' > "${TEST_DIR}/image.png"
 
   # File with special chars in name
   echo "special content" > "${TEST_DIR}/file with spaces.txt"
@@ -368,7 +371,9 @@ test_binary_file_skipped() {
 test_force_text_reads_binary() {
   local output
   output=$(FSUITE_TELEMETRY=0 "${FREAD}" "${TEST_DIR}/image.png" --force-text -o json 2>/dev/null)
-  if [[ "$output" =~ \"status\":\"read\" ]]; then
+# NUL-byte binary has no text lines, so --force-text yields read_empty; both
+# read and read_empty confirm the media-skip was bypassed by --force-text.
+if [[ "$output" =~ \"status\":\"read\" ]] || [[ "$output" =~ \"status\":\"read_empty\" ]]; then
     pass "--force-text reads binary file"
   else
     fail "--force-text should force read" "Got: $output"
@@ -1082,10 +1087,498 @@ test_language_detection() {
   fi
 }
 
+# ── Media reading tests (Phase 5) ────────────────────────────────────────────
+# These tests exercise the fread-media.py engine dispatch added in Phase 1-2.
+# All use real fixture files from tests/fixtures/media/ which are checked in.
+MEDIA_FIXTURES="${SCRIPT_DIR}/fixtures/media"
+
+# A. Image pretty mode — no base64 in stdout
+test_media_image_pretty_no_base64() {
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.png" 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "Image pretty mode should exit 0" "exit=$rc"
+return
+fi
+if [[ "$output" != *"PNG"* ]]; then
+fail "Image pretty output missing PNG" "Got: $output"
+return
+fi
+if [[ "$output" != *"100"*"80"* ]]; then
+fail "Image pretty output missing dimensions 100x80" "Got: $output"
+return
+fi
+if [[ "$output" == *"iVBORw0KGgo"* ]]; then
+fail "Image pretty mode must not contain base64 payload" "Got base64 in stdout"
+return
+fi
+pass "Image pretty mode: no base64, shows PNG + dimensions"
+}
+
+# B. Image JSON has media_payload
+test_media_image_json_has_media_payload() {
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.png" -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "Image JSON should exit 0" "exit=$rc"
+return
+fi
+local result
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mp = d.get('media_payload', {})
+f  = mp.get('file', {})
+ip = mp.get('ingest_payload', {})
+ok = (
+    'media_payload' in d and
+    mp.get('type') == 'image' and
+    isinstance(f.get('tokens_estimate'), int) and
+    1 <= f.get('tokens_estimate', 0) <= 50 and
+    f.get('format') == 'png' and
+    'ingest_payload' in mp and
+    ip.get('category') == 'custom' and
+    any(t.startswith('hash:') for t in ip.get('tags', []))
+)
+print('OK' if ok else 'FAIL: type=%s fmt=%s tok=%s cat=%s tags=%s' % (
+    mp.get('type'), f.get('format'), f.get('tokens_estimate'),
+    ip.get('category'), ip.get('tags')))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "Image JSON: media_payload structure correct"
+else
+fail "Image JSON: media_payload structure wrong" "$result"
+fi
+}
+
+# C. Image meta-only
+test_media_image_meta_only() {
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.png" --meta-only -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "Image meta-only should exit 0" "exit=$rc"
+return
+fi
+local result
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mp = d.get('media_payload', {})
+f  = mp.get('file', {})
+ok = (
+    mp.get('type') == 'image-meta' and
+    'data' not in f and
+    'base64' not in str(f)
+)
+print('OK' if ok else 'FAIL: type=%s file_keys=%s' % (mp.get('type'), list(f.keys())))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "Image meta-only: type=image-meta, no base64"
+else
+fail "Image meta-only: wrong output" "$result"
+fi
+}
+
+# D. Image no-resize token refusal
+test_media_image_no_resize_token_refusal() {
+local rc=0 combined
+combined=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.png" --no-resize --max-tokens 1 2>&1) || rc=$?
+if (( rc == 0 )); then
+fail "Image --no-resize --max-tokens 1 should exit non-zero"
+return
+fi
+if [[ "$combined" != *"TOKEN_BUDGET_EXCEEDED"* ]]; then
+fail "Image token refusal should mention TOKEN_BUDGET_EXCEEDED" "Got: $combined"
+return
+fi
+pass "Image --no-resize --max-tokens 1 exits non-zero with TOKEN_BUDGET_EXCEEDED"
+}
+
+# E. PDF text default (pretty)
+test_media_pdf_text_default() {
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.pdf" 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "PDF pretty mode should exit 0" "exit=$rc"
+return
+fi
+if [[ "$output" != *"--- page 1 ---"* ]]; then
+fail "PDF text missing '--- page 1 ---'" "Got: ${output:0:200}"
+return
+fi
+local sep_count
+sep_count=$(printf '%s' "$output" | grep -c "^--- page " || true)
+if (( sep_count < 2 )); then
+fail "PDF text should have at least 2 page separators" "Got count=$sep_count"
+return
+fi
+pass "PDF text pretty: page separators present"
+}
+
+# F. PDF text JSON
+test_media_pdf_text_json() {
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.pdf" -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "PDF JSON should exit 0" "exit=$rc"
+return
+fi
+local result
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mp = d.get('media_payload', {})
+f  = mp.get('file', {})
+ok = (
+    mp.get('type') == 'pdf-text' and
+    f.get('pages_returned') == [1, 2, 3, 4, 5] and
+    f.get('truncated') == False and
+    len(f.get('text', '')) > 100
+)
+print('OK' if ok else 'FAIL: type=%s pages=%s trunc=%s textlen=%d' % (
+    mp.get('type'), f.get('pages_returned'), f.get('truncated'), len(f.get('text',''))))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "PDF text JSON: correct type, pages, not truncated"
+else
+fail "PDF text JSON: wrong output" "$result"
+fi
+}
+
+# G. PDF meta-only
+test_media_pdf_meta_only() {
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.pdf" --meta-only -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "PDF meta-only should exit 0" "exit=$rc"
+return
+fi
+local result
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mp = d.get('media_payload', {})
+f  = mp.get('file', {})
+ok = mp.get('type') == 'pdf-meta' and f.get('page_count') == 5
+print('OK' if ok else 'FAIL: type=%s page_count=%s' % (mp.get('type'), f.get('page_count')))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "PDF meta-only: type=pdf-meta, page_count=5"
+else
+fail "PDF meta-only: wrong output" "$result"
+fi
+}
+
+# H. PDF render pages
+test_media_pdf_render_pages() {
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.pdf" --render --pages 1:2 -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "PDF render pages should exit 0" "exit=$rc"
+return
+fi
+local result
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mp = d.get('media_payload', {})
+f  = mp.get('file', {})
+pages = f.get('pages', [])
+ok = (
+    mp.get('type') == 'pdf-pages' and
+    f.get('count') == 2 and
+    len(pages) == 2 and
+    all(p.get('mime_type') == 'image/jpeg' for p in pages)
+)
+print('OK' if ok else 'FAIL: type=%s count=%s mimes=%s' % (
+    mp.get('type'), f.get('count'), [p.get('mime_type') for p in pages]))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "PDF render pages: type=pdf-pages, count=2, mime_type=image/jpeg"
+else
+fail "PDF render pages: wrong output" "$result"
+fi
+}
+
+# I. PDF render cap (>10 pages without --max-pages)
+test_media_pdf_render_cap() {
+local rc=0 combined
+# Part 1: 12 pages without --max-pages should fail
+combined=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/big.pdf" --render --pages 1:12 2>&1) || rc=$?
+if (( rc == 0 )); then
+fail "PDF render 12 pages without --max-pages should exit non-zero"
+return
+fi
+if [[ "$combined" != *"TOKEN_BUDGET_EXCEEDED"* ]]; then
+fail "PDF render cap should mention TOKEN_BUDGET_EXCEEDED" "Got: $combined"
+return
+fi
+# Part 2: with --max-pages 12 should succeed
+local output2 rc2=0
+output2=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/big.pdf" --render --pages 1:12 --max-pages 12 -o json 2>/dev/null) || rc2=$?
+if (( rc2 != 0 )); then
+fail "PDF render --max-pages 12 should exit 0" "exit=$rc2"
+return
+fi
+local count
+count=$(printf '%s' "$output2" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('media_payload',{}).get('file',{}).get('count','?'))" 2>/dev/null || echo "?")
+if [[ "$count" == "12" ]]; then
+pass "PDF render cap: blocked >10 pages; --max-pages 12 allows 12 pages"
+else
+fail "PDF render --max-pages 12: expected count=12" "Got count=$count"
+fi
+}
+
+# J. PDF invalid pages
+test_media_pdf_invalid_pages() {
+local rc1=0 out1 rc2=0 out2
+# Non-numeric range
+out1=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.pdf" --pages "abc:xyz" 2>&1) || rc1=$?
+if (( rc1 == 0 )); then
+fail "PDF --pages abc:xyz should exit non-zero"
+return
+fi
+if [[ "$out1" != *"INVALID_PAGE_RANGE"* ]]; then
+fail "PDF invalid range abc:xyz should mention INVALID_PAGE_RANGE" "Got: $out1"
+return
+fi
+# Out-of-range
+out2=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.pdf" --pages "10:20" 2>&1) || rc2=$?
+if (( rc2 == 0 )); then
+fail "PDF --pages 10:20 should exit non-zero (only 5 pages)"
+return
+fi
+if [[ "$out2" != *"INVALID_PAGE_RANGE"* ]]; then
+fail "PDF out-of-range pages should mention INVALID_PAGE_RANGE" "Got: $out2"
+return
+fi
+pass "PDF invalid pages: abc:xyz and 10:20 both give INVALID_PAGE_RANGE"
+}
+
+# K. PDF encrypted
+test_media_pdf_encrypted() {
+local enc_pdf="${TEST_DIR}/encrypted.pdf"
+# Create encrypted PDF
+python3 -c "
+import fitz
+d = fitz.open('${MEDIA_FIXTURES}/sample.pdf')
+d.save('${enc_pdf}', encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw='x', user_pw='x')
+d.close()
+" 2>/dev/null
+if [[ ! -f "$enc_pdf" ]]; then
+fail "Could not create encrypted PDF fixture"
+return
+fi
+
+local all_pass=1
+
+# Mode 1: default text
+local out1 rc1=0
+out1=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "$enc_pdf" 2>&1) || rc1=$?
+if (( rc1 == 0 )) || [[ "$out1" != *"PDF_ENCRYPTED"* ]]; then
+fail "Encrypted PDF (default) should fail with PDF_ENCRYPTED" "rc=$rc1 out=$out1"
+all_pass=0
+fi
+
+# Mode 2: --meta-only
+local out2 rc2=0
+out2=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "$enc_pdf" --meta-only 2>&1) || rc2=$?
+if (( rc2 == 0 )) || [[ "$out2" != *"PDF_ENCRYPTED"* ]]; then
+fail "Encrypted PDF (--meta-only) should fail with PDF_ENCRYPTED" "rc=$rc2"
+all_pass=0
+fi
+
+# Mode 3: --render
+local out3 rc3=0
+out3=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "$enc_pdf" --render --pages 1:1 2>&1) || rc3=$?
+if (( rc3 == 0 )) || [[ "$out3" != *"PDF_ENCRYPTED"* ]]; then
+fail "Encrypted PDF (--render) should fail with PDF_ENCRYPTED" "rc=$rc3"
+all_pass=0
+fi
+
+# Modes 4 & 5: poppler backend (skip if pdftotext absent)
+if command -v pdftotext >/dev/null 2>&1; then
+local out4 rc4=0
+out4=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 FREAD_MEDIA_FORCE_BACKEND=poppler "${FREAD}" "$enc_pdf" 2>&1) || rc4=$?
+if (( rc4 == 0 )) || [[ "$out4" != *"PDF_ENCRYPTED"* ]]; then
+fail "Encrypted PDF (poppler default) should fail with PDF_ENCRYPTED" "rc=$rc4"
+all_pass=0
+fi
+
+local out5 rc5=0
+out5=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 FREAD_MEDIA_FORCE_BACKEND=poppler "${FREAD}" "$enc_pdf" --render --pages 1:1 2>&1) || rc5=$?
+if (( rc5 == 0 )) || [[ "$out5" != *"PDF_ENCRYPTED"* ]]; then
+fail "Encrypted PDF (poppler render) should fail with PDF_ENCRYPTED" "rc=$rc5"
+all_pass=0
+fi
+fi
+
+if (( all_pass )); then
+pass "PDF encrypted: all modes emit PDF_ENCRYPTED and exit non-zero"
+fi
+}
+
+# L. PDF backend fallback (poppler)
+test_media_backend_fallback() {
+if ! command -v pdftotext >/dev/null 2>&1; then
+echo "  SKIP: test_media_backend_fallback — pdftotext not installed"
+TESTS_PASSED=$((TESTS_PASSED + 1))
+return
+fi
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 FREAD_MEDIA_FORCE_BACKEND=poppler "${FREAD}" "${MEDIA_FIXTURES}/sample.pdf" -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "PDF poppler backend should exit 0" "exit=$rc"
+return
+fi
+local result
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mp = d.get('media_payload', {})
+f  = mp.get('file', {})
+ok = (
+    mp.get('backend') == 'poppler' and
+    mp.get('type') == 'pdf-text' and
+    len(f.get('text', '')) > 0
+)
+print('OK' if ok else 'FAIL: backend=%s type=%s textlen=%d' % (
+    mp.get('backend'), mp.get('type'), len(f.get('text',''))))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "PDF poppler backend: backend=poppler, type=pdf-text, text non-empty"
+else
+fail "PDF poppler backend: wrong output" "$result"
+fi
+}
+
+# M. PDF invalid backend
+test_media_backend_force_invalid() {
+local rc=0 combined
+combined=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 FREAD_MEDIA_FORCE_BACKEND=banana "${FREAD}" "${MEDIA_FIXTURES}/sample.pdf" 2>&1) || rc=$?
+if (( rc == 0 )); then
+fail "Invalid backend should exit non-zero"
+return
+fi
+if [[ "$combined" != *"BACKEND_MISSING"* ]]; then
+fail "Invalid backend should mention BACKEND_MISSING" "Got: $combined"
+return
+fi
+if [[ "$combined" != *"not recognized"* ]]; then
+fail "Invalid backend should mention 'not recognized'" "Got: $combined"
+return
+fi
+pass "Invalid backend 'banana' exits non-zero with BACKEND_MISSING + not recognized"
+}
+
+# N. --no-ingest flag suppresses memory-ingest log entry
+test_media_no_ingest_flag() {
+local log_file="${HOME}/.cache/fsuite/memory-ingest.log"
+mkdir -p "${HOME}/.cache/fsuite" 2>/dev/null
+rm -f "$log_file"
+FSUITE_TELEMETRY=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.png" --no-ingest >/dev/null 2>&1
+sleep 2
+if [[ ! -f "$log_file" ]] || [[ ! -s "$log_file" ]]; then
+pass "--no-ingest suppresses memory-ingest log entry"
+else
+fail "--no-ingest should produce no log entries" "Log: $(cat "$log_file" 2>/dev/null | head -3)"
+fi
+}
+
+# O. Missing ingest helper — exercised manually in Phase 7; skip here.
+# The _media_maybe_ingest function locates the helper via a hard path
+# (${_FSUITE_SCRIPT_DIR}/mcp/memory-ingest.js) with no env override,
+# so the only clean test requires moving the file. Phase 7 covers this.
+
+# P. PDF token budget truncation
+test_media_pdf_token_budget_truncation() {
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.pdf" --token-budget 50 -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "PDF token-budget truncation should exit 0" "exit=$rc"
+return
+fi
+local result
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+mp = d.get('media_payload', {})
+f  = mp.get('file', {})
+pr = f.get('pages_returned', [1,2,3,4,5])
+ok = f.get('truncated') == True and len(pr) < 5
+print('OK' if ok else 'FAIL: truncated=%s pages_returned=%s' % (f.get('truncated'), pr))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "PDF token-budget truncation: truncated=true, fewer than 5 pages"
+else
+fail "PDF token-budget truncation: wrong output" "$result"
+fi
+}
+
+# Q. Python engine standalone probe
+test_media_python_engine_standalone() {
+local engine="${SCRIPT_DIR}/../fread-media.py"
+if [[ ! -f "$engine" ]]; then
+fail "fread-media.py not found at $engine"
+return
+fi
+
+# Probe image
+local r1
+r1=$(python3 "$engine" probe "${MEDIA_FIXTURES}/sample.png" 2>/dev/null | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+ok = d.get('type')=='probe' and d.get('detected')=='image'
+print('OK' if ok else 'FAIL: '+str(d))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$r1" != "OK" ]]; then
+fail "Engine probe sample.png: wrong result" "$r1"
+return
+fi
+
+# Probe PDF
+local r2
+r2=$(python3 "$engine" probe "${MEDIA_FIXTURES}/sample.pdf" 2>/dev/null | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+ok = d.get('type')=='probe' and d.get('detected')=='pdf'
+print('OK' if ok else 'FAIL: '+str(d))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$r2" != "OK" ]]; then
+fail "Engine probe sample.pdf: wrong result" "$r2"
+return
+fi
+
+# Probe big.pdf
+local r3
+r3=$(python3 "$engine" probe "${MEDIA_FIXTURES}/big.pdf" 2>/dev/null | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+ok = d.get('type')=='probe' and d.get('detected')=='pdf'
+print('OK' if ok else 'FAIL: '+str(d))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$r3" != "OK" ]]; then
+fail "Engine probe big.pdf: wrong result" "$r3"
+return
+fi
+
+# Probe missing file — capture output into variable to avoid pipefail on engine exit 1
+local r4
+r4=$(python3 "$engine" probe "/nonexistent/missing.png" 2>/dev/null || true) 
+r4=$(printf '%s' "$r4" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+ok = d.get('type')=='error' and d.get('code')=='FILE_NOT_FOUND'
+print('OK' if ok else 'FAIL: '+str(d))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$r4" != "OK" ]]; then
+fail "Engine probe missing file: expected FILE_NOT_FOUND error" "$r4"
+return
+fi
+
+pass "Engine standalone probe: image/pdf/big.pdf/missing all correct"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
-
 main() {
   trap 'teardown' EXIT INT TERM
   echo "======================================"
@@ -1199,6 +1692,24 @@ main() {
   run_test "Flag accumulation" test_telemetry_flags
   run_test "Default flag seeding" test_telemetry_default_flags
 
+echo ""
+echo "== Media Reading (Phase 5) =="
+run_test "Image pretty no base64" test_media_image_pretty_no_base64
+run_test "Image JSON media_payload" test_media_image_json_has_media_payload
+run_test "Image meta-only" test_media_image_meta_only
+run_test "Image no-resize token refusal" test_media_image_no_resize_token_refusal
+run_test "PDF text default" test_media_pdf_text_default
+run_test "PDF text JSON" test_media_pdf_text_json
+run_test "PDF meta-only" test_media_pdf_meta_only
+run_test "PDF render pages" test_media_pdf_render_pages
+run_test "PDF render cap" test_media_pdf_render_cap
+run_test "PDF invalid pages" test_media_pdf_invalid_pages
+run_test "PDF encrypted" test_media_pdf_encrypted
+run_test "PDF backend fallback (poppler)" test_media_backend_fallback
+run_test "PDF invalid backend" test_media_backend_force_invalid
+run_test "No-ingest flag" test_media_no_ingest_flag
+run_test "PDF token budget truncation" test_media_pdf_token_budget_truncation
+run_test "Engine standalone probe" test_media_python_engine_standalone
   echo ""
   echo "======================================"
   echo "  Test Results"
