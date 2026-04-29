@@ -797,18 +797,25 @@ fi
     size_bytes="$(file_bytes "$path" 2>/dev/null || echo 0)"
     size_bytes="${size_bytes//[[:space:]]/}"
     [[ "$size_bytes" =~ ^[0-9]+$ ]] || size_bytes=0
-if [[ "$OUTPUT" == "json" ]]; then
+    if [[ "$OUTPUT" == "paths" ]]; then
+        # Paths mode: machine-readable, one path per line. Skip both pretty
+        # summary and JSON envelope; render_paths() will emit the path itself.
+        :
+    elif [[ "$OUTPUT" == "json" ]]; then
         # In JSON mode: surface the engine JSON at the top level via
         # MEDIA_PAYLOAD_JSON (singular, last payload — Phase 3 MCP single-file
         # path) and MEDIA_PAYLOADS_JSON (array, multi-file batch path).
-        MEDIA_PAYLOAD_JSON="$engine_json"
-        MEDIA_PAYLOADS_JSON+=("$engine_json")
-        # Also keep a chunk so file metadata stays consistent with text reads.
         local chunk_content="$engine_json"
         local chunk_bytes="${#chunk_content}"
-        add_chunk "$path" 0 0 "" "$chunk_content" "$chunk_bytes" 1
-        TOTAL_BYTES_READ=$((TOTAL_BYTES_READ + chunk_bytes))
-        TOTAL_LINES_READ=$((TOTAL_LINES_READ + 1))
+        # Honor --max-bytes/--max-lines budget for media chunks too.
+        check_budget_preadd 1 "$chunk_bytes"
+        if [[ "$TRUNCATED" != "true" ]]; then
+            MEDIA_PAYLOAD_JSON="$engine_json"
+            MEDIA_PAYLOADS_JSON+=("$engine_json")
+            add_chunk "$path" 0 0 "" "$chunk_content" "$chunk_bytes" 1
+            TOTAL_BYTES_READ=$((TOTAL_BYTES_READ + chunk_bytes))
+            TOTAL_LINES_READ=$((TOTAL_LINES_READ + 1))
+        fi
     else
         # ── Pretty mode ───────────────────────────────────────────
         case "$media_type" in
