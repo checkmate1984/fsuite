@@ -93,12 +93,18 @@ ${helpText}
   // If a page already exists, preserve everything above `## Help output`
   // (frontmatter + tagline H2 + intro paragraph + any round-4 preamble) and
   // splice the regenerated help + see-also onto the bottom.
+  //
+  // Defensive case: if the file exists but the marker is missing, the page
+  // has been hand-customized (e.g. `fwrite.md` uses `## Usage notes` since
+  // its surface is MCP-only). Leave it untouched rather than nuking the
+  // custom content with the default first-time-generation template.
   if (existsSync(outPath)) {
     const existing = readFileSync(outPath, 'utf8');
     const helpIdx = existing.indexOf('## Help output');
     if (helpIdx > 0) {
       return existing.slice(0, helpIdx) + helpSection;
     }
+    return existing;
   }
 
   // First-time generation: build the default frontmatter + tagline H2 + intro

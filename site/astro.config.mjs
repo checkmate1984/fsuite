@@ -18,6 +18,11 @@ export default defineConfig({
         // Override the page H1 so we can render the page-actions dropdown
         // (Copy / View / Open in LLM) inline with the title.
         PageTitle: './src/components/PageTitle.astro',
+        // Force-dark theme: hide the toggle UI + pin data-theme="dark" on load.
+        // CAVE theme is dark-only by design — bloom/scanline effects don't
+        // translate to a light canvas.
+        ThemeSelect: './src/components/HiddenThemeSelect.astro',
+        ThemeProvider: './src/components/ForceDarkThemeProvider.astro',
       },
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/lliWcWill/fsuite' },
@@ -26,7 +31,7 @@ export default defineConfig({
         './src/styles/custom.css',
       ],
       expressiveCode: {
-        themes: ['monokai', 'github-light'],
+        themes: ['monokai'],
         styleOverrides: {
           codeFontFamily: '"JetBrainsMono Nerd Font", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         },
