@@ -25,6 +25,8 @@ override_dh_auto_install:
 	install -D -m 755 fs-engine.py $(CURDIR)/debian/fsuite/usr/share/fsuite/fs-engine.py
 	install -D -m 755 fmetrics-predict.py $(CURDIR)/debian/fsuite/usr/share/fsuite/fmetrics-predict.py
 	install -D -m 755 fmetrics-import.py $(CURDIR)/debian/fsuite/usr/share/fsuite/fmetrics-import.py
+	install -D -m 755 fread-media.py $(CURDIR)/debian/fsuite/usr/share/fsuite/fread-media.py
+	install -D -m 755 mcp/memory-ingest.js $(CURDIR)/debian/fsuite/usr/share/fsuite/memory-ingest.js
 	# Install shared library to /usr/share/fsuite
 	install -D -m 644 _fsuite_common.sh $(CURDIR)/debian/fsuite/usr/share/fsuite/_fsuite_common.sh
 	install -D -m 644 _fsuite_db.sh $(CURDIR)/debian/fsuite/usr/share/fsuite/_fsuite_db.sh

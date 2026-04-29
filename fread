@@ -882,24 +882,33 @@ _media_maybe_ingest() {
     # Ensure log dir exists
     mkdir -p "$HOME/.cache/fsuite" 2>/dev/null || return 0
 
-    local ingest_helper="${_FSUITE_SCRIPT_DIR}/mcp/memory-ingest.js"
-    local payload_file
-    payload_file="$(mktemp 2>/dev/null)" || return 0
+local ingest_helper=""
+local _candidates=(
+  "${_FSUITE_SCRIPT_DIR}/mcp/memory-ingest.js"
+  "${FSUITE_SHARE_DIR:-/nonexistent}/memory-ingest.js"
+  "/usr/local/share/fsuite/memory-ingest.js"
+  "/usr/share/fsuite/memory-ingest.js"
+)
+for _c in "${_candidates[@]}"; do
+  [[ -f "$_c" ]] && { ingest_helper="$_c"; break; }
+done
+local payload_file
+payload_file="$(mktemp 2>/dev/null)" || return 0
 
-    # Write ingest_payload to temp file
-    printf '%s' "$engine_json" | python3 -c "
+# Write ingest_payload to temp file
+printf '%s' "$engine_json" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 ip = d.get('ingest_payload')
 if ip is not None:
-    print(json.dumps(ip))
+print(json.dumps(ip))
 " > "$payload_file" 2>/dev/null || { rm -f "$payload_file"; return 0; }
 
-    if [[ ! -f "$ingest_helper" ]]; then
-        echo "$(date -Iseconds) [memory-ingest] helper missing at $ingest_helper" >> "$HOME/.cache/fsuite/memory-ingest.log" 2>/dev/null || true
-        rm -f "$payload_file"
-        return 0
-    fi
+if [[ -z "$ingest_helper" ]]; then
+echo "$(date -Iseconds) [memory-ingest] helper not found (checked dev-tree, FSUITE_SHARE_DIR, /usr/local/share/fsuite, /usr/share/fsuite)" >> "$HOME/.cache/fsuite/memory-ingest.log" 2>/dev/null || true
+rm -f "$payload_file"
+return 0
+fi
 
     # Spawn detached — never blocks fread exit
     setsid bash -c 'node "$0" < "$1" >>"$HOME/.cache/fsuite/memory-ingest.log" 2>&1 || echo "$(date -Iseconds) [memory-ingest] helper exit code $?" >>"$HOME/.cache/fsuite/memory-ingest.log"; rm -f "$1"' \

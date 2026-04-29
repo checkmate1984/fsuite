@@ -21,7 +21,7 @@ MCP_ONLY=0
 DO_UNINSTALL=0
 
 TOOLS=(fsuite ftree fsearch fcontent fmap fread fcase fedit fwrite fmetrics freplay fprobe fs fls fbash fpatch-claude-mcp)
-SHARE_FILES=(_fsuite_common.sh _fsuite_db.sh fmetrics-predict.py fmetrics-import.py fprobe-engine.py fs-engine.py)
+SHARE_FILES=(_fsuite_common.sh _fsuite_db.sh fmetrics-predict.py fmetrics-import.py fprobe-engine.py fs-engine.py fread-media.py)
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -265,12 +265,16 @@ install_from_source() {
   for share_file in "${SHARE_FILES[@]}"; do
     [[ -f "${SCRIPT_DIR}/${share_file}" ]] || die "Missing shared file: ${share_file}"
     case "$share_file" in
-      fmetrics-predict.py|fmetrics-import.py) mode=755 ;;
+fmetrics-predict.py|fmetrics-import.py|fread-media.py) mode=755 ;;
       *) mode=644 ;;
     esac
     run_privileged install -m "$mode" "${SCRIPT_DIR}/${share_file}" "${share_dir}/${share_file}"
     ok "  ${share_file}"
   done
+  # memory-ingest.js lives under mcp/ in source but deploys flat to share_dir
+  [[ -f "${SCRIPT_DIR}/mcp/memory-ingest.js" ]] || die "Missing shared file: mcp/memory-ingest.js"
+  run_privileged install -m 755 "${SCRIPT_DIR}/mcp/memory-ingest.js" "${share_dir}/memory-ingest.js"
+  ok "  memory-ingest.js"
 }
 
 # ---------------------------------------------------------------------------
@@ -735,7 +739,13 @@ print_summary() {
   echo -e "  ${C_BOLD}Optional:${C_RESET}"
   echo "    fd-find  — faster fsearch backend"
   echo "    tree     — ftree tree mode"
+  echo "    pymupdf  — faster fread PDF rendering (Poppler fallback works; PyMuPDF is 3-5x faster)"
   echo ""
+  if ! python3 -c 'import fitz' 2>/dev/null; then
+    echo -e "  ${C_CYAN}i${C_RESET} For faster PDF rendering, consider: pip install pymupdf"
+    echo "   (Poppler fallback works fine; PyMuPDF is just 3-5x faster)"
+    echo ""
+  fi
   echo "  Install suggestions:"
   echo "    Debian/Ubuntu: sudo apt install sqlite3 ripgrep tree perl fd-find python3"
   echo "    macOS:         brew install sqlite ripgrep tree python3"
