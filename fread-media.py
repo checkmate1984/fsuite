@@ -892,8 +892,10 @@ def cmd_pdf(args):
             remaining = total_cap_tokens - total_tokens
             if remaining > 0:
                 text = text[: remaining * 4]
-            assembled_parts.append(f"--- page {pg_idx + 1} ---\n{text}")
-            pages_returned.append(pg_idx + 1)
+                assembled_parts.append(f"--- page {pg_idx + 1} ---\n{text}")
+                pages_returned.append(pg_idx + 1)
+            # When remaining <= 0 the budget is already exhausted — drop
+            # the page entirely rather than emit it ungated.
             truncated = True
             break
         assembled_parts.append(f"--- page {pg_idx + 1} ---\n{text}")
