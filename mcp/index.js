@@ -1588,9 +1588,9 @@ server.registerTool(
       max_pages: z.number().int().positive().optional().describe("Media: PDF — raise the 10-page render cap."),
       max_tokens: z.number().int().positive().optional().describe("Media: image — token budget for the resize loop (default 6000)."),
       no_ingest: z.boolean().optional().describe("Media: skip the ShieldCortex memory-ingest spawn for this read."),
-        max_bytes: z.number().int().nonnegative().optional().describe("Cap total bytes emitted (0/default = uncapped)"),
-        token_budget: z.number().int().nonnegative().optional().describe("Cap by estimated tokens"),
-        full: z.boolean().optional().describe("Disable fread budgets and MCP preview truncation"),
+      max_bytes: z.number().int().nonnegative().optional().describe("Cap total bytes emitted (0/default = uncapped)"),
+      token_budget: z.number().int().nonnegative().optional().describe("Cap by estimated tokens"),
+      full: z.boolean().optional().describe("Disable fread budgets and MCP preview truncation"),
       }),
     },
     async ({ path, paths, symbol, lines, around, around_line, before, after, head, tail, max_lines, max_bytes, token_budget, full, no_truncate, meta_only, render, pages, no_resize, max_pages, max_tokens, no_ingest }) => {
