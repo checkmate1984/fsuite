@@ -163,6 +163,7 @@ MEDIA_MAX_TOKENS=""
 MEDIA_NO_INGEST=0
 _MEDIA_ENGINE_WARNED=0
 MEDIA_PAYLOAD_JSON=""
+MEDIA_PAYLOADS_JSON=()
 
 # -------------------------
 # Helpers
@@ -763,8 +764,9 @@ media_dispatch() {
         [[ -n "$MEDIA_PAGES" ]] && engine_args+=("--pages" "$MEDIA_PAGES")
         [[ -n "$MEDIA_MAX_PAGES" ]] && engine_args+=("--max-pages" "$MEDIA_MAX_PAGES")
         [[ -n "$MEDIA_TOKEN_BUDGET_ENGINE" ]] && engine_args+=("--token-budget" "$MEDIA_TOKEN_BUDGET_ENGINE")
-        # Also forward fread's own --token-budget to the engine when set
-        (( TOKEN_BUDGET > 0 )) && [[ -z "$MEDIA_TOKEN_BUDGET_ENGINE" ]] && engine_args+=("--token-budget" "$TOKEN_BUDGET")
+        # Forward fread's own --token-budget unconditionally (engine treats 0 as unlimited
+        # so --no-truncate, which sets TOKEN_BUDGET=0, propagates correctly to the engine).
+        [[ -z "$MEDIA_TOKEN_BUDGET_ENGINE" ]] && engine_args+=("--token-budget" "$TOKEN_BUDGET")
     else
         return 1
     fi
@@ -797,10 +799,10 @@ fi
     [[ "$size_bytes" =~ ^[0-9]+$ ]] || size_bytes=0
 if [[ "$OUTPUT" == "json" ]]; then
         # In JSON mode: surface the engine JSON at the top level via
-        # MEDIA_PAYLOAD_JSON so render_json picks it up as `"media_payload": {...}`.
-        # Phase 3 (MCP integration) reads this top-level field directly to emit
-        # MCP image content blocks without re-parsing chunk strings.
+        # MEDIA_PAYLOAD_JSON (singular, last payload — Phase 3 MCP single-file
+        # path) and MEDIA_PAYLOADS_JSON (array, multi-file batch path).
         MEDIA_PAYLOAD_JSON="$engine_json"
+        MEDIA_PAYLOADS_JSON+=("$engine_json")
         # Also keep a chunk so file metadata stays consistent with text reads.
         local chunk_content="$engine_json"
         local chunk_bytes="${#chunk_content}"
@@ -1249,9 +1251,21 @@ render_json() {
     echo -n "\"next_hint\":null,"
   fi
 
-    # Top-level media_payload — verbatim engine JSON for Phase 3 MCP integration
+    # Top-level media_payload — verbatim engine JSON for Phase 3 MCP integration.
+    # Singular field: kept for single-file backward compat.
+    # Plural field: full array, one element per media file in multi-file batches.
     if [[ -n "$MEDIA_PAYLOAD_JSON" ]]; then
         echo -n "\"media_payload\":${MEDIA_PAYLOAD_JSON},"
+    fi
+    if (( ${#MEDIA_PAYLOADS_JSON[@]} > 0 )); then
+        echo -n "\"media_payloads\":["
+        local _first=1 _p
+        for _p in "${MEDIA_PAYLOADS_JSON[@]}"; do
+            (( _first )) || echo -n ","
+            _first=0
+            echo -n "$_p"
+        done
+        echo -n "],"
     fi
   echo -n "\"chunks\":["
   for (( i=0; i<CHUNK_COUNT; i++ )); do

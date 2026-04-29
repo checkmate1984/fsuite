@@ -869,7 +869,9 @@ def cmd_pdf(args):
         page_indices = list(range(total_pages))
 
     per_page_cap_tokens = 5000
-    total_cap_tokens = args.token_budget
+    # Treat token_budget == 0 as "unlimited" so callers (e.g. fread --no-truncate)
+    # can forward TOKEN_BUDGET=0 without dropping back to the default cap.
+    total_cap_tokens = args.token_budget if args.token_budget > 0 else sys.maxsize
 
     try:
         raw_texts = backend.extract_text(path, page_indices)
