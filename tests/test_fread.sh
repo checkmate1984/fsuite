@@ -1151,6 +1151,93 @@ fail "Image JSON: media_payload structure wrong" "$result"
 fi
 }
 
+test_media_json_budget_counts_utf8_bytes() {
+local fake_dir media_file payload payload_bytes max_bytes output rc=0 result
+fake_dir="${TEST_DIR}/fake-media-fsuite"
+mkdir -p "$fake_dir"
+cp "${FREAD}" "${fake_dir}/fread"
+cp "${SCRIPT_DIR}/../_fsuite_common.sh" "${fake_dir}/_fsuite_common.sh"
+chmod +x "${fake_dir}/fread"
+cat > "${fake_dir}/fread-media.py" <<'PY'
+#!/usr/bin/env python3
+import json
+import sys
+
+if sys.argv[1] == "probe":
+    print(json.dumps({"detected": "pdf"}))
+elif sys.argv[1] == "pdf":
+    payload = json.dumps({
+        "type": "pdf-text",
+        "file": {
+            "text": "\u00e9" * 120,
+            "page_count": 1,
+            "pages_returned": [1],
+            "truncated": False,
+            "tokens_estimate": 80,
+        },
+        "backend": "test",
+    }, ensure_ascii=False, separators=(",", ":"))
+    sys.stdout.buffer.write((payload + "\n").encode("utf-8"))
+else:
+    print(json.dumps({"type": "error", "code": "BAD_TEST", "error": "bad subcommand"}))
+    sys.exit(1)
+PY
+chmod +x "${fake_dir}/fread-media.py"
+media_file="${TEST_DIR}/nonascii-media.pdf"
+printf '%b' '%PDF-1.4\n\0' > "$media_file"
+payload="$(python3 "${fake_dir}/fread-media.py" pdf "$media_file")"
+payload_bytes="$(printf '%s' "$payload" | wc -c | tr -d '[:space:]')"
+max_bytes=$((payload_bytes - 1))
+
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${fake_dir}/fread" "$media_file" --max-bytes "$max_bytes" -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "Media UTF-8 byte budget should exit 0 with budget_skipped status" "exit=$rc"
+return
+fi
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+files = d.get('files', [])
+ok = (
+    d.get('truncated') is True and
+    d.get('truncation_reason') == 'max_bytes' and
+    d.get('bytes_emitted') == 0 and
+    'media_payload' not in d and
+    files and files[0].get('status') == 'budget_skipped'
+)
+print('OK' if ok else 'FAIL: truncated=%s reason=%s bytes=%s media=%s files=%s' % (
+    d.get('truncated'), d.get('truncation_reason'), d.get('bytes_emitted'),
+    'media_payload' in d, files))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" != "OK" ]]; then
+fail "Media JSON --max-bytes should use UTF-8 byte length for budget skip" "$result"
+return
+fi
+
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${fake_dir}/fread" "$media_file" --max-bytes "$payload_bytes" -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "Media UTF-8 byte budget exact fit should exit 0" "exit=$rc"
+return
+fi
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+expected = int(sys.argv[1])
+ok = (
+    d.get('truncated') is False and
+    d.get('bytes_emitted') == expected and
+    d.get('media_payload', {}).get('file', {}).get('text', '').startswith('\u00e9')
+)
+print('OK' if ok else 'FAIL: truncated=%s bytes=%s expected=%s media_keys=%s' % (
+    d.get('truncated'), d.get('bytes_emitted'), expected, list(d.get('media_payload', {}).keys())))
+" "$payload_bytes" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "Media JSON --max-bytes counts UTF-8 bytes"
+else
+fail "Media JSON bytes_emitted should report UTF-8 byte length" "$result"
+fi
+}
+
 test_media_image_honors_global_token_budget() {
 local output rc=0
 output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.png" --token-budget 1 -o json 2>/dev/null) || rc=$?
@@ -1975,6 +2062,7 @@ echo ""
 echo "== Media Reading (Phase 5) =="
 run_test "Image pretty no base64" test_media_image_pretty_no_base64
 run_test "Image JSON media_payload" test_media_image_json_has_media_payload
+run_test "Media JSON UTF-8 byte budget" test_media_json_budget_counts_utf8_bytes
 run_test "Image global token budget" test_media_image_honors_global_token_budget
 run_test "Image no-truncate unlimited budget" test_media_image_no_truncate_disables_engine_cap
 run_test "Image meta-only" test_media_image_meta_only

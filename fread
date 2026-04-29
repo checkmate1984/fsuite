@@ -815,7 +815,8 @@ fi
         # MEDIA_PAYLOAD_JSON (singular, last payload — Phase 3 MCP single-file
         # path) and MEDIA_PAYLOADS_JSON (array, multi-file batch path).
         local chunk_content="$engine_json"
-        local chunk_bytes="${#chunk_content}"
+        local chunk_bytes
+        chunk_bytes="$(byte_len "$chunk_content")"
         # Honor --max-bytes / --max-lines for media chunks (NOT --token-budget,
         # which the engine already enforces internally for PDF text/render).
         local _media_truncated=0
