@@ -37,9 +37,14 @@ const mdRelative = slug ? `${baseUrl}/${slug}.md` : '';
 // mixes .md and .mdx and a hardcoded .mdx 404s for .md files. Astro's
 // entry.filePath keeps the extension; entry.id has it stripped by Starlight.
 const ghBase = 'https://github.com/lliWcWill/fsuite/blob/master/site/src/content/docs';
-const fileExtMatch = (entry as any)?.filePath?.match(/\.(md|mdx)$/i);
+const filePath = (entry as any)?.filePath as string | undefined;
+// Prefer entry.filePath — it preserves the actual on-disk path with extension
+// and handles section index pages (e.g. architecture/index.mdx) that Starlight
+// collapses to bare "architecture" in entry.id.
+const filePathRel = filePath?.replace(/^.*[\/\\]content[\/\\]docs[\/\\]/, '');
+const fileExtMatch = filePath?.match(/\.(md|mdx)$/i);
 const fileExt = fileExtMatch ? fileExtMatch[1].toLowerCase() : 'mdx';
-const ghSourcePath = slug ? `${slug}.${fileExt}` : `index.${fileExt}`;
+const ghSourcePath = filePathRel ?? (slug ? `${slug}.${fileExt}` : `index.${fileExt}`);
 const ghSourceUrl = `${ghBase}/${ghSourcePath}`;
 ---
 
@@ -267,34 +272,55 @@ const ghSourceUrl = `${ghBase}/${ghSourcePath}`;
           return;
         }
 
-        case 'open-claude': {
-          try {
-            const md = await fetchMarkdown();
-            const q = encodeURIComponent(promptForLLM(md));
-            window.open(`https://claude.ai/new?q=${q}`, '_blank', 'noopener,noreferrer');
-          } catch {
-            // Fallback: just hand Claude the URL.
-            const q = encodeURIComponent(`Please read ${buildMdUrl()} and help me understand it.`);
-            window.open(`https://claude.ai/new?q=${q}`, '_blank', 'noopener,noreferrer');
-          } finally {
-            closeMenu();
+          case 'open-claude': {
+            // Open the popup synchronously inside the user gesture — browsers veto
+            // window.open() that runs after an await, so we open about:blank first
+            // and navigate after fetchMarkdown resolves. `noopener` is dropped because
+            // we need the popup ref to set location.href; opener is severed manually
+            // below as the security mitigation.
+            const popup = window.open('about:blank', '_blank');
+            if (!popup) {
+              showToast('Popup blocked — allow popups for this site', false);
+              closeMenu();
+              return;
+            }
+            try {
+              const md = await fetchMarkdown();
+              const q = encodeURIComponent(promptForLLM(md));
+              popup.opener = null;
+              popup.location.href = `https://claude.ai/new?q=${q}`;
+            } catch {
+              // Fallback: just hand Claude the URL.
+              const q = encodeURIComponent(`Please read ${buildMdUrl()} and help me understand it.`);
+              popup.opener = null;
+              popup.location.href = `https://claude.ai/new?q=${q}`;
+            } finally {
+              closeMenu();
+            }
+            return;
           }
-          return;
-        }
 
-        case 'open-chatgpt': {
-          try {
-            const md = await fetchMarkdown();
-            const q = encodeURIComponent(promptForLLM(md));
-            window.open(`https://chatgpt.com/?hints=search&q=${q}`, '_blank', 'noopener,noreferrer');
-          } catch {
-            const q = encodeURIComponent(`Please read ${buildMdUrl()} and help me understand it.`);
-            window.open(`https://chatgpt.com/?hints=search&q=${q}`, '_blank', 'noopener,noreferrer');
-          } finally {
-            closeMenu();
+          case 'open-chatgpt': {
+            const popup = window.open('about:blank', '_blank');
+            if (!popup) {
+              showToast('Popup blocked — allow popups for this site', false);
+              closeMenu();
+              return;
+            }
+            try {
+              const md = await fetchMarkdown();
+              const q = encodeURIComponent(promptForLLM(md));
+              popup.opener = null;
+              popup.location.href = `https://chatgpt.com/?hints=search&q=${q}`;
+            } catch {
+              const q = encodeURIComponent(`Please read ${buildMdUrl()} and help me understand it.`);
+              popup.opener = null;
+              popup.location.href = `https://chatgpt.com/?hints=search&q=${q}`;
+            } finally {
+              closeMenu();
+            }
+            return;
           }
-          return;
-        }
       }
     };
 

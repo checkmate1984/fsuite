@@ -16,7 +16,10 @@ import type { APIRoute } from 'astro';
 import { getCollection, type CollectionEntry } from 'astro:content';
 
 export async function getStaticPaths() {
-  const docs = await getCollection('docs');
+  // Filter draft entries — Starlight excludes them from rendered routes so the
+  // raw markdown endpoint must mirror that to avoid leaking unpublished content
+  // through /<slug>.md (Copy / View / Open-in-LLM URLs).
+  const docs = await getCollection('docs', (entry) => entry.data.draft !== true);
   return docs.map((entry: CollectionEntry<'docs'>) => ({
     params: { slug: entry.id.replace(/\.(md|mdx)$/i, '') },
     props: { entry },
