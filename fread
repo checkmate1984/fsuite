@@ -210,6 +210,17 @@ byte_len() {
   printf '%s' "$n"
 }
 
+truncate_utf8_bytes() {
+  local max="${1:-0}"
+  python3 -c '
+import sys
+
+limit = max(int(sys.argv[1]), 0)
+data = sys.stdin.buffer.read()
+sys.stdout.write(data[:limit].decode("utf-8", "ignore"))
+' "$max"
+}
+
 token_estimate_from_bytes() {
   local bytes="${1:-0}"
   (( bytes < 0 )) && bytes=0
@@ -761,7 +772,7 @@ media_dispatch() {
             engine_args+=("--max-tokens" "$MEDIA_MAX_TOKENS")
         elif (( NO_TRUNCATE == 1 )); then
             engine_args+=("--max-tokens" "0")
-        elif (( TOKEN_BUDGET > 0 )); then
+        elif (( TOKEN_BUDGET_EXPLICIT == 1 )); then
             engine_args+=("--max-tokens" "$TOKEN_BUDGET")
         fi
     elif [[ "$detected" == "pdf" ]]; then
@@ -879,10 +890,14 @@ fi
                             mark_truncated "max_lines"
                         fi
                     fi
-                    if (( MAX_BYTES > 0 )) && (( ${#text_body} > MAX_BYTES )); then
-                        text_body="${text_body:0:$MAX_BYTES}"
-                        _media_pretty_truncated=1
-                        mark_truncated "max_bytes"
+                    if (( MAX_BYTES > 0 )); then
+                        local _text_bytes
+                        _text_bytes="$(byte_len "$text_body")"
+                        if (( _text_bytes > MAX_BYTES )); then
+                            text_body="$(printf '%s' "$text_body" | truncate_utf8_bytes "$MAX_BYTES")"
+                            _media_pretty_truncated=1
+                            mark_truncated "max_bytes"
+                        fi
                     fi
                     printf '%s\n' "$text_body"
                     (( _media_pretty_truncated )) && echo "... [truncated; raise --max-lines/--max-bytes for full body]"

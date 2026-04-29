@@ -1390,6 +1390,45 @@ fail "Image --no-truncate should not use engine default cap" "$result"
 fi
 }
 
+test_media_image_explicit_zero_token_budget_disables_engine_cap() {
+local large_img="${TEST_DIR}/large-explicit-zero.png"
+if ! python3 - "$large_img" <<'PY' >/dev/null 2>&1
+import sys
+from PIL import Image
+Image.new("RGB", (3000, 2000), color=(21, 43, 65)).save(sys.argv[1])
+PY
+then
+echo "  SKIP: Pillow not installed; cannot create large image fixture"
+return
+fi
+
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "$large_img" --token-budget 0 -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "Image --token-budget 0 should exit 0" "exit=$rc"
+return
+fi
+local result
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+f = d.get('media_payload', {}).get('file', {})
+ok = (
+    f.get('tokens_estimate') == 8000 and
+    f.get('dimensions') == {'width': 3000, 'height': 2000} and
+    f.get('resized') is False and
+    f.get('budget_exceeded') is False
+)
+print('OK' if ok else 'FAIL: tok=%s dims=%s resized=%s exceeded=%s' % (
+    f.get('tokens_estimate'), f.get('dimensions'), f.get('resized'), f.get('budget_exceeded')))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "Image --token-budget 0 forwards unlimited image budget"
+else
+fail "Image --token-budget 0 should not use engine default cap" "$result"
+fi
+}
+
 # C. Image meta-only
 test_media_image_meta_only() {
 local output rc=0
@@ -1915,6 +1954,62 @@ test_media_pdf_pretty_max_lines() {
   fi
   pass "PDF pretty --max-lines 3 truncates body and emits marker"
 }
+
+test_media_pdf_pretty_max_bytes_counts_utf8_bytes() {
+local fake_dir="${TEST_DIR}/fake-pdf-pretty-bytes"
+mkdir -p "$fake_dir"
+cp "${FREAD}" "${fake_dir}/fread"
+chmod +x "${fake_dir}/fread"
+cat > "${fake_dir}/fread-media.py" <<'PY'
+#!/usr/bin/env python3
+import json
+import sys
+
+if sys.argv[1] == "probe":
+    print(json.dumps({"detected": "pdf"}))
+elif sys.argv[1] == "pdf":
+    print(json.dumps({
+        "type": "pdf-text",
+        "file": {
+            "text": "你好世界",
+            "page_count": 1,
+            "pages_returned": [1],
+            "truncated": False,
+            "tokens_estimate": 4,
+        },
+        "backend": "test",
+    }, ensure_ascii=False, separators=(",", ":")))
+else:
+    print(json.dumps({"type": "error", "code": "BAD_TEST", "error": "bad subcommand"}))
+    sys.exit(1)
+PY
+chmod +x "${fake_dir}/fread-media.py"
+local media_file="${TEST_DIR}/utf8-pretty.pdf"
+printf '%b' '%PDF-1.4\n\0' > "$media_file"
+
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${fake_dir}/fread" "$media_file" --max-bytes 5 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "PDF pretty --max-bytes 5 should exit 0" "exit=$rc"
+return
+fi
+local body body_bytes
+body=$(printf '%s\n' "$output" | sed -n '2p')
+body_bytes=$(printf '%s' "$body" | wc -c | tr -d '[:space:]')
+if [[ "$body" != "你" ]]; then
+fail "PDF pretty --max-bytes should truncate on UTF-8 character boundary" "body=$body bytes=$body_bytes output=$output"
+return
+fi
+if (( body_bytes > 5 )); then
+fail "PDF pretty --max-bytes should enforce byte cap" "body bytes=$body_bytes"
+return
+fi
+if [[ "$output" != *"truncated"* ]]; then
+fail "PDF pretty --max-bytes should emit truncation marker" "Got: $output"
+return
+fi
+pass "PDF pretty --max-bytes counts UTF-8 bytes and preserves character boundaries"
+}
 # Q. Python engine standalone probe
 test_media_python_engine_standalone() {
 local engine="${SCRIPT_DIR}/../fread-media.py"
@@ -2152,6 +2247,7 @@ run_test "Media JSON UTF-8 byte budget" test_media_json_budget_counts_utf8_bytes
 run_test "PDF default token cap preserved" test_media_pdf_preserves_default_token_budget
 run_test "Image global token budget" test_media_image_honors_global_token_budget
 run_test "Image no-truncate unlimited budget" test_media_image_no_truncate_disables_engine_cap
+run_test "Image explicit zero token budget" test_media_image_explicit_zero_token_budget_disables_engine_cap
 run_test "Image meta-only" test_media_image_meta_only
 run_test "Image no-resize token refusal" test_media_image_no_resize_token_refusal
 run_test "PDF text default" test_media_pdf_text_default
@@ -2170,6 +2266,7 @@ run_test "No-ingest flag" test_media_no_ingest_flag
 run_test "Ingest helper failure status log" test_media_ingest_logs_helper_failure_status
 run_test "PDF token budget truncation" test_media_pdf_token_budget_truncation
 run_test "PDF pretty --max-lines truncation" test_media_pdf_pretty_max_lines
+run_test "PDF pretty --max-bytes UTF-8 truncation" test_media_pdf_pretty_max_bytes_counts_utf8_bytes
 run_test "Engine standalone probe" test_media_python_engine_standalone
 
 run_test "Budget-skipped media status" test_media_budget_skipped_status
