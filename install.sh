@@ -291,7 +291,6 @@ fmetrics-predict.py|fmetrics-import.py|fread-media.py) mode=755 ;;
         ok "  memory-ingest.js (flat, no node_modules)"
     fi
 }
-}
 
 # ---------------------------------------------------------------------------
 # 3. Install from .deb package
