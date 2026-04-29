@@ -37,6 +37,19 @@ function parsePayload(raw) {
 }
 
 // ── Resolve ShieldCortex command ──────────────────────────────────────────
+function resolveFromMcpServersConfig(path) {
+  const cfg = JSON.parse(readFileSync(path, "utf8"));
+  const servers = cfg?.mcpServers || {};
+  const nameRe = /^(memory|shieldcortex|shield.cortex)$/i;
+  for (const [key, val] of Object.entries(servers)) {
+    if (nameRe.test(key) && val?.command) {
+      const extraArgs = Array.isArray(val.args) ? val.args : [];
+      return { cmd: val.command, args: extraArgs };
+    }
+  }
+  return null;
+}
+
 function resolveCmd() {
   // 1. Explicit env override
   const envCmd = process.env.FSUITE_SHIELDCORTEX_CMD;
@@ -50,18 +63,16 @@ function resolveCmd() {
   const whichOut = (which.stdout || "").trim();
   if (whichOut) return { cmd: whichOut, args: [] };
 
-  // 3. ~/.claude.json → mcpServers entry
-  try {
-    const claudeJson = JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"));
-    const servers = claudeJson?.mcpServers || {};
-    const nameRe = /^(memory|shieldcortex|shield.cortex)$/i;
-    for (const [key, val] of Object.entries(servers)) {
-      if (nameRe.test(key) && val?.command) {
-        const extraArgs = Array.isArray(val.args) ? val.args : [];
-        return { cmd: val.command, args: extraArgs };
-      }
-    }
-  } catch { /* not present */ }
+  // 3. Claude MCP config locations → mcpServers entry
+  for (const cfgPath of [
+    join(homedir(), ".claude", "mcp.json"),
+    join(homedir(), ".claude.json"),
+  ]) {
+    try {
+      const resolved = resolveFromMcpServersConfig(cfgPath);
+      if (resolved) return resolved;
+    } catch { /* not present or malformed */ }
+  }
 
   // 4. ~/.codex/config.toml — tiny regex extractor
   try {

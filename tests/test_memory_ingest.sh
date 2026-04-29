@@ -94,7 +94,47 @@ test_no_config() {
         fail "no-config: stderr should mention 'unreachable: no command configured'" "Got: $err"
         return
     fi
-    pass "no-config: exits 0 with 'unreachable: no command configured'"
+  pass "no-config: exits 0 with 'unreachable: no command configured'"
+}
+
+test_claude_mcp_json_config() {
+    local node_bin path_stub fake_home err rc=0
+    node_bin="$(command -v node 2>/dev/null)"
+    if [[ -z "$node_bin" ]]; then
+        echo "  SKIP: node not found"
+        return
+    fi
+    path_stub="$(mktemp -d)"
+    fake_home="$(mktemp -d)"
+    mkdir -p "$fake_home/.claude"
+    ln -s "$node_bin" "$path_stub/node"
+    cat > "$fake_home/.claude/mcp.json" <<JSON
+{
+  "mcpServers": {
+    "memory": {
+      "command": "$node_bin",
+      "args": ["-e", "setTimeout(() => {}, 10000)"]
+    }
+  }
+}
+JSON
+
+    err=$(printf '{"title":"t","category":"c","content":"x","tags":["a"]}' \
+        | env -i PATH="$path_stub" HOME="$fake_home" "$node_bin" "$INGEST_HELPER" 2>&1 >/dev/null) || rc=$?
+    rm -rf "$path_stub" "$fake_home"
+    if (( rc == 0 )); then
+        fail "claude-mcp-json: should exit non-zero against non-speaking MCP command" "exit=$rc"
+        return
+    fi
+    if [[ "$err" == *"unreachable: no command configured"* ]]; then
+        fail "claude-mcp-json: should resolve ~/.claude/mcp.json before reporting unreachable" "Got: $err"
+        return
+    fi
+    if [[ "$err" != *"timeout"* ]]; then
+        fail "claude-mcp-json: stderr should show it attempted configured command and timed out" "Got: $err"
+        return
+    fi
+    pass "claude-mcp-json: resolves memory server from ~/.claude/mcp.json"
 }
 
 # Timeout: FSUITE_SHIELDCORTEX_CMD="sleep 10" triggers the 3s internal timer.
@@ -136,10 +176,11 @@ main() {
     echo "Running tests..."
     echo ""
 
-    run_test "Empty stdin" test_empty_stdin
-    run_test "Malformed JSON" test_malformed_json
-    run_test "No ShieldCortex config" test_no_config
-    run_test "Timeout" test_timeout
+  run_test "Empty stdin" test_empty_stdin
+  run_test "Malformed JSON" test_malformed_json
+  run_test "No ShieldCortex config" test_no_config
+  run_test "Claude mcp.json config" test_claude_mcp_json_config
+  run_test "Timeout" test_timeout
 
     echo ""
     echo "======================================"

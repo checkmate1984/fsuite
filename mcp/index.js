@@ -14,6 +14,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { writeFile as fsWriteFile, mkdtemp, unlink, rmdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import hljs from "highlight.js";
 import { buildFcontentArgs } from "./fcontent-args.js";
@@ -1399,21 +1400,73 @@ function pdfMetaSummary(payload) {
   ].join("\n");
 }
 
+function mediaByteBudget(maxBytes) {
+  return {
+    maxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : 0,
+    usedBytes: 0,
+  };
+}
+
+function utf8Bytes(value) {
+  return Buffer.byteLength(String(value ?? ""), "utf8");
+}
+
+function truncateUtf8(value, maxBytes) {
+  const text = String(value ?? "");
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) return text;
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  return buf.subarray(0, maxBytes).toString("utf8");
+}
+
+function appendBudgetedText(blocks, budget, text) {
+  if (!text) return;
+  if (!budget?.maxBytes) {
+    blocks.push({ type: "text", text });
+    return;
+  }
+  const remaining = budget.maxBytes - budget.usedBytes;
+  if (remaining <= 0) return;
+  const out = truncateUtf8(text, remaining);
+  if (!out) return;
+  budget.usedBytes += utf8Bytes(out);
+  blocks.push({ type: "text", text: out });
+}
+
+function appendBudgetedImage(blocks, budget, data, mimeType) {
+  if (typeof data !== "string" || !data) return false;
+  const bytes = utf8Bytes(data);
+  if (budget?.maxBytes && budget.usedBytes + bytes > budget.maxBytes) {
+    return false;
+  }
+  if (budget?.maxBytes) budget.usedBytes += bytes;
+  blocks.push({ type: "image", data, mimeType });
+  return true;
+}
+
 function buildMediaContent(payload, opts) {
   if (!payload || typeof payload !== "object") return null;
   const maxLines = opts && Number.isFinite(opts.maxLines) && opts.maxLines > 0 ? opts.maxLines : 0;
+  const budget = opts?.budget || mediaByteBudget(opts?.maxBytes);
   switch (payload.type) {
     case "image": {
       const f = payload.file || {};
       const blocks = [];
-      if (typeof f.base64 === "string" && f.base64) {
-        blocks.push({ type: "image", data: f.base64, mimeType: mediaMimeType(f.mime_type) });
+      let imageIncluded = false;
+      const hasImagePayload = typeof f.base64 === "string" && f.base64;
+      if (hasImagePayload) {
+        imageIncluded = appendBudgetedImage(blocks, budget, f.base64, mediaMimeType(f.mime_type));
       }
-      blocks.push({ type: "text", text: imageMetaSummary(payload) });
+      const omitted = hasImagePayload && !imageIncluded ? "[media omitted: max_bytes cap blocked image payload]\n" : "";
+      appendBudgetedText(blocks, budget, omitted + imageMetaSummary(payload));
       return { content: blocks };
     }
     case "image-meta":
-      return { content: [{ type: "text", text: imageMetaSummary(payload) }] };
+      {
+        const blocks = [];
+        appendBudgetedText(blocks, budget, imageMetaSummary(payload));
+        return { content: blocks.length ? blocks : [{ type: "text", text: "" }] };
+      }
     case "pdf-text": {
       const f = payload.file || {};
       let text = f.text || "";
@@ -1425,19 +1478,31 @@ function buildMediaContent(payload, opts) {
           truncationNote = `\n... [truncated: ${lines.length - maxLines} more lines; raise max_lines to see all]\n`;
         }
       }
-      return { content: [{ type: "text", text: pdfTextHeader(payload) + text + truncationNote }] };
-      }
+      const blocks = [];
+      appendBudgetedText(blocks, budget, pdfTextHeader(payload) + text + truncationNote);
+      return { content: blocks.length ? blocks : [{ type: "text", text: "" }] };
+    }
     case "pdf-pages": {
       const f = payload.file || {};
       const pages = Array.isArray(f.pages) ? f.pages : [];
-      const blocks = pages
-        .filter((p) => p && typeof p.base64 === "string" && p.base64)
-        .map((p) => ({ type: "image", data: p.base64, mimeType: mediaMimeType(p.mime_type) }));
-      blocks.push({ type: "text", text: pdfPagesSummary(payload) });
+      const blocks = [];
+      let omittedPages = 0;
+      for (const page of pages) {
+        if (!page || typeof page.base64 !== "string" || !page.base64) continue;
+        if (!appendBudgetedImage(blocks, budget, page.base64, mediaMimeType(page.mime_type))) {
+          omittedPages += 1;
+        }
+      }
+      const omitted = omittedPages ? `[media omitted: max_bytes cap blocked ${omittedPages} rendered page(s)]\n` : "";
+      appendBudgetedText(blocks, budget, omitted + pdfPagesSummary(payload));
       return { content: blocks };
     }
     case "pdf-meta":
-      return { content: [{ type: "text", text: pdfMetaSummary(payload) }] };
+      {
+        const blocks = [];
+        appendBudgetedText(blocks, budget, pdfMetaSummary(payload));
+        return { content: blocks.length ? blocks : [{ type: "text", text: "" }] };
+      }
     default:
       return null;
   }
@@ -1643,34 +1708,35 @@ server.registerTool(
         const { stdout, stderr } = await run(resolveTool("fread"), args, opts);
         const raw = stdout || stderr || "(no output)";
         const parsed = maybeParseJson(raw);
+        const mediaBudget = mediaByteBudget(max_bytes);
         // Multi-file media: iterate media_payloads (array) and merge content blocks.
         // Falls back to singular media_payload (legacy / single-file path).
         if (parsed && Array.isArray(parsed.media_payloads) && parsed.media_payloads.length > 0) {
           const merged = [];
           for (const p of parsed.media_payloads) {
-            const built = buildMediaContent(p, { maxLines: max_lines });
+            const built = buildMediaContent(p, { maxLines: max_lines, maxBytes: max_bytes, budget: mediaBudget });
             if (built && Array.isArray(built.content)) merged.push(...built.content);
           }
           if (merged.length > 0) return { content: merged };
         }
         if (parsed && parsed.media_payload) {
-          const built = buildMediaContent(parsed.media_payload, { maxLines: max_lines });
+          const built = buildMediaContent(parsed.media_payload, { maxLines: max_lines, maxBytes: max_bytes, budget: mediaBudget });
           if (built) return built;
         }
-  // Non-media file: reuse already-captured raw output through the same
-  // render/slim chain that cli() uses — avoids spawning fread a second time.
-  const slim = slimStructuredContent(normalizeStructuredContent(parsed));
-  const renderer = RENDERERS["fread"];
-  if (renderer) {
-    const pretty = renderer(raw, { maxLines: max_lines, full: wantsFull });
-    if (pretty) return { content: [{ type: "text", text: pretty }] };
-    const result = { content: [{ type: "text", text: "(fread: renderer yielded no output)\n" }] };
-    if (slim !== undefined) result.structuredContent = slim;
-    return result;
-  }
-  const noRendererResult = { content: [{ type: "text", text: raw }] };
-  if (slim !== undefined) noRendererResult.structuredContent = slim;
-  return noRendererResult;
+        // Non-media file: reuse already-captured raw output through the same
+        // render/slim chain that cli() uses — avoids spawning fread a second time.
+        const slim = slimStructuredContent(normalizeStructuredContent(parsed));
+        const renderer = RENDERERS["fread"];
+        if (renderer) {
+          const pretty = renderer(raw, { maxLines: max_lines, full: wantsFull });
+          if (pretty) return { content: [{ type: "text", text: pretty }] };
+          const result = { content: [{ type: "text", text: "(fread: renderer yielded no output)\n" }] };
+          if (slim !== undefined) result.structuredContent = slim;
+          return result;
+        }
+        const noRendererResult = { content: [{ type: "text", text: raw }] };
+        if (slim !== undefined) noRendererResult.structuredContent = slim;
+        return noRendererResult;
       } catch (err) {
         return formatExecError(err, "fread", undefined, { maxLines: max_lines, full: wantsFull });
       }
@@ -2282,6 +2348,13 @@ server.registerTool(
   }
 );
 
+export const __test__ = {
+  buildMediaContent,
+  mediaByteBudget,
+};
+
 // ─── Start ───────────────────────────────────────────────────────
-const transport = new StdioServerTransport();
-await server.connect(transport);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

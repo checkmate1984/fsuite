@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { __test__ as mcpInternals } from "./index.js";
 
 const testFile = fileURLToPath(import.meta.url);
 const mcpDir = dirname(testFile);
@@ -796,4 +797,26 @@ test("fread MCP error path returns isError envelope (formatExecError shape)", as
   if (result.structuredContent !== undefined) {
     assert.equal(typeof result.structuredContent, "object", "structuredContent should be object when present");
   }
+});
+
+test("fread media MCP content honors max_bytes budget", () => {
+  const payload = {
+    type: "image",
+    file: {
+      base64: "a".repeat(80),
+      mime_type: "image/png",
+      format: "png",
+      dimensions: { width: 100, height: 80 },
+      original_size: 123,
+      tokens_estimate: 10,
+    },
+    backend: "pillow",
+  };
+
+  const result = mcpInternals.buildMediaContent(payload, { maxBytes: 40 });
+  assert.ok(result, "expected media content result");
+  assert.equal(result.content.some((item) => item.type === "image"), false, "oversized image block should be omitted");
+  const text = textContent(result);
+  assert.ok(text.includes("media omitted"), `expected omission note, got: ${text}`);
+  assert.ok(Buffer.byteLength(text, "utf8") <= 40, `text should respect maxBytes cap, got ${Buffer.byteLength(text, "utf8")}`);
 });

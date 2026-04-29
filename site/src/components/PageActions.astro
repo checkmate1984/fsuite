@@ -24,7 +24,8 @@
 
 const route = Astro.locals.starlightRoute;
 const entry = route?.entry;
-const slug = entry?.id?.replace(/\.(md|mdx)$/i, '') ?? '';
+const entryId = entry?.id ?? '';
+const slug = entryId.replace(/\.(md|mdx)$/i, '');
 const title = entry?.data?.title ?? '';
 const basePath = import.meta.env.BASE_URL;
 
@@ -34,9 +35,9 @@ const basePath = import.meta.env.BASE_URL;
 const mdRelative = slug ? `${slug}.md` : 'index.md';
 
 // GitHub source URL — assumes master branch + the canonical path layout.
-// If the entry is `index.mdx`, the slug is empty; map back to the file.
+// Preserve the original content extension so .md pages link to .md sources.
 const ghBase = 'https://github.com/lliWcWill/fsuite/blob/master/site/src/content/docs';
-const ghSourcePath = slug ? `${slug}.mdx` : 'index.mdx';
+const ghSourcePath = entryId || 'index.mdx';
 const ghSourceUrl = `${ghBase}/${ghSourcePath}`;
 ---
 
