@@ -75,13 +75,45 @@
   );
 }
 
-/* Light mode — keep it sane and on-brand */
+/* ---------- 2b. STARLIGHT TOKEN OVERRIDES (LIGHT) ---------- */
+/* Full CAVE-theme light palette: gray scale inverted, white/black flipped,
+   accent darkened for contrast on white. Mirrors Starlight's canonical
+   `:root[data-theme='light']` pattern from the official CSS guide
+   (starlight.astro.build/guides/css-and-tailwind). */
 :root[data-theme='light'] {
+  /* Accent — deep forest green readable on white */
   --sl-color-accent-low:  #d6f7e6;
   --sl-color-accent:      #0a8c52;
   --sl-color-accent-high: #064a2c;
-  --sl-color-text-invert: #ffffff;
 
+  /* White / gray scale / black — gray-1 is closest to text, gray-7 closest to bg */
+  --sl-color-white:   #0a1014;
+  --sl-color-gray-1:  #1c2a25;
+  --sl-color-gray-2:  #44544e;
+  --sl-color-gray-3:  #6b8079;
+  --sl-color-gray-4:  #9eb1a8;
+  --sl-color-gray-5:  #c9dad2;
+  --sl-color-gray-6:  #e8f4ee;
+  --sl-color-gray-7:  #f5fafa;
+  --sl-color-black:   #ffffff;
+
+  /* Background layers — light surfaces */
+  --sl-color-bg:           #ffffff;
+  --sl-color-bg-nav:       #f5fafa;
+  --sl-color-bg-sidebar:   #f5fafa;
+  --sl-color-bg-inline-code: #eef5f1;
+
+  /* Text */
+  --sl-color-text:         #0a1014;
+  --sl-color-text-accent:  #0a8c52;
+  --sl-color-text-invert:  #ffffff;
+
+  /* Hairlines — cave-green tint, proper alpha for light backgrounds */
+  --sl-color-hairline:        rgba(10, 60, 40, 0.10);
+  --sl-color-hairline-light:  rgba(10, 60, 40, 0.18);
+  --sl-color-hairline-shade:  rgba(10, 60, 40, 0.30);
+
+  /* Custom fsuite tokens — light mode versions */
   --fs-accent:       #0a8c52;
   --fs-accent-soft:  #0a8c52;
   --fs-accent-deep:  #d6f7e6;
@@ -90,6 +122,7 @@
   --fs-bg-card:    #ffffff;
   --fs-bg-card-hi: #f7faf8;
   --fs-bg-card-on: #eef5f1;
+
   --fs-scanline: none;
 }
 
