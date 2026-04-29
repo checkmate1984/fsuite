@@ -656,6 +656,34 @@ test_background_exports_telemetry_run_id() {
   fi
 }
 
+test_telemetry_escapes_run_id() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    skip "telemetry_escapes_run_id: python3 unavailable"
+    return
+  fi
+  mkdir -p "$HOME/.fsuite"
+  rm -f "$HOME/.fsuite/telemetry.jsonl"
+  local raw_run_id line
+  raw_run_id=$'fbash"run\\id\nnext'
+
+  FSUITE_TELEMETRY=1 FSUITE_TELEMETRY_RUN_ID="$raw_run_id" \
+    "${FBASH}" --command 'true' -o json >/dev/null 2>&1 || true
+  line=$(tail -1 "$HOME/.fsuite/telemetry.jsonl" 2>/dev/null) || line=""
+
+  if python3 - "$line" "$raw_run_id" <<'PY' >/dev/null 2>&1; then
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload.get("tool") == "fbash"
+assert payload.get("run_id") == sys.argv[2]
+PY
+    pass "telemetry_escapes_run_id: custom run_id remains valid JSON"
+  else
+    fail "telemetry_escapes_run_id: expected JSON-escaped run_id" "line=$line"
+  fi
+}
+
 test_exec_temp_cleanup() {
   local isolated_tmp="${TEST_DIR}/tmp-isolated"
   rm -rf "$isolated_tmp"
@@ -875,6 +903,7 @@ run_test "Internal reset" test_internal_reset
   run_test "Background timeout behavior" test_background_has_no_default_timeout_but_respects_explicit_timeout
   run_test "Background survives launcher timeout" test_background_survives_launcher_timeout
   run_test "Background exports telemetry run_id" test_background_exports_telemetry_run_id
+  run_test "Telemetry escapes run_id" test_telemetry_escapes_run_id
   run_test "Exec temp cleanup" test_exec_temp_cleanup
 
 echo ""
