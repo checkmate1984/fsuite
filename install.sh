@@ -271,10 +271,26 @@ fmetrics-predict.py|fmetrics-import.py|fread-media.py) mode=755 ;;
     run_privileged install -m "$mode" "${SCRIPT_DIR}/${share_file}" "${share_dir}/${share_file}"
     ok "  ${share_file}"
   done
-  # memory-ingest.js lives under mcp/ in source but deploys flat to share_dir
-  [[ -f "${SCRIPT_DIR}/mcp/memory-ingest.js" ]] || die "Missing shared file: mcp/memory-ingest.js"
-  run_privileged install -m 755 "${SCRIPT_DIR}/mcp/memory-ingest.js" "${share_dir}/memory-ingest.js"
-  ok "  memory-ingest.js"
+    # memory-ingest.js needs @modelcontextprotocol/sdk at runtime, so install
+    # the entire mcp/ tree (script + package.json + node_modules) under
+    # ${share_dir}/mcp/. fread's resolver checks <share>/mcp/memory-ingest.js
+    # first so the colocated node_modules satisfies the SDK import.
+    [[ -f "${SCRIPT_DIR}/mcp/memory-ingest.js" ]] || die "Missing shared file: mcp/memory-ingest.js"
+    if [[ -d "${SCRIPT_DIR}/mcp/node_modules" ]]; then
+        run_privileged install -d "${share_dir}/mcp"
+        run_privileged cp -r "${SCRIPT_DIR}/mcp/memory-ingest.js" \
+            "${SCRIPT_DIR}/mcp/package.json" "${SCRIPT_DIR}/mcp/node_modules" \
+            "${share_dir}/mcp/"
+        ok "  mcp/memory-ingest.js + node_modules"
+    else
+        warn "  mcp/node_modules missing — memory-ingest helper will fail at runtime."
+        warn "  Run 'npm ci --prefix mcp' first or use install.sh in --full mode."
+        # Still install the script flat so fread's helper-not-found log lights up
+        # rather than the helper just being absent.
+        run_privileged install -m 755 "${SCRIPT_DIR}/mcp/memory-ingest.js" "${share_dir}/memory-ingest.js"
+        ok "  memory-ingest.js (flat, no node_modules)"
+    fi
+}
 }
 
 # ---------------------------------------------------------------------------

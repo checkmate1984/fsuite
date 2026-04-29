@@ -884,13 +884,16 @@ _media_maybe_ingest() {
     # Ensure log dir exists
     mkdir -p "$HOME/.cache/fsuite" 2>/dev/null || return 0
 
-local ingest_helper=""
-local _candidates=(
-  "${_FSUITE_SCRIPT_DIR}/mcp/memory-ingest.js"
-  "${FSUITE_SHARE_DIR:-/nonexistent}/memory-ingest.js"
-  "/usr/local/share/fsuite/memory-ingest.js"
-  "/usr/share/fsuite/memory-ingest.js"
-)
+    local ingest_helper=""
+    local _candidates=(
+        "${_FSUITE_SCRIPT_DIR}/mcp/memory-ingest.js"
+        "${FSUITE_SHARE_DIR:-/nonexistent}/mcp/memory-ingest.js"
+        "/usr/local/share/fsuite/mcp/memory-ingest.js"
+        "/usr/share/fsuite/mcp/memory-ingest.js"
+        "${FSUITE_SHARE_DIR:-/nonexistent}/memory-ingest.js"
+        "/usr/local/share/fsuite/memory-ingest.js"
+        "/usr/share/fsuite/memory-ingest.js"
+    )
 for _c in "${_candidates[@]}"; do
   [[ -f "$_c" ]] && { ingest_helper="$_c"; break; }
 done
