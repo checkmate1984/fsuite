@@ -1544,6 +1544,27 @@ fail "PDF token-budget truncation: wrong output" "$result"
 fi
 }
 
+# P2. Pretty mode honors --max-lines for PDF text body
+test_media_pdf_pretty_max_lines() {
+  local output rc=0
+  output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" \
+    "${MEDIA_FIXTURES}/sample.pdf" --max-lines 3 2>/dev/null) || rc=$?
+  if (( rc != 0 )); then
+    fail "PDF pretty --max-lines 3 should exit 0" "exit=$rc"
+    return
+  fi
+  if [[ "$output" != *"truncated"* ]]; then
+    fail "PDF pretty --max-lines 3 should emit truncation marker" "Got: $output"
+    return
+  fi
+  local line_count
+  line_count=$(printf '%s' "$output" | wc -l)
+  if (( line_count > 20 )); then
+    fail "PDF pretty --max-lines 3 should produce short output" "Got $line_count lines"
+    return
+  fi
+  pass "PDF pretty --max-lines 3 truncates body and emits marker"
+}
 # Q. Python engine standalone probe
 test_media_python_engine_standalone() {
 local engine="${SCRIPT_DIR}/../fread-media.py"
@@ -1791,6 +1812,7 @@ run_test "PDF backend fallback (poppler)" test_media_backend_fallback
 run_test "PDF invalid backend" test_media_backend_force_invalid
 run_test "No-ingest flag" test_media_no_ingest_flag
 run_test "PDF token budget truncation" test_media_pdf_token_budget_truncation
+run_test "PDF pretty --max-lines truncation" test_media_pdf_pretty_max_lines
 run_test "Engine standalone probe" test_media_python_engine_standalone
 
 run_test "Budget-skipped media status" test_media_budget_skipped_status

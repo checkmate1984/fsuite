@@ -851,14 +851,32 @@ fi
             tok_est="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('tokens_estimate','?'))" 2>/dev/null || echo "?")"
             echo "📷 ${fmt} ${w}×${h} — ${orig_sz} bytes (~${tok_est} tokens) [base64 suppressed in pretty mode; use -o json]"
             ;;
-        pdf-text)
-            local pg_count tok_est text_body
-            pg_count="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('page_count','?'))" 2>/dev/null || echo "?")"
-            tok_est="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('tokens_estimate','?'))" 2>/dev/null || echo "?")"
-            text_body="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('text',''))" 2>/dev/null || echo "")"
-            echo "--- file: $path ($pg_count pages, $tok_est tokens) ---"
-            [[ -n "$text_body" ]] && printf '%s\n' "$text_body"
-            ;;
+            pdf-text)
+                local pg_count tok_est text_body
+                pg_count="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('page_count','?'))" 2>/dev/null || echo "?")"
+                tok_est="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('tokens_estimate','?'))" 2>/dev/null || echo "?")"
+                text_body="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('text',''))" 2>/dev/null || echo "")"
+                echo "--- file: $path ($pg_count pages, $tok_est tokens) ---"
+                if [[ -n "$text_body" ]]; then
+                    local _media_pretty_truncated=0
+                    if (( MAX_LINES > 0 )); then
+                        local _line_count
+                        _line_count=$(printf '%s' "$text_body" | wc -l)
+                        if (( _line_count > MAX_LINES )); then
+                            text_body=$(printf '%s' "$text_body" | head -n "$MAX_LINES")
+                            _media_pretty_truncated=1
+                            mark_truncated "max_lines"
+                        fi
+                    fi
+                    if (( MAX_BYTES > 0 )) && (( ${#text_body} > MAX_BYTES )); then
+                        text_body="${text_body:0:$MAX_BYTES}"
+                        _media_pretty_truncated=1
+                        mark_truncated "max_bytes"
+                    fi
+                    printf '%s\n' "$text_body"
+                    (( _media_pretty_truncated )) && echo "... [truncated; raise --max-lines/--max-bytes for full body]"
+                fi
+                ;;
         pdf-meta)
             local pg_count enc has_text img_count pw ph
             pg_count="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('page_count','?'))" 2>/dev/null || echo "?")"

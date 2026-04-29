@@ -1399,8 +1399,9 @@ function pdfMetaSummary(payload) {
   ].join("\n");
 }
 
-function buildMediaContent(payload) {
+function buildMediaContent(payload, opts) {
   if (!payload || typeof payload !== "object") return null;
+  const maxLines = opts && Number.isFinite(opts.maxLines) && opts.maxLines > 0 ? opts.maxLines : 0;
   switch (payload.type) {
     case "image": {
       const f = payload.file || {};
@@ -1415,8 +1416,17 @@ function buildMediaContent(payload) {
       return { content: [{ type: "text", text: imageMetaSummary(payload) }] };
     case "pdf-text": {
       const f = payload.file || {};
-      return { content: [{ type: "text", text: pdfTextHeader(payload) + (f.text || "") }] };
-    }
+      let text = f.text || "";
+      let truncationNote = "";
+      if (maxLines && text) {
+        const lines = text.split("\n");
+        if (lines.length > maxLines) {
+          text = lines.slice(0, maxLines).join("\n");
+          truncationNote = `\n... [truncated: ${lines.length - maxLines} more lines; raise max_lines to see all]\n`;
+        }
+      }
+      return { content: [{ type: "text", text: pdfTextHeader(payload) + text + truncationNote }] };
+      }
     case "pdf-pages": {
       const f = payload.file || {};
       const pages = Array.isArray(f.pages) ? f.pages : [];
@@ -1624,20 +1634,29 @@ server.registerTool(
       if (wantsFull) args.push("--no-truncate");
       args.push("-o", "json");
 
-
-// Phase 3: Media-aware short-circuit. Engine emits media_payload for
-// images/PDFs — translate directly to MCP image/text content blocks
-// and bypass cli()'s text-only renderer. Any failure falls through to
-// the normal text path so we never crash the MCP server.
-try {
-  const opts = execOptsFor("fread");
-  const { stdout, stderr } = await run(resolveTool("fread"), args, opts);
-  const raw = stdout || stderr || "(no output)";
-  const parsed = maybeParseJson(raw);
-  if (parsed && parsed.media_payload) {
-    const built = buildMediaContent(parsed.media_payload);
-    if (built) return built;
-  }
+      // Phase 3: Media-aware short-circuit. Engine emits media_payload(s) for
+      // images/PDFs — translate directly to MCP image/text content blocks
+      // and bypass cli()'s text-only renderer. Any failure falls through to
+      // the normal text path so we never crash the MCP server.
+      try {
+        const opts = execOptsFor("fread");
+        const { stdout, stderr } = await run(resolveTool("fread"), args, opts);
+        const raw = stdout || stderr || "(no output)";
+        const parsed = maybeParseJson(raw);
+        // Multi-file media: iterate media_payloads (array) and merge content blocks.
+        // Falls back to singular media_payload (legacy / single-file path).
+        if (parsed && Array.isArray(parsed.media_payloads) && parsed.media_payloads.length > 0) {
+          const merged = [];
+          for (const p of parsed.media_payloads) {
+            const built = buildMediaContent(p, { maxLines: max_lines });
+            if (built && Array.isArray(built.content)) merged.push(...built.content);
+          }
+          if (merged.length > 0) return { content: merged };
+        }
+        if (parsed && parsed.media_payload) {
+          const built = buildMediaContent(parsed.media_payload, { maxLines: max_lines });
+          if (built) return built;
+        }
   // Non-media file: reuse already-captured raw output through the same
   // render/slim chain that cli() uses — avoids spawning fread a second time.
   const slim = slimStructuredContent(normalizeStructuredContent(parsed));
