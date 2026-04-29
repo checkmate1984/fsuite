@@ -283,12 +283,12 @@ fmetrics-predict.py|fmetrics-import.py|fread-media.py) mode=755 ;;
             "${share_dir}/mcp/"
         ok "  mcp/memory-ingest.js + node_modules"
     else
-        warn "  mcp/node_modules missing — memory-ingest helper will fail at runtime."
+        warn "  mcp/node_modules missing — memory-ingest helper will not be installed."
         warn "  Run 'npm ci --prefix mcp' first or use install.sh in --full mode."
-        # Still install the script flat so fread's helper-not-found log lights up
-        # rather than the helper just being absent.
-        run_privileged install -m 755 "${SCRIPT_DIR}/mcp/memory-ingest.js" "${share_dir}/memory-ingest.js"
-        ok "  memory-ingest.js (flat, no node_modules)"
+        # Skip installing the helper. fread's resolver will fall through to
+        # the 'helper not found' log path, which is a clean no-op. Installing
+        # the .js without its node_modules would cause node to crash with
+        # ERR_MODULE_NOT_FOUND on every media read (logged but visible noise).
     fi
 }
 
