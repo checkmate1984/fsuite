@@ -807,9 +807,17 @@ fi
         # path) and MEDIA_PAYLOADS_JSON (array, multi-file batch path).
         local chunk_content="$engine_json"
         local chunk_bytes="${#chunk_content}"
-        # Honor --max-bytes/--max-lines budget for media chunks too.
-        check_budget_preadd 1 "$chunk_bytes"
-        if [[ "$TRUNCATED" != "true" ]]; then
+        # Honor --max-bytes / --max-lines for media chunks (NOT --token-budget,
+        # which the engine already enforces internally for PDF text/render).
+        local _media_truncated=0
+        if (( MAX_BYTES > 0 )) && (( TOTAL_BYTES_READ + chunk_bytes > MAX_BYTES )); then
+            mark_truncated "max_bytes"
+            _media_truncated=1
+        elif (( MAX_LINES > 0 )) && (( TOTAL_LINES_READ + 1 > MAX_LINES )); then
+            mark_truncated "max_lines"
+            _media_truncated=1
+        fi
+        if (( _media_truncated == 0 )); then
             MEDIA_PAYLOAD_JSON="$engine_json"
             MEDIA_PAYLOADS_JSON+=("$engine_json")
             add_chunk "$path" 0 0 "" "$chunk_content" "$chunk_bytes" 1
