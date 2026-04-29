@@ -1381,3 +1381,92 @@ starlight-tabs [role="tab"][aria-selected="true"] {
   color: var(--sl-color-gray-3);
 }
 .fs-footer-status .fs-fd-live { color: var(--fs-accent); }
+
+/* ============================================================
+   fsuite — ROUND 5 components appendix
+   APPEND to bottom of site/src/styles/custom.css
+   (after rounds 1-4 appendices)
+   ============================================================ */
+
+/* ---------- 35. ARCHITECTURE DELIVERY FLOW ---------- */
+.fs-delivery {
+  margin: 24px 0 32px;
+  padding: 22px 18px;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(58, 255, 157, 0.03), transparent 70%),
+    var(--sl-color-bg);
+  overflow-x: auto;
+}
+.fs-delivery-row {
+  display: flex; align-items: stretch;
+  gap: 8px;
+  min-width: max-content;
+  font-family: var(--sl-font-mono);
+}
+.fs-delivery-node {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 16px;
+  min-width: 150px;
+  background: var(--sl-color-gray-7);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 6px;
+}
+.fs-delivery-node b {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sl-color-white);
+  letter-spacing: 0.02em;
+}
+.fs-delivery-node span {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--sl-color-gray-3);
+  text-transform: uppercase;
+}
+.fs-delivery-block {
+  border-color: color-mix(in oklab, var(--fs-warn) 40%, var(--sl-color-hairline));
+  background: color-mix(in oklab, var(--fs-warn) 5%, var(--sl-color-gray-7));
+}
+.fs-delivery-block b { color: var(--fs-warn); }
+.fs-delivery-route {
+  border-color: color-mix(in oklab, var(--fs-info) 40%, var(--sl-color-hairline));
+  background: color-mix(in oklab, var(--fs-info) 5%, var(--sl-color-gray-7));
+}
+.fs-delivery-route b { color: var(--fs-info); }
+.fs-delivery-exec {
+  border-color: color-mix(in oklab, var(--fs-accent) 40%, var(--sl-color-hairline));
+  background: color-mix(in oklab, var(--fs-accent) 5%, var(--sl-color-gray-7));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--fs-accent) 25%, transparent) inset;
+}
+.fs-delivery-exec b { color: var(--fs-accent); }
+.fs-delivery-log {
+  border-color: color-mix(in oklab, var(--fs-info) 30%, var(--sl-color-hairline));
+}
+
+/* Chain arrows in delivery row */
+.fs-delivery .fs-arr {
+  align-self: center;
+  width: 22px; height: 14px;
+  position: relative;
+  flex-shrink: 0;
+}
+.fs-delivery .fs-arr::before {
+  content: "";
+  position: absolute;
+  top: 50%; left: 0; right: 6px;
+  height: 1px;
+  background: var(--sl-color-gray-3);
+  transform: translateY(-50%);
+}
+.fs-delivery .fs-arr::after {
+  content: "";
+  position: absolute;
+  top: 50%; right: 0;
+  width: 0; height: 0;
+  border-left: 6px solid var(--sl-color-gray-3);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transform: translateY(-50%);
+}

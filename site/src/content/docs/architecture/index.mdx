@@ -1,0 +1,80 @@
+---
+title: Architecture
+description: "How fsuite delivers itself to agents — three pillars: MCP, hooks, telemetry."
+sidebar:
+  order: 0
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Three pillars, one toolchain
+
+The 14 fsuite drones are the payload. The architecture is what gets them in the agent's hands and keeps them flying. Three pillars:
+
+<CardGrid>
+  <Card title="MCP Adapter" icon="puzzle">
+    Exposes every fsuite tool as a structured MCP server so MCP-aware agents (Claude Code, Hermes) call them directly without going through native `Bash`. Adds Monokai-themed structured output rendering. [Read the MCP page →](/fsuite/architecture/mcp/)
+  </Card>
+  <Card title="Hooks &amp; Enforcement" icon="seti:lock">
+    `PreToolUse` hooks block native `Read` / `Write` / `Edit` / `Grep` / `Glob` so the agent has no choice but to reach for `fread` / `fedit` / `fcontent` / `fsearch`. Hooks block, MCP exposes — they're complementary. [Read the hooks page →](/fsuite/architecture/hooks/)
+  </Card>
+  <Card title="Telemetry" icon="rocket">
+    Every tool emits a JSONL event with timing, output size, exit code, and caller attribution. `fmetrics` ingests into SQLite and predicts the best next tool. Local-only, opt-out. [Read the telemetry page →](/fsuite/architecture/telemetry/)
+  </Card>
+  <Card title="Chain Combinations" icon="random">
+    Pipe contracts — which tools produce file paths, which consume them, which 2/3/4-step chains actually work. The recipe book. [Read the chains page →](/fsuite/architecture/chains/)
+  </Card>
+</CardGrid>
+
+## The delivery flow
+
+<div class="fs-delivery">
+  <div class="fs-delivery-row">
+    <div class="fs-delivery-node">
+      <b>Agent</b>
+      <span>Claude Code · Codex · Hermes</span>
+    </div>
+    <span class="fs-arr"></span>
+    <div class="fs-delivery-node fs-delivery-block">
+      <b>Hooks layer</b>
+      <span>blocks native Read/Write/Edit</span>
+    </div>
+    <span class="fs-arr"></span>
+    <div class="fs-delivery-node fs-delivery-route">
+      <b>MCP server</b>
+      <span>exposes 14 fsuite tools</span>
+    </div>
+    <span class="fs-arr"></span>
+    <div class="fs-delivery-node fs-delivery-exec">
+      <b>fsuite CLI</b>
+      <span>14 drones · token-budgeted</span>
+    </div>
+    <span class="fs-arr"></span>
+    <div class="fs-delivery-node fs-delivery-log">
+      <b>Telemetry</b>
+      <span>JSONL → SQLite → fmetrics</span>
+    </div>
+  </div>
+</div>
+
+The flow is left-to-right: the agent attempts a tool call, hooks block native primitives that would flood context, MCP routes the call to a fsuite drone, the drone executes under token-budget caps, and telemetry records the event for `fmetrics` to learn from later.
+
+## CLI vs MCP — which mode are you in?
+
+| Mode | How it runs | Pipe behavior | Speed |
+|------|-------------|---------------|-------|
+| **CLI native (Debian / shell)** | `fsearch -o paths '*.py' \| fmap` | Real Unix pipes, parallel | Fastest |
+| **CLI inside `fbash` (MCP escape hatch)** | `fbash "fsearch -o paths '*.py' \| fmap"` | Real pipes inside a budgeted shell | Fast |
+| **Pure MCP tool calls** | Agent calls `fsearch`, then `fmap`, sequentially | Sequential — agent constructs chain by hand | Correct, slower |
+
+If you're running fsuite through MCP and feel sequential limits biting, **route through `fbash`** — see the [MCP page](/fsuite/architecture/mcp/) for the escape-hatch pattern.
+
+## Where each pillar lives in the repo
+
+| Pillar | Path | Status |
+|--------|------|--------|
+| MCP adapter | `mcp/index.js` | Production (v1.5.0+) |
+| Hooks config | `scripts/install-hooks.sh` *(planned)* | Manual today, automated soon |
+| Telemetry library | `_fsuite_common.sh` + `~/.fsuite/telemetry.jsonl` | Production |
+| Telemetry analytics | `fmetrics` + `fmetrics-predict.py` | Production |
+| Chain contracts | `docs/internal/specs/chain-combinations.md` | Spec → docs |
