@@ -756,7 +756,11 @@ media_dispatch() {
         subcmd="image"
         (( MEDIA_META_ONLY ))  && engine_args+=("--meta-only")
         (( MEDIA_NO_RESIZE ))  && engine_args+=("--no-resize")
-        [[ -n "$MEDIA_MAX_TOKENS" ]] && engine_args+=("--max-tokens" "$MEDIA_MAX_TOKENS")
+        if [[ -n "$MEDIA_MAX_TOKENS" ]]; then
+            engine_args+=("--max-tokens" "$MEDIA_MAX_TOKENS")
+        elif (( TOKEN_BUDGET > 0 )); then
+            engine_args+=("--max-tokens" "$TOKEN_BUDGET")
+        fi
     elif [[ "$detected" == "pdf" ]]; then
         subcmd="pdf"
         (( MEDIA_META_ONLY ))  && engine_args+=("--meta-only")

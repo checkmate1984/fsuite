@@ -1151,6 +1151,33 @@ fail "Image JSON: media_payload structure wrong" "$result"
 fi
 }
 
+test_media_image_honors_global_token_budget() {
+local output rc=0
+output=$(FSUITE_TELEMETRY=0 FSUITE_MEMORY_INGEST=0 "${FREAD}" "${MEDIA_FIXTURES}/sample.png" --token-budget 1 -o json 2>/dev/null) || rc=$?
+if (( rc != 0 )); then
+fail "Image --token-budget should exit 0" "exit=$rc"
+return
+fi
+local result
+result=$(printf '%s' "$output" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+f = d.get('media_payload', {}).get('file', {})
+ok = (
+    f.get('tokens_estimate') == 1 and
+    f.get('dimensions') == {'width': 25, 'height': 20} and
+    f.get('resized') is True
+)
+print('OK' if ok else 'FAIL: tok=%s dims=%s resized=%s' % (
+    f.get('tokens_estimate'), f.get('dimensions'), f.get('resized')))
+" 2>/dev/null || echo "PARSE_ERROR")
+if [[ "$result" == "OK" ]]; then
+pass "Image --token-budget forwards global budget to media engine"
+else
+fail "Image --token-budget should constrain media engine output" "$result"
+fi
+}
+
 # C. Image meta-only
 test_media_image_meta_only() {
 local output rc=0
@@ -1831,6 +1858,7 @@ echo ""
 echo "== Media Reading (Phase 5) =="
 run_test "Image pretty no base64" test_media_image_pretty_no_base64
 run_test "Image JSON media_payload" test_media_image_json_has_media_payload
+run_test "Image global token budget" test_media_image_honors_global_token_budget
 run_test "Image meta-only" test_media_image_meta_only
 run_test "Image no-resize token refusal" test_media_image_no_resize_token_refusal
 run_test "PDF text default" test_media_pdf_text_default
