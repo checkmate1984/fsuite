@@ -1,3 +1,21 @@
+fsuite (3.4.0-1) unstable; urgency=medium
+
+  * feat(fread): add first-class image and PDF reading through
+    fread-media.py, including image metadata/resize support, PDF text
+    extraction, PDF page rendering, page ranges, and token/page caps.
+  * feat(mcp): return fread media payloads as MCP image/text content and
+    preserve mixed media+text batches.
+  * feat(memory): add best-effort ShieldCortex memory-ingest helper for
+    media reads, with detached execution and failure-tolerant logging.
+  * fix(fbash/fread): harden review-discovered edge cases around fread
+    auto-uncapping, heredocs, child telemetry run IDs, media budgets,
+    Poppler failures, UTF-8 truncation, and detached ingest cleanup.
+  * docs(site): ship the CAVE Starlight revamp, force-dark theme,
+    page-action markdown helpers, chain-combination guide, and updated
+    command docs.
+
+ -- player3vsgpt <domain112@yahoo.com>  Wed, 29 Apr 2026 22:55:00 -0500
+
 fsuite (3.3.0-1) unstable; urgency=medium
 
   * feat(fmap): 50 programming language support — adds bash, cpp, cuda,

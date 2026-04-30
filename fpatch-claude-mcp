@@ -15,7 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
 FPROBE="${SCRIPT_DIR}/fprobe"
-VERSION="3.3.0"
+VERSION="3.4.0"
 
 # Defaults
 _CLAUDE_VERSIONS_DIR="${HOME}/.local/share/claude/versions"

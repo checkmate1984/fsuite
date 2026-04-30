@@ -7,7 +7,7 @@ sidebar:
 
 > **TODO:** wire this to the Debian changelog or GitHub releases so it auto-updates. For now, see the [GitHub releases page](https://github.com/lliWcWill/fsuite/releases) or [`debian/changelog`](https://github.com/lliWcWill/fsuite/blob/master/debian/changelog) for the canonical version history.
 
-## [Unreleased] — fread media reading
+## v3.4.0 — fread media reading + CAVE docs site
 
 Added image and PDF reading to fread, replacing the binary-skip path
 with a Python engine (`fread-media.py`) that handles PNG/JPEG/GIF/WEBP
@@ -38,6 +38,7 @@ and PDFs via PyMuPDF (Poppler fallback).
 
 ## Recent highlights
 
+- **v3.4.0** — image/PDF reading in `fread`, MCP media payloads, media memory ingest, review hardening, and the CAVE Starlight docs revamp
 - **v3.3.0** — telemetry attribution, shared run-id propagation, full-output controls, analytics rebuilds, and fedit JSON recovery hints
 - **v3.2.0** — `fbash` CLI binary added to Debian package
 - **v3.1.0** — `fsearch` SIGPIPE handling fix

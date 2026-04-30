@@ -34,7 +34,7 @@
 set -euo pipefail
 
 FSUITE_DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="3.3.0"
+VERSION="3.4.0"
 
 # ─── Defaults ────────────────────────────────────────────────────────────────
 TARGET=""
