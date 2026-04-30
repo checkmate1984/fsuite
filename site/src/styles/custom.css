@@ -649,7 +649,7 @@ starlight-tabs [role="tab"][aria-selected="true"] {
   display: none;
 }
 
-.page-actions__menu > [role="menuitem"] {
+.page-actions__menu > :is(button, a) {
   display: flex;
   align-items: flex-start;
   gap: 0.7rem;
@@ -665,8 +665,8 @@ starlight-tabs [role="tab"][aria-selected="true"] {
   transition: background 100ms ease, color 100ms ease;
 }
 
-.page-actions__menu > [role="menuitem"]:hover,
-.page-actions__menu > [role="menuitem"]:focus-visible {
+.page-actions__menu > :is(button, a):hover,
+.page-actions__menu > :is(button, a):focus-visible {
   background: rgba(58, 255, 157, 0.08);
   color: var(--sl-color-accent-high, #a8ffd4);
   outline: none;
