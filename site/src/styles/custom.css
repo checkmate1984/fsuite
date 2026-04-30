@@ -75,13 +75,45 @@
   );
 }
 
-/* Light mode — keep it sane and on-brand */
+/* ---------- 2b. STARLIGHT TOKEN OVERRIDES (LIGHT) ---------- */
+/* Full CAVE-theme light palette: gray scale inverted, white/black flipped,
+   accent darkened for contrast on white. Mirrors Starlight's canonical
+   `:root[data-theme='light']` pattern from the official CSS guide
+   (starlight.astro.build/guides/css-and-tailwind). */
 :root[data-theme='light'] {
+  /* Accent — deep forest green readable on white */
   --sl-color-accent-low:  #d6f7e6;
   --sl-color-accent:      #0a8c52;
   --sl-color-accent-high: #064a2c;
-  --sl-color-text-invert: #ffffff;
 
+  /* White / gray scale / black — gray-1 is closest to text, gray-7 closest to bg */
+  --sl-color-white:   #0a1014;
+  --sl-color-gray-1:  #1c2a25;
+  --sl-color-gray-2:  #44544e;
+  --sl-color-gray-3:  #6b8079;
+  --sl-color-gray-4:  #9eb1a8;
+  --sl-color-gray-5:  #c9dad2;
+  --sl-color-gray-6:  #e8f4ee;
+  --sl-color-gray-7:  #f5fafa;
+  --sl-color-black:   #ffffff;
+
+  /* Background layers — light surfaces */
+  --sl-color-bg:           #ffffff;
+  --sl-color-bg-nav:       #f5fafa;
+  --sl-color-bg-sidebar:   #f5fafa;
+  --sl-color-bg-inline-code: #eef5f1;
+
+  /* Text */
+  --sl-color-text:         #0a1014;
+  --sl-color-text-accent:  #0a8c52;
+  --sl-color-text-invert:  #ffffff;
+
+  /* Hairlines — cave-green tint, proper alpha for light backgrounds */
+  --sl-color-hairline:        rgba(10, 60, 40, 0.10);
+  --sl-color-hairline-light:  rgba(10, 60, 40, 0.18);
+  --sl-color-hairline-shade:  rgba(10, 60, 40, 0.30);
+
+  /* Custom fsuite tokens — light mode versions */
   --fs-accent:       #0a8c52;
   --fs-accent-soft:  #0a8c52;
   --fs-accent-deep:  #d6f7e6;
@@ -90,13 +122,18 @@
   --fs-bg-card:    #ffffff;
   --fs-bg-card-hi: #f7faf8;
   --fs-bg-card-on: #eef5f1;
+
   --fs-scanline: none;
 }
 
 /* ---------- 3. BASE TYPOGRAPHY ---------- */
 html {
+  /* Default to dark for the CAVE theme; light theme override below. */
   color-scheme: dark;
   font-family: var(--sl-font);
+}
+[data-theme='light'] {
+  color-scheme: light;
 }
 body {
   font-family: var(--sl-font);
@@ -612,7 +649,7 @@ starlight-tabs [role="tab"][aria-selected="true"] {
   display: none;
 }
 
-.page-actions__menu > [role="menuitem"] {
+.page-actions__menu > :is(button, a) {
   display: flex;
   align-items: flex-start;
   gap: 0.7rem;
@@ -628,8 +665,8 @@ starlight-tabs [role="tab"][aria-selected="true"] {
   transition: background 100ms ease, color 100ms ease;
 }
 
-.page-actions__menu > [role="menuitem"]:hover,
-.page-actions__menu > [role="menuitem"]:focus-visible {
+.page-actions__menu > :is(button, a):hover,
+.page-actions__menu > :is(button, a):focus-visible {
   background: rgba(58, 255, 157, 0.08);
   color: var(--sl-color-accent-high, #a8ffd4);
   outline: none;
@@ -1171,4 +1208,571 @@ starlight-tabs [role="tab"][aria-selected="true"] {
 @media (max-width: 50rem) {
   .fs-fcase { flex-direction: column; }
   .fs-fcase .fs-arr { transform: rotate(90deg); margin: 0 auto; }
+}
+
+/* ============================================================
+   fsuite — ROUND 3 components appendix
+   APPEND to bottom of site/src/styles/custom.css
+   (after the round-2 appendix you already pasted)
+   ============================================================ */
+
+/* ---------- 30. MONOKAI TERMINAL BLOCK ---------- */
+.fs-term {
+  margin: 16px 0 24px;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 8px;
+  background: #1e1f1c;
+  overflow: hidden;
+  box-shadow: 0 1px 0 0 rgba(255,255,255,0.04) inset, 0 8px 28px -10px rgba(0,0,0,0.5);
+}
+.fs-term-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  background: #14150f;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-family: var(--sl-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: #75715e;
+}
+.fs-term-bar::before {
+  content: "● ● ●";
+  color: #49483e;
+  letter-spacing: 0.22em;
+  margin-right: 6px;
+}
+.fs-term-bar b { color: #f8f8f2; font-weight: 500; }
+.fs-term-bar .fs-term-cost {
+  margin-left: auto;
+  color: #a6e22e;
+  font-weight: 600;
+}
+.fs-term pre {
+  margin: 0 !important;
+  padding: 14px 18px !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  font-family: var(--sl-font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #f8f8f2;
+  overflow-x: auto;
+}
+/* Monokai token classes — match the screenshots exactly */
+.tk-dot     { color: #a6e22e; font-weight: 700; }              /* the green ● before agent steps */
+.tk-tool    { color: #a6e22e; font-weight: 600; }              /* fread, fmap, fs etc. */
+.tk-key     { color: #f92672; }                                /* keywords, function, class */
+.tk-fn      { color: #66d9ef; }                                /* function names */
+.tk-str     { color: #e6db74; }                                /* strings */
+.tk-num     { color: #fd971f; }                                /* numbers, line numbers */
+.tk-com     { color: #75715e; font-style: italic; }            /* comments */
+.tk-mut     { color: #75715e; }                                /* muted info, paths */
+.tk-arrow   { color: #66d9ef; font-weight: 600; }              /* next →, └─ */
+.tk-ok      { color: #a6e22e; font-weight: 600; }              /* ✓ */
+.tk-warn    { color: #fd971f; }                                /* ⚠ */
+.tk-err     { color: #f92672; font-weight: 600; }              /* ✗ */
+.tk-cyan    { color: #66d9ef; }                                /* import paths, types */
+.tk-purple  { color: #ae81ff; }                                /* operators, special */
+.tk-line    { color: #75715e; padding-right: 10px; user-select: none; } /* gutter line numbers */
+
+/* ---------- 31. DRONE PROFILE CARD ---------- */
+.fs-drone {
+  margin: 0 0 28px;
+  padding: 18px 20px;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(58, 255, 157, 0.04), transparent 50%),
+    var(--sl-color-bg);
+  position: relative;
+  overflow: hidden;
+}
+.fs-drone::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--fs-accent), transparent);
+  opacity: 0.6;
+}
+.fs-drone-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px;
+  margin-bottom: 12px;
+}
+.fs-drone-call {
+  font-family: var(--sl-font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--fs-accent);
+  letter-spacing: -0.01em;
+}
+.fs-drone-tagline {
+  font-family: var(--sl-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-2);
+}
+.fs-drone-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-top: 6px;
+}
+.fs-drone-meta > div {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 12px;
+  background: var(--sl-color-gray-7);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 5px;
+}
+.fs-drone-meta b {
+  font-family: var(--sl-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+  font-weight: 500;
+}
+.fs-drone-meta span {
+  font-family: var(--sl-font-mono);
+  font-size: 13px;
+  color: var(--sl-color-white);
+}
+.fs-drone-meta span.role-recon  { color: var(--fs-info); }
+.fs-drone-meta span.role-keystone { color: var(--fs-accent); font-weight: 600; }
+.fs-drone-meta span.role-edit { color: var(--fs-warn); }
+.fs-drone-meta span.role-state { color: var(--fs-accent); }
+.fs-drone-meta span.role-binary { color: var(--fs-warn); }
+
+/* ---------- 32. CHEAT SHEET QUICK NAV ---------- */
+.fs-cheat-nav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 6px;
+  margin: 16px 0 32px;
+  padding: 14px;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 8px;
+  background: var(--sl-color-gray-7);
+}
+.fs-cheat-nav a {
+  font-family: var(--sl-font-mono);
+  font-size: 12.5px;
+  text-decoration: none;
+  color: var(--sl-color-gray-1);
+  padding: 6px 10px;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 4px;
+  text-align: center;
+  background: var(--sl-color-bg);
+}
+.fs-cheat-nav a:hover {
+  border-color: var(--fs-accent);
+  color: var(--fs-accent);
+}
+
+/* ---------- 33. MCP-LIMITATION CALLOUT ---------- */
+.fs-mcp-note {
+  margin: 24px 0;
+  padding: 16px 20px;
+  border: 1px solid color-mix(in oklab, var(--fs-warn) 35%, var(--sl-color-hairline-shade));
+  border-left: 3px solid var(--fs-warn);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--fs-warn) 5%, var(--sl-color-bg));
+}
+.fs-mcp-note h4 {
+  margin: 0 0 6px;
+  font-family: var(--sl-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fs-warn);
+}
+.fs-mcp-note p {
+  margin: 0 0 8px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--sl-color-gray-1);
+}
+.fs-mcp-note p:last-child { margin: 0; }
+.fs-mcp-note code {
+  background: color-mix(in oklab, var(--fs-warn) 10%, transparent);
+  color: var(--fs-warn);
+}
+
+/* ---------- 34. FOOTER STATUS BAR (optional, for layout override) ---------- */
+.fs-footer-status {
+  margin-top: 60px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--sl-color-hairline);
+  display: flex; flex-wrap: wrap;
+  justify-content: space-between; align-items: center;
+  gap: 14px;
+  font-family: var(--sl-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+}
+.fs-footer-status .fs-fd-live { color: var(--fs-accent); }
+
+/* ============================================================
+   fsuite — ROUND 5 components appendix
+   APPEND to bottom of site/src/styles/custom.css
+   (after rounds 1-4 appendices)
+   ============================================================ */
+
+/* ---------- 35. ARCHITECTURE DELIVERY FLOW ---------- */
+.fs-delivery {
+  margin: 24px 0 32px;
+  padding: 22px 18px;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(58, 255, 157, 0.03), transparent 70%),
+    var(--sl-color-bg);
+  overflow-x: auto;
+}
+.fs-delivery-row {
+  display: flex; align-items: stretch;
+  gap: 8px;
+  min-width: max-content;
+  font-family: var(--sl-font-mono);
+}
+.fs-delivery-node {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 16px;
+  min-width: 150px;
+  background: var(--sl-color-gray-7);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 6px;
+}
+.fs-delivery-node b {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sl-color-white);
+  letter-spacing: 0.02em;
+}
+.fs-delivery-node span {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--sl-color-gray-3);
+  text-transform: uppercase;
+}
+.fs-delivery-block {
+  border-color: color-mix(in oklab, var(--fs-warn) 40%, var(--sl-color-hairline));
+  background: color-mix(in oklab, var(--fs-warn) 5%, var(--sl-color-gray-7));
+}
+.fs-delivery-block b { color: var(--fs-warn); }
+.fs-delivery-route {
+  border-color: color-mix(in oklab, var(--fs-info) 40%, var(--sl-color-hairline));
+  background: color-mix(in oklab, var(--fs-info) 5%, var(--sl-color-gray-7));
+}
+.fs-delivery-route b { color: var(--fs-info); }
+.fs-delivery-exec {
+  border-color: color-mix(in oklab, var(--fs-accent) 40%, var(--sl-color-hairline));
+  background: color-mix(in oklab, var(--fs-accent) 5%, var(--sl-color-gray-7));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--fs-accent) 25%, transparent) inset;
+}
+.fs-delivery-exec b { color: var(--fs-accent); }
+.fs-delivery-log {
+  border-color: color-mix(in oklab, var(--fs-info) 30%, var(--sl-color-hairline));
+}
+
+/* Chain arrows in delivery row */
+.fs-delivery .fs-arr {
+  align-self: center;
+  width: 22px; height: 14px;
+  position: relative;
+  flex-shrink: 0;
+}
+.fs-delivery .fs-arr::before {
+  content: "";
+  position: absolute;
+  top: 50%; left: 0; right: 6px;
+  height: 1px;
+  background: var(--sl-color-gray-3);
+  transform: translateY(-50%);
+}
+.fs-delivery .fs-arr::after {
+  content: "";
+  position: absolute;
+  top: 50%; right: 0;
+  width: 0; height: 0;
+  border-left: 6px solid var(--sl-color-gray-3);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transform: translateY(-50%);
+}
+
+/* ============================================================
+   fsuite — ROUND 6 components appendix
+   APPEND to bottom of site/src/styles/custom.css
+   (after rounds 1-5 appendices)
+
+   New components for the story-page rebuild:
+   - .fs-hud (HUD frame for episode opener)
+   - .fs-hud-glow (extra glow variant for the lightbulb page)
+   - .fs-strip (5-cell status strip under the HUD)
+   - .fs-chain-display (visual chain for the lightbulb page)
+   - .fs-stack (2-layer carrier/cargo display)
+   ============================================================ */
+
+/* ---------- 36. HUD FRAME (episode opener) ---------- */
+.fs-hud {
+  position: relative;
+  margin: 24px 0 14px;
+  padding: 32px 36px 28px;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 4px;
+  background:
+    linear-gradient(180deg, rgba(58, 255, 157, 0.04), transparent 50%),
+    var(--sl-color-bg);
+  overflow: hidden;
+}
+.fs-hud::before {
+  /* corner crosshair grid background */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, rgba(58, 255, 157, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(58, 255, 157, 0.05) 1px, transparent 1px);
+  background-size: 32px 32px;
+  pointer-events: none;
+  opacity: 0.4;
+}
+.fs-hud-corner {
+  position: absolute;
+  width: 18px; height: 18px;
+  border: 1.5px solid var(--fs-accent);
+  pointer-events: none;
+}
+.fs-hud-corner.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+.fs-hud-corner.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+.fs-hud-corner.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+.fs-hud-corner.br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+.fs-hud-body {
+  position: relative;
+  z-index: 1;
+}
+.fs-hud-eyebrow {
+  font-family: var(--sl-font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.18em;
+  color: var(--fs-accent);
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+.fs-hud-title {
+  margin: 0 0 10px 0 !important;
+  font-size: 32px !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.01em !important;
+  color: var(--sl-color-white) !important;
+  border: none !important;
+  padding: 0 !important;
+}
+.fs-hud-sub {
+  margin: 0;
+  font-size: 15px;
+  color: var(--sl-color-gray-2);
+  max-width: 56ch;
+  line-height: 1.55;
+}
+.fs-hud-sub code {
+  font-size: 13px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--sl-color-gray-7);
+  color: var(--fs-accent);
+}
+
+/* Lightbulb glow variant */
+.fs-hud-glow {
+  background:
+    radial-gradient(circle at 70% 30%, rgba(58, 255, 157, 0.10), transparent 50%),
+    linear-gradient(180deg, rgba(58, 255, 157, 0.06), transparent 60%),
+    var(--sl-color-bg);
+  box-shadow:
+    inset 0 0 60px rgba(58, 255, 157, 0.05),
+    0 0 0 1px color-mix(in oklab, var(--fs-accent) 15%, transparent);
+}
+.fs-hud-glow .fs-hud-corner {
+  border-color: color-mix(in oklab, var(--fs-accent) 80%, white);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--fs-accent) 50%, transparent);
+}
+
+/* ---------- 37. STATUS STRIP (5 cells under HUD) ---------- */
+.fs-strip {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0;
+  margin: 0 0 28px;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 4px;
+  overflow: hidden;
+  font-family: var(--sl-font-mono);
+  background: var(--sl-color-gray-7);
+}
+.fs-strip-cell {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 10px 14px;
+  border-right: 1px solid var(--sl-color-hairline);
+}
+.fs-strip-cell:last-child {
+  border-right: none;
+}
+.fs-strip-cell b {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--sl-color-gray-3);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.fs-strip-cell span {
+  font-size: 13px;
+  color: var(--sl-color-white);
+  font-weight: 500;
+}
+.fs-strip-end span {
+  color: var(--fs-accent);
+}
+@media (max-width: 800px) {
+  .fs-strip { grid-template-columns: repeat(2, 1fr); }
+  .fs-strip-cell:nth-child(2n) { border-right: none; }
+  .fs-strip-cell { border-bottom: 1px solid var(--sl-color-hairline); }
+  .fs-strip-cell:nth-last-child(1) { border-bottom: none; }
+  .fs-strip-cell:nth-last-child(2):nth-child(odd) { border-bottom: none; }
+}
+
+/* ---------- 38. CHAIN DISPLAY (lightbulb page) ---------- */
+.fs-chain-display {
+  margin: 28px 0;
+  padding: 22px 18px;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 8px;
+  background: var(--sl-color-bg);
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  overflow-x: auto;
+  font-family: var(--sl-font-mono);
+}
+.fs-chain-stage {
+  flex: 1 1 0;
+  min-width: 130px;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 14px;
+  background: var(--sl-color-gray-7);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 5px;
+  position: relative;
+}
+.fs-chain-stage .fs-chain-num {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--sl-color-gray-4);
+  font-weight: 600;
+}
+.fs-chain-stage b {
+  font-size: 14px;
+  color: var(--sl-color-white);
+  font-weight: 600;
+}
+.fs-chain-stage span:not(.fs-chain-num) {
+  font-size: 11.5px;
+  color: var(--sl-color-gray-3);
+}
+.fs-chain-stage-keystone {
+  border-color: color-mix(in oklab, var(--fs-accent) 50%, var(--sl-color-hairline));
+  background: color-mix(in oklab, var(--fs-accent) 6%, var(--sl-color-gray-7));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--fs-accent) 25%, transparent) inset;
+}
+.fs-chain-stage-keystone b { color: var(--fs-accent); }
+.fs-chain-display .fs-arr {
+  align-self: center;
+  width: 22px; height: 14px;
+  position: relative;
+  flex-shrink: 0;
+}
+.fs-chain-display .fs-arr::before {
+  content: "";
+  position: absolute;
+  top: 50%; left: 0; right: 6px;
+  height: 1px;
+  background: var(--sl-color-gray-3);
+  transform: translateY(-50%);
+}
+.fs-chain-display .fs-arr::after {
+  content: "";
+  position: absolute;
+  top: 50%; right: 0;
+  width: 0; height: 0;
+  border-left: 6px solid var(--sl-color-gray-3);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transform: translateY(-50%);
+}
+
+/* ---------- 39. CARRIER/CARGO STACK (lightbulb page) ---------- */
+.fs-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 24px 0 32px;
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 8px;
+  overflow: hidden;
+  font-family: var(--sl-font-mono);
+}
+.fs-stack-layer {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 18px 22px;
+}
+.fs-stack-layer b {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+}
+.fs-stack-layer span {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--sl-color-white);
+}
+.fs-stack-layer code {
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.06);
+}
+.fs-stack-cargo {
+  background: linear-gradient(180deg,
+    color-mix(in oklab, var(--fs-accent) 12%, var(--sl-color-bg)),
+    color-mix(in oklab, var(--fs-accent) 4%, var(--sl-color-bg)));
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+.fs-stack-cargo b { color: var(--fs-accent); }
+.fs-stack-carrier {
+  background: var(--sl-color-gray-7);
+}
+.fs-stack-carrier b { color: var(--sl-color-gray-3); }
+
+/* ---------- 39. ACCESSIBILITY: REDUCED-MOTION FALLBACK ---------- */
+/* Honour the user's motion preference (System Settings → Accessibility →
+   Reduce Motion). Disables non-essential animations + transitions across the
+   site so motion-sensitive users don't get the page-actions menu fade-in,
+   strip pulse, or any future keyframe-driven decoration. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

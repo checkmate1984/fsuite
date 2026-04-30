@@ -9,6 +9,59 @@ sidebar:
 
 `fs` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">fs</span>
+    <span class="fs-drone-tagline">Unified search orchestrator · the front door</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-recon">RECON</span></div>
+    <div><b>Chain position</b><span>1 (entry)</span></div>
+    <div><b>Auto-routes to</b><span>fsearch · fcontent · fmap</span></div>
+    <div><b>Intent modes</b><span>auto · file · content · symbol · nav</span></div>
+  </div>
+</div>
+
+`fs` is the meta-tool — feed it any query and it classifies the intent (filename pattern, in-file content, symbol name, or path navigation), builds the right chain of underlying tools, and returns ranked, enriched hits with a `next_hint` for follow-up.
+
+When in doubt, start here. When you know the exact tool you need, skip it.
+
+## Canonical chains
+
+`fs` is the entry point of every recon chain. It does not pipe — it returns final ranked hits with a `next_hint` you call next.
+
+```bash
+# Symbol scout — returns hits + next_hint to fread the right block
+fs "renderTool"
+
+# Filename intent forced — looks for files literally named like *.log
+fs --intent file "*.log" /var/log
+
+# Scoped symbol search — narrow to TypeScript only
+fs --scope "*.ts" McpServer
+
+# Pipe to jq — JSON mode auto-engages on pipe
+fs -o json "*.rs" | jq '.hits'
+```
+
+## Terminal sample
+
+<div class="fs-term">
+  <div class="fs-term-bar"><b>fs(teleport)</b> · symbol intent · <span class="fs-term-cost">328ms · ~80 tokens</span></div>
+<pre><span class="tk-dot">●</span> Now let me find the teleport code:
+<span class="tk-mut">·</span>
+<span class="tk-tool">fs</span>(teleport | path: <span class="tk-str">"/home/user/Projects/nightfox/src"</span> | intent: <span class="tk-str">"symbol"</span> | scope: <span class="tk-str">"*.ts"</span>)
+  <span class="tk-arrow">└─</span> symbol (high) via fsearch <span class="tk-arrow">→</span> fcontent <span class="tk-arrow">→</span> fmap
+     explicit intent=symbol
+     <span class="tk-num">50</span> candidates, <span class="tk-num">1</span> enriched, <span class="tk-num">328</span>ms
+<span class="tk-mut">·</span>
+     nightfox/src/claude/command-parser.ts <span class="tk-com">(1 matches)</span>
+       <span class="tk-num">50</span>  · <span class="tk-str">'/teleport'</span>  <span class="tk-com">// Move session to terminal (forked)</span>
+<span class="tk-mut">·</span>
+     <span class="tk-cyan">next</span> <span class="tk-arrow">→</span> fread(path: <span class="tk-str">"/home/user/.../command-parser.ts"</span>, around: teleport)
+<span class="tk-mut">·</span></pre>
+</div>
+
 ## Help output
 
 The content below is the **live** `--help` output of `fs`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.

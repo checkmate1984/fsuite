@@ -9,6 +9,45 @@ sidebar:
 
 `fsearch` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">fsearch</span>
+    <span class="fs-drone-tagline">Filename / glob discovery · fd-aware · pipe currency producer</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-recon">NARROW</span></div>
+    <div><b>Chain position</b><span>3 (narrow files)</span></div>
+    <div><b>Pipe</b><span>producer (-o paths)</span></div>
+    <div><b>Output</b><span>pretty · paths · json</span></div>
+  </div>
+</div>
+
+`fsearch` finds files by name or glob. It's the pipe currency producer — `-o paths` gives you one file path per line, ready to feed `fmap` or `fcontent` directly. To pipe into `fread`, use `fread --from-stdin --stdin-format=paths` since `fread` takes paths from stdin only when those flags are set. Auto-detects `fd` for speed and falls back to `find`.
+
+Bare words auto-expand: `fsearch log /var/log` becomes `*.log`. Use this when you know what file pattern you want; use `fcontent` when you know what's inside the file but not its name.
+
+## Canonical chains
+
+```bash
+# Find all Python files
+fsearch '*.py' /project
+
+# Pipe to fmap — find then map symbols (the canonical 2-step)
+fsearch -o paths '*.py' /project | fmap -o json
+
+# Pipe to fcontent — find files of one type, search inside
+fsearch -o paths '*.log' /var/log | fcontent "ERROR"
+
+# Pipe to fread — read first 5 matched files
+fsearch -o paths '*.py' /project \
+  | fread --from-stdin --stdin-format=paths --max-files 5 -o json
+
+# Triple chain — glob → text-narrow → symbol-map
+fsearch -o paths '*.py' /project \
+  | fcontent -o paths "class" \
+  | fmap -o json
+```
+
 ## Help output
 
 The content below is the **live** `--help` output of `fsearch`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.

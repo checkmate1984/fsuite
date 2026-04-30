@@ -9,6 +9,74 @@ sidebar:
 
 `fread` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">fread</span>
+    <span class="fs-drone-tagline">Budgeted reading · symbol &amp; line-range resolution · PDF + image media</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-recon">READ</span></div>
+    <div><b>Chain position</b><span>5 (read)</span></div>
+    <div><b>Pipe</b><span>consumer (--from-stdin)</span></div>
+    <div><b>Media</b><span>PDF · image · diff</span></div>
+  </div>
+</div>
+
+`fread` is `cat` with a brain. It can read a whole file (uncapped by default — you control budget), an exact line range, the first N or last N lines, context windows around a literal pattern, or **one specific symbol resolved by name** in a file or directory.
+
+It also reads media: PDF text extraction, PDF page rasterization, image base64 with auto-resize, and unified-diff hunks from git pipe. The token-budget flags (`--max-lines`, `--max-bytes`, `--token-budget`) cap output before it hits the agent's context.
+
+## Canonical chains
+
+```bash
+# Read exactly one symbol — no scrolling, no guessing
+fread /project/src/auth.py --symbol authenticate
+
+# Resolve a symbol from a directory scope
+fread /project/src --symbol authenticate -o json
+
+# Precise line range
+fread /project/src/server.py -r 120:220
+
+# Context window around a pattern
+fread /project/src/auth.py --around "def authenticate" -B 5 -A 20
+
+# Pipe currency consumer — fsearch produces, fread consumes first 5
+fsearch -o paths '*.py' /project \
+  | fread --from-stdin --stdin-format=paths --max-files 5 -o json
+
+# Read git diff context
+git diff | fread --from-stdin --stdin-format=unified-diff -B 3 -A 10
+
+# PDF and image reading
+fread invoice.pdf
+fread paper.pdf --render --pages 1:5
+fread screenshot.png
+```
+
+## Terminal sample
+
+<div class="fs-term">
+  <div class="fs-term-bar"><b>fread(--around teleport)</b> · 66 lines · <span class="fs-term-cost">-829 tokens vs full read</span></div>
+<pre><span class="tk-tool">fread</span>(/home/user/Projects/nightfox/src/discord/commands/teleport.ts | head: <span class="tk-num">80</span>)
+  [ <span class="tk-num">66</span> lines | <span class="tk-warn">-829 tokens</span> ]
+     <span class="tk-line">1</span>  <span class="tk-key">import</span> &#123; ChatInputCommandInteraction &#125; <span class="tk-key">from</span> <span class="tk-str">'discord.js'</span>;
+     <span class="tk-line">2</span>  <span class="tk-key">import</span> &#123; discordChatId &#125; <span class="tk-key">from</span> <span class="tk-str">'../id-mapper.js'</span>;
+     <span class="tk-line">3</span>  <span class="tk-key">import</span> &#123; sessionManager &#125; <span class="tk-key">from</span> <span class="tk-str">'../../claude/session-manager.js'</span>;
+     <span class="tk-line">4</span>  <span class="tk-key">import</span> &#123; config &#125; <span class="tk-key">from</span> <span class="tk-str">'../../config.js'</span>;
+     <span class="tk-line">5</span>  <span class="tk-key">import</span> path <span class="tk-key">from</span> <span class="tk-str">'path'</span>;
+     <span class="tk-line">6</span>
+     <span class="tk-line">7</span>  <span class="tk-key">export async function</span> <span class="tk-fn">handleTeleport</span>(interaction: ChatInputCommandInteraction): Promise&lt;<span class="tk-key">void</span>&gt; &#123;
+     <span class="tk-line">8</span>     <span class="tk-key">const</span> chatId = <span class="tk-fn">discordChatId</span>(interaction.user.id);
+     <span class="tk-line">9</span>
+     <span class="tk-line">10</span> <span class="tk-com">// Try active in-memory session first, then fall back to most recent from history</span>
+     <span class="tk-line">11</span> <span class="tk-key">let</span> session = sessionManager.<span class="tk-fn">getSession</span>(chatId);
+     <span class="tk-line">12</span> <span class="tk-key">if</span> (!session) &#123;
+     <span class="tk-line">13</span>    session = sessionManager.<span class="tk-fn">resumeLastSession</span>(chatId) ?? <span class="tk-key">undefined</span>;
+     <span class="tk-line">14</span> &#125;
+<span class="tk-mut">·</span></pre>
+</div>
+
 ## Help output
 
 The content below is the **live** `--help` output of `fread`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.

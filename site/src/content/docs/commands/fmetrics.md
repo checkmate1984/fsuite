@@ -9,6 +9,57 @@ sidebar:
 
 `fmetrics` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">fmetrics</span>
+    <span class="fs-drone-tagline">Telemetry analytics · tool-chain prediction</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-state">LEARN</span></div>
+    <div><b>Chain position</b><span>specialist</span></div>
+    <div><b>Storage</b><span>SQLite</span></div>
+    <div><b>Use for</b><span>predict best next step</span></div>
+  </div>
+</div>
+
+`fmetrics` is the analytics layer. Every fsuite tool emits a telemetry record (path, timing, output size, success). `fmetrics` ingests those into SQLite and lets you ask:
+
+- Which tool combos actually win? (`combos`)
+- What's the strongest next step after `ftree → fsearch`? (`recommend`)
+- How long will this run on this machine? (`predict`)
+- What broke last week? (`stats`, `history`)
+
+It's how the toolchain learns. The agent's third tool call is statistically better than its first because `fmetrics` told it which patterns work.
+
+## Canonical chains
+
+```bash
+# Import telemetry into SQLite
+fmetrics import
+
+# Aggregate stats — runtime, reliability
+fmetrics stats
+fmetrics stats -o json
+
+# Recent runs of one tool
+fmetrics history --tool ftree --limit 10
+fmetrics history --project MyApp
+
+# Combo analytics — what chains win
+fmetrics combos --project fsuite
+fmetrics combos --starts-with ftree,fsearch --contains fmap -o json
+
+# Recommend the best next step
+fmetrics recommend --after ftree,fsearch --project fsuite
+
+# Predict runtimes for a path
+fmetrics predict /project
+
+# Housekeeping
+fmetrics profile
+fmetrics clean --days 30
+```
+
 ## Help output
 
 The content below is the **live** `--help` output of `fmetrics`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.

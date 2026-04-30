@@ -9,6 +9,56 @@ sidebar:
 
 `fcase` is part of the fsuite toolkit — a set of fourteen CLI tools built for AI coding agents.
 
+<div class="fs-drone">
+  <div class="fs-drone-head">
+    <span class="fs-drone-call">fcase</span>
+    <span class="fs-drone-tagline">Investigation continuity ledger · cross-session state machine</span>
+  </div>
+  <div class="fs-drone-meta">
+    <div><b>Role</b><span class="role-state">STATE</span></div>
+    <div><b>Chain position</b><span>wraps every chain</span></div>
+    <div><b>Lifecycle</b><span>init → note → handoff → resolve</span></div>
+    <div><b>Storage</b><span>~/.fsuite/fcase.db</span></div>
+  </div>
+</div>
+
+`fcase` is the investigation ledger. Every non-trivial debug, refactor, or recon ends with the agent saying "ok now what" — `fcase` answers that question across sessions. Open a case at the start, drop notes and evidence as you go, hand off cleanly to the next agent (or the next you).
+
+It's the *continuity* tool. Without it, every new session starts from zero. With it, the next agent reads the case envelope and knows exactly where the trail left off.
+
+## Canonical chains
+
+```bash
+# Open a case
+fcase init auth-seam --goal "Trace authenticate flow"
+
+# List active cases
+fcase list -o json
+
+# Append a note
+fcase note auth-seam --body "Focused on the denial branch"
+
+# Add a target seam
+fcase target add auth-seam \
+  --path /project/src/auth.py --symbol authenticate \
+  --symbol-type function --state active
+
+# Import targets from fmap
+fmap -o json /project | fcase target import auth-seam
+
+# Import evidence from fread
+fread -o json /project/src/auth.py --around "def auth" -A 20 \
+  | fcase evidence import auth-seam
+
+# Track and reject hypotheses
+fcase hypothesis add auth-seam --body "Cleanup bug in cancellation"
+fcase reject auth-seam --hypothesis-id 1 --reason "Verified safe"
+
+# Hand off to the next agent
+fcase next auth-seam --body "Patch denial branch next"
+fcase handoff auth-seam -o json
+```
+
 ## Help output
 
 The content below is the **live** `--help` output of `fcase`, captured at build time from the tool binary itself. It cannot drift from the source — regenerating the docs regenerates this section.

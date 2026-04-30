@@ -1,0 +1,23 @@
+---
+/**
+ * ForceDarkThemeProvider.astro — Starlight `ThemeProvider` override that pins
+ * the site to dark mode permanently.
+ *
+ * Replaces Starlight's default theme-detection script (which respects
+ * `localStorage.starlight-theme` + `prefers-color-scheme`). Since the toggle
+ * UI is also hidden via `HiddenThemeSelect.astro`, no code path can flip the
+ * site to light. The `[data-theme='light']` block in custom.css remains as
+ * dormant code in case we ever re-enable the toggle.
+ *
+ * Runs `is:inline` so it executes before any visible paint — no theme flash.
+ */
+---
+<script is:inline>
+  // Force dark + overwrite any prior preference.
+  document.documentElement.dataset.theme = 'dark';
+  try {
+    window.localStorage.setItem('starlight-theme', 'dark');
+  } catch (_) {
+    /* localStorage not available (private mode, etc.) — dataset is enough. */
+  }
+</script>
