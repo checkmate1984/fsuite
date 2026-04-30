@@ -25,7 +25,6 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-TOTAL_TESTS=0
 TOTAL_PASSED=0
 TOTAL_FAILED=0
 
@@ -265,6 +264,16 @@ main() {
     failed_suites+=("coderabbit-fixes")
   fi
 
+  # Run memory-ingest helper tests (Phase 4/5)
+  echo ""
+  if run_test_suite "${SCRIPT_DIR}/test_memory_ingest.sh" "memory-ingest helper Test Suite"; then
+    TOTAL_PASSED=$((TOTAL_PASSED + 1))
+  else
+    TOTAL_FAILED=$((TOTAL_FAILED + 1))
+    failed_suites+=("memory-ingest")
+  fi
+
+  # Calculate total after all suites have run
   TOTAL_TESTS=$((TOTAL_PASSED + TOTAL_FAILED))
 
   # Final summary

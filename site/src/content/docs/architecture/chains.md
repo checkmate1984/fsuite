@@ -68,9 +68,9 @@ The rule: **producers** output paths, **consumers** read paths from stdin.
 
 ```bash
 fsearch -o paths '*.sh' \
-  | fcontent -o paths "function" \
-  | fmap -o json \
-  | python3 -c "..."
+| fcontent -o paths "function" \
+| fmap -o json \
+| python3 -c "..."
 ```
 
 Tested: produced 1956 symbols from the fsuite repo in one pipeline.
@@ -128,6 +128,20 @@ fprobe window binary --offset 112730723 --before 50 --after 200
 fprobe strings binary --filter "diffAdded"
 ```
 
+## Refactoring chain
+
+The key move: use `fedit --symbol` for each symbol instead of doing a text-replace across files. Zero ambiguity.
+
+<div class="fs-pipeline">
+  <span class="fs-pn">fcontent</span>
+  <span class="fs-arr"></span>
+  <span class="fs-pn">fsearch</span>
+  <span class="fs-arr"></span>
+  <span class="fs-pn">fmap</span>
+  <span class="fs-arr"></span>
+  <span class="fs-pn fs-pn-entry">fedit --symbol</span>
+</div>
+
 ## fcase lifecycle
 
 <div class="fs-fcase">
@@ -138,6 +152,26 @@ fprobe strings binary --filter "diffAdded"
   <div class="fs-fcase-state"><b>handoff</b><span>pass to next agent</span></div>
   <span class="fs-arr"></span>
   <div class="fs-fcase-state fs-fcase-end"><b>resolve</b><span>close + archive</span></div>
+</div>
+
+## Replay chain
+
+Rerun a traced investigation step-by-step. Useful for post-mortems and regression tests.
+
+```bash
+freplay --session <id>
+```
+
+## Measurement chain
+
+Ask the telemetry database what worked last time and what probably works next.
+
+<div class="fs-pipeline">
+  <span class="fs-pn">fmetrics import</span>
+  <span class="fs-arr"></span>
+  <span class="fs-pn">fmetrics stats</span>
+  <span class="fs-arr"></span>
+  <span class="fs-pn fs-pn-entry">fmetrics predict</span>
 </div>
 
 ## Invalid chains (and why)

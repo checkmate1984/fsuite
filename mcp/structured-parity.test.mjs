@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { __test__ as mcpInternals } from "./index.js";
 
 const testFile = fileURLToPath(import.meta.url);
 const mcpDir = dirname(testFile);
@@ -761,4 +762,153 @@ test("fedit pretty output includes colored filename from path", async () => {
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
+});
+
+// ─── PR #38 round-2 review: media flag schema + error envelope shape ───
+
+test("fread MCP schema exposes media flags", async () => {
+  const tools = await withClient((client) => client.listTools());
+  const fread = tools.tools.find((t) => t.name === "fread");
+  assert.ok(fread, "fread tool should be registered");
+  const props = fread.inputSchema?.properties ?? {};
+  for (const flag of ["meta_only", "render", "pages", "no_resize", "max_pages", "max_tokens", "no_ingest"]) {
+    assert.ok(flag in props, `fread inputSchema missing ${flag}`);
+  }
+  assert.equal(props.meta_only.type, "boolean");
+  assert.equal(props.render.type, "boolean");
+  assert.equal(props.pages.type, "string");
+  assert.equal(props.no_resize.type, "boolean");
+  assert.equal(props.max_pages.type, "integer");
+  assert.equal(props.max_tokens.type, "integer");
+  assert.equal(props.max_tokens.minimum, 0);
+  assert.equal(props.no_ingest.type, "boolean");
+});
+
+test("fread MCP error path returns isError envelope (formatExecError shape)", async () => {
+  // Trigger a clean engine error: missing file. The catch path now goes through
+  // formatExecError instead of double-spawning fread. Verify the envelope shape:
+  // { content: [{ type: 'text', text: 'Error running fread: ...' }], isError: true }
+  const result = await callTool("fread", { path: "/nonexistent/__pr38_definitely_missing__.xyz" });
+  assert.equal(result.isError, true, `expected isError=true, got ${JSON.stringify(result)}`);
+  assert.ok(Array.isArray(result.content) && result.content.length > 0, "result.content should be non-empty array");
+  const text = textContent(result);
+  assert.ok(text.includes("fread"), `error text should mention tool, got: ${text.slice(0, 200)}`);
+  // Sanity: structuredContent is optional but should NOT throw shape errors when absent.
+  // (If present, it should be an object — never a primitive.)
+  if (result.structuredContent !== undefined) {
+    assert.equal(typeof result.structuredContent, "object", "structuredContent should be object when present");
+  }
+});
+
+test("fread media MCP content honors max_bytes budget", () => {
+  const payload = {
+    type: "image",
+    file: {
+      base64: "a".repeat(80),
+      mime_type: "image/png",
+      format: "png",
+      dimensions: { width: 100, height: 80 },
+      original_size: 123,
+      tokens_estimate: 10,
+    },
+    backend: "pillow",
+  };
+
+  const result = mcpInternals.buildMediaContent(payload, { maxBytes: 40 });
+  assert.ok(result, "expected media content result");
+  assert.equal(result.content.some((item) => item.type === "image"), false, "oversized image block should be omitted");
+  const text = textContent(result);
+  assert.ok(text.includes("media omitted"), `expected omission note, got: ${text}`);
+  assert.ok(Buffer.byteLength(text, "utf8") <= 40, `text should respect maxBytes cap, got ${Buffer.byteLength(text, "utf8")}`);
+});
+
+test("fread media MCP text truncates on UTF-8 boundaries", () => {
+  const truncate = mcpInternals.truncateUtf8;
+  assert.equal(truncate("éé", 1), "");
+  assert.equal(truncate("éé", 2), "é");
+  assert.equal(truncate("éé", 3), "é");
+  assert.equal(truncate("hello", 4), "hell");
+
+  const out = truncate("你好world", 7);
+  assert.equal(out, "你好w");
+  assert.equal(out.includes("\uFFFD"), false, `should not emit replacement char: ${out}`);
+  assert.ok(Buffer.byteLength(out, "utf8") <= 7, `text should fit maxBytes, got ${Buffer.byteLength(out, "utf8")}`);
+});
+
+test("fread media MCP content preserves text chunks in mixed batches", () => {
+  const mediaPayload = {
+    type: "image",
+    file: {
+      base64: "aGVsbG8=",
+      mime_type: "image/png",
+      format: "png",
+      dimensions: { width: 10, height: 10 },
+      original_size: 5,
+      tokens_estimate: 1,
+    },
+    backend: "pillow",
+  };
+  const parsed = {
+    tool: "fread",
+    version: "test",
+    mode: "stdin_paths",
+    truncated: false,
+    token_estimate: 4,
+    bytes_emitted: 30,
+    lines_emitted: 3,
+    max_lines: 0,
+    max_bytes: 0,
+    token_budget: 0,
+    next_hint: null,
+    media_payloads: [mediaPayload],
+    chunks: [
+      {
+        path: "/tmp/sample.png",
+        start_line: 1,
+        end_line: 1,
+        match_line: null,
+        content: [JSON.stringify(mediaPayload)],
+      },
+      {
+        path: "/tmp/notes.md",
+        start_line: 1,
+        end_line: 2,
+        match_line: null,
+        content: ["1  # Notes", "2  keep this text"],
+      },
+    ],
+    files: [
+      { path: "/tmp/sample.png", status: "read", language: "image" },
+      { path: "/tmp/notes.md", status: "read", language: "markdown" },
+    ],
+    warnings: [],
+    errors: [],
+  };
+
+  const result = mcpInternals.buildFreadMcpContent(JSON.stringify(parsed), parsed, { maxLines: 10 });
+  assert.ok(result.content.some((item) => item.type === "image"), "expected image block to be preserved");
+  const text = stripAnsi(textContent(result));
+  assert.ok(text.includes("# Notes"), `expected rendered markdown chunk, got: ${text}`);
+  assert.ok(text.includes("keep this text"), `expected text content from mixed batch, got: ${text}`);
+  assert.equal(text.includes("\"base64\""), false, `media JSON chunk should not be rendered as text: ${text}`);
+});
+
+test("fread media MCP content honors full mode by disabling preview caps", () => {
+  const payload = {
+    type: "pdf-text",
+    file: {
+      text: "first\nsecond\nthird",
+      page_count: 1,
+      pages_returned: 1,
+      truncated: false,
+    },
+    backend: "pymupdf",
+  };
+
+  const result = mcpInternals.buildMediaContent(payload, { maxLines: 1, maxBytes: 8, full: true });
+  const text = textContent(result);
+  assert.ok(text.includes("first"), `expected first line, got: ${text}`);
+  assert.ok(text.includes("second"), `full mode should not apply max_lines, got: ${text}`);
+  assert.ok(text.includes("third"), `full mode should not apply max_lines, got: ${text}`);
+  assert.equal(text.includes("truncated:"), false, `full mode should not append preview truncation note: ${text}`);
 });

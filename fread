@@ -28,6 +28,25 @@ for _fsuite_candidate in "${_FSUITE_LIB_CANDIDATES[@]}"; do
 done
 unset _fsuite_candidate
 
+
+# ── Locate media engine ──────────────────────────────────────────
+ENGINE_MEDIA=""
+_em_candidates=(
+    "${_FSUITE_SCRIPT_DIR}/fread-media.py"
+    "${FSUITE_SHARE_DIR:-/nonexistent}/fread-media.py"
+    "${_FSUITE_SCRIPT_DIR}/../share/fsuite/fread-media.py"
+    "/usr/local/share/fsuite/fread-media.py"
+    "/usr/share/fsuite/fread-media.py"
+)
+for _em_c in "${_em_candidates[@]}"; do
+    if [[ -f "$_em_c" ]]; then
+        ENGINE_MEDIA="$_em_c"
+        break
+    fi
+done
+unset _em_c _em_candidates
+# ENGINE_MEDIA is empty string when not found — media_dispatch degrades gracefully
+
 # -------------------------
 # Telemetry — opt-out via FSUITE_TELEMETRY=0
 # -------------------------
@@ -86,6 +105,7 @@ OUTPUT="$DEFAULT_OUTPUT"
 MAX_LINES=$DEFAULT_MAX_LINES
 MAX_BYTES=$DEFAULT_MAX_BYTES
 TOKEN_BUDGET=0
+TOKEN_BUDGET_EXPLICIT=0
 MAX_FILES=$DEFAULT_MAX_FILES
 BEFORE=$DEFAULT_BEFORE
 AFTER=$DEFAULT_AFTER
@@ -133,6 +153,19 @@ _RR_BYTES=0
 _RR_LINES=0
 _RR_END_LINE=0
 
+# ── Media flags (set by arg parser, used by media_dispatch) ──────
+MEDIA_META_ONLY=0
+MEDIA_RENDER=0
+MEDIA_PAGES=""
+MEDIA_NO_RESIZE=0
+MEDIA_MAX_PAGES=""
+MEDIA_TOKEN_BUDGET_ENGINE=""
+MEDIA_MAX_TOKENS=""
+MEDIA_NO_INGEST=0
+_MEDIA_ENGINE_WARNED=0
+MEDIA_PAYLOAD_JSON=""
+MEDIA_PAYLOADS_JSON=()
+
 # -------------------------
 # Helpers
 # -------------------------
@@ -177,10 +210,65 @@ byte_len() {
   printf '%s' "$n"
 }
 
+truncate_utf8_bytes() {
+  local max="${1:-0}"
+  python3 -c '
+import sys
+
+limit = max(int(sys.argv[1]), 0)
+data = sys.stdin.buffer.read()
+if len(data) <= limit:
+  sys.stdout.write(data.decode("utf-8", "strict"))
+else:
+  # Find the largest prefix <= limit that successfully decodes as UTF-8
+  end = limit
+  while end > 0:
+    try:
+      sys.stdout.write(data[:end].decode("utf-8", "strict"))
+      break
+    except UnicodeDecodeError:
+      end -= 1
+' "$max"
+}
+
 token_estimate_from_bytes() {
   local bytes="${1:-0}"
   (( bytes < 0 )) && bytes=0
   echo $(( (bytes + 2) / 3 ))
+}
+
+emit_media_pretty_budgeted_text() {
+  local text="$1"
+  local line line_bytes remaining_bytes clipped clipped_bytes
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_bytes=$(byte_len "${line}"$'\n')
+    if check_budget_preadd 1 "$line_bytes"; then
+      printf '%s\n' "$line"
+      TOTAL_LINES_READ=$((TOTAL_LINES_READ + 1))
+      TOTAL_BYTES_READ=$((TOTAL_BYTES_READ + line_bytes))
+      continue
+    fi
+
+    if [[ "$TRUNCATION_REASON" == "max_bytes" ]] && (( MAX_BYTES > 0 )); then
+      remaining_bytes=$((MAX_BYTES - TOTAL_BYTES_READ))
+      if (( remaining_bytes > 1 )) && (( MAX_LINES == 0 || TOTAL_LINES_READ + 1 <= MAX_LINES )); then
+        clipped="$(printf '%s' "$line" | truncate_utf8_bytes "$((remaining_bytes - 1))")"
+        if [[ -n "$clipped" ]]; then
+          clipped_bytes=$(byte_len "${clipped}"$'\n')
+          if (( TOTAL_BYTES_READ + clipped_bytes <= MAX_BYTES )); then
+            printf '%s\n' "$clipped"
+            TOTAL_LINES_READ=$((TOTAL_LINES_READ + 1))
+            TOTAL_BYTES_READ=$((TOTAL_BYTES_READ + clipped_bytes))
+          fi
+        fi
+      fi
+    fi
+
+    return 1
+  done <<< "$text"
+
+  return 0
 }
 
 file_bytes() {
@@ -691,6 +779,250 @@ read_range_chunk() {
   fi
 }
 
+# ── media_dispatch ───────────────────────────────────────────────
+# Called inside process_single_file when a binary file is detected.
+# Returns 0 if the file was handled (image/pdf), 1 to fall through
+# to the normal binary-skip path.
+media_dispatch() {
+    local path="$1"
+
+    # No engine — degrade silently (warn once)
+    if [[ -z "$ENGINE_MEDIA" ]]; then
+        if (( _MEDIA_ENGINE_WARNED == 0 )); then
+            echo "fread: warning: fread-media.py not found; media files will be skipped" >&2
+            _MEDIA_ENGINE_WARNED=1
+        fi
+        return 1
+    fi
+
+    # ── Probe ────────────────────────────────────────────────────
+    local probe_json detected
+    probe_json="$(python3 "$ENGINE_MEDIA" probe "$path" 2>/dev/null)" || probe_json="{}"
+    detected="$(printf '%s' "$probe_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('detected','unknown'))" 2>/dev/null || echo "unknown")"
+
+    if [[ "$detected" == "unknown" ]]; then
+        return 1
+    fi
+
+    # ── Build engine args ─────────────────────────────────────────
+    local engine_args=()
+    local subcmd=""
+
+    if [[ "$detected" == "image" ]]; then
+        subcmd="image"
+        (( MEDIA_META_ONLY ))  && engine_args+=("--meta-only")
+        (( MEDIA_NO_RESIZE ))  && engine_args+=("--no-resize")
+        if [[ -n "$MEDIA_MAX_TOKENS" ]]; then
+            engine_args+=("--max-tokens" "$MEDIA_MAX_TOKENS")
+        elif (( NO_TRUNCATE == 1 )); then
+            engine_args+=("--max-tokens" "0")
+        elif (( TOKEN_BUDGET_EXPLICIT == 1 )); then
+            engine_args+=("--max-tokens" "$TOKEN_BUDGET")
+        fi
+    elif [[ "$detected" == "pdf" ]]; then
+        subcmd="pdf"
+        (( MEDIA_META_ONLY ))  && engine_args+=("--meta-only")
+        (( MEDIA_RENDER ))     && engine_args+=("--render")
+        [[ -n "$MEDIA_PAGES" ]] && engine_args+=("--pages" "$MEDIA_PAGES")
+        [[ -n "$MEDIA_MAX_PAGES" ]] && engine_args+=("--max-pages" "$MEDIA_MAX_PAGES")
+        if [[ -n "$MEDIA_TOKEN_BUDGET_ENGINE" ]]; then
+            engine_args+=("--token-budget" "$MEDIA_TOKEN_BUDGET_ENGINE")
+        elif (( NO_TRUNCATE == 1 )); then
+            engine_args+=("--token-budget" "0")
+        elif (( TOKEN_BUDGET_EXPLICIT == 1 )); then
+            engine_args+=("--token-budget" "$TOKEN_BUDGET")
+        fi
+    else
+        return 1
+    fi
+
+    # ── Run engine ────────────────────────────────────────────────
+    local engine_json engine_exit=0
+engine_json="$(python3 "$ENGINE_MEDIA" "$subcmd" "$path" ${engine_args[@]+"${engine_args[@]}"} 2>/dev/null)" || engine_exit=$?
+
+if [[ -z "$engine_json" ]]; then
+add_warning "media engine returned empty output for: $path"
+return 1
+fi
+
+    # ── Parse type and detect errors ─────────────────────────────
+    local media_type
+    media_type="$(printf '%s' "$engine_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('type','error'))" 2>/dev/null || echo "error")"
+
+    if [[ "$media_type" == "error" ]] || (( engine_exit != 0 )); then
+        local err_code err_msg
+        err_code="$(printf '%s' "$engine_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('code','INTERNAL_ERROR'))" 2>/dev/null || echo "INTERNAL_ERROR")"
+        err_msg="$(printf '%s' "$engine_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('error','unknown error'))" 2>/dev/null || echo "unknown error")"
+        add_error "$path" "$err_code" "$err_msg"
+        # Mirror the contract used by other failure paths (not_found, not_regular, etc.):
+        # populate files[].status so downstream callers can correlate errors[] with paths.
+        upsert_file_summary "$path" "$detected" "true" "0" "" "media_error"
+        return 0
+    fi
+
+    # ── Format output ─────────────────────────────────────────────
+    local size_bytes
+    size_bytes="$(file_bytes "$path" 2>/dev/null || echo 0)"
+    size_bytes="${size_bytes//[[:space:]]/}"
+    [[ "$size_bytes" =~ ^[0-9]+$ ]] || size_bytes=0
+    if [[ "$OUTPUT" == "paths" ]]; then
+        # Paths mode: machine-readable, one path per line. Skip both pretty
+        # summary and JSON envelope; render_paths() will emit the path itself.
+        :
+    elif [[ "$OUTPUT" == "json" ]]; then
+        # In JSON mode: surface the engine JSON at the top level via
+        # MEDIA_PAYLOAD_JSON (singular, last payload — Phase 3 MCP single-file
+        # path) and MEDIA_PAYLOADS_JSON (array, multi-file batch path).
+        local chunk_content="$engine_json"
+        local chunk_bytes
+        chunk_bytes="$(byte_len "$chunk_content")"
+        # Honor --max-bytes / --max-lines for media chunks (NOT --token-budget,
+        # which the engine already enforces internally for PDF text/render).
+        local _media_truncated=0
+        if (( MAX_BYTES > 0 )) && (( TOTAL_BYTES_READ + chunk_bytes > MAX_BYTES )); then
+            mark_truncated "max_bytes"
+            _media_truncated=1
+        elif (( MAX_LINES > 0 )) && (( TOTAL_LINES_READ + 1 > MAX_LINES )); then
+            mark_truncated "max_lines"
+            _media_truncated=1
+        fi
+        if (( _media_truncated == 1 )); then
+            # Budget blocked — record skip status, no chunk emitted, no ingest.
+            upsert_file_summary "$path" "$detected" "true" "$size_bytes" "" "budget_skipped"
+            return 0
+        fi
+        MEDIA_PAYLOAD_JSON="$engine_json"
+        MEDIA_PAYLOADS_JSON+=("$engine_json")
+        add_chunk "$path" 0 0 "" "$chunk_content" "$chunk_bytes" 1
+        TOTAL_BYTES_READ=$((TOTAL_BYTES_READ + chunk_bytes))
+        TOTAL_LINES_READ=$((TOTAL_LINES_READ + 1))
+    else
+        # ── Pretty mode ───────────────────────────────────────────
+        case "$media_type" in
+        image-meta)
+            local fmt dims w h orig_sz mtime tok_est
+            fmt="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('format','?').upper())" 2>/dev/null || echo "?")"
+            w="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('dimensions',{}).get('width','?'))" 2>/dev/null || echo "?")"
+            h="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('dimensions',{}).get('height','?'))" 2>/dev/null || echo "?")"
+            orig_sz="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('original_size','?'))" 2>/dev/null || echo "?")"
+            tok_est="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('tokens_estimate','?'))" 2>/dev/null || echo "?")"
+            emit_media_pretty_budgeted_text "📷 ${fmt} ${w}×${h} — ${orig_sz} bytes (~${tok_est} tokens)" || true
+            ;;
+        image)
+            local fmt w h orig_sz tok_est
+            fmt="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('format','?').upper())" 2>/dev/null || echo "?")"
+            w="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('dimensions',{}).get('width','?'))" 2>/dev/null || echo "?")"
+            h="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('dimensions',{}).get('height','?'))" 2>/dev/null || echo "?")"
+            orig_sz="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('original_size','?'))" 2>/dev/null || echo "?")"
+            tok_est="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('tokens_estimate','?'))" 2>/dev/null || echo "?")"
+            emit_media_pretty_budgeted_text "📷 ${fmt} ${w}×${h} — ${orig_sz} bytes (~${tok_est} tokens) [base64 suppressed in pretty mode; use -o json]" || true
+            ;;
+            pdf-text)
+                local pg_count tok_est text_body
+                pg_count="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('page_count','?'))" 2>/dev/null || echo "?")"
+                tok_est="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('tokens_estimate','?'))" 2>/dev/null || echo "?")"
+                text_body="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('text',''))" 2>/dev/null || echo "")"
+                echo "--- file: $path ($pg_count pages, $tok_est tokens) ---"
+                if [[ -n "$text_body" ]]; then
+                    local _media_pretty_truncated=0
+                    emit_media_pretty_budgeted_text "$text_body" || _media_pretty_truncated=1
+                    (( _media_pretty_truncated )) && echo "... [truncated; raise --max-lines/--max-bytes for full body]"
+                fi
+                ;;
+        pdf-meta)
+            local pg_count enc has_text img_count pw ph
+            pg_count="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('page_count','?'))" 2>/dev/null || echo "?")"
+            enc="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('encrypted','?'))" 2>/dev/null || echo "?")"
+            has_text="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('has_text','?'))" 2>/dev/null || echo "?")"
+            img_count="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; print(d.get('embedded_image_count','?'))" 2>/dev/null || echo "?")"
+            pw="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; ps=d.get('page_size',{}); print(ps.get('width','?'))" 2>/dev/null || echo "?")"
+            ph="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin)['file']; ps=d.get('page_size',{}); print(ps.get('height','?'))" 2>/dev/null || echo "?")"
+            emit_media_pretty_budgeted_text "📄 PDF — $pg_count pages (${pw}×${ph}), encrypted: $enc, has_text: $has_text, $img_count embedded images" || true
+            ;;
+        pdf-pages)
+            emit_media_pretty_budgeted_text "📄 PDF rendered pages — JSON mode required to receive base64. Use -o json." || true
+            ;;
+        *)
+            echo "fread: media type '$media_type': $path" >&2
+            ;;
+        esac
+    fi
+
+    upsert_file_summary "$path" "$detected" "true" "$size_bytes" "" "read"
+    mark_file_read "$path"
+
+    # ── Post-call memory ingest (best-effort, detached) ───────────
+    _media_maybe_ingest "$path" "$engine_json"
+
+    return 0
+}
+
+# ── _media_maybe_ingest ──────────────────────────────────────────
+# Detached best-effort spawn of the memory-ingest helper.
+# Never blocks the caller. Logs to ~/.cache/fsuite/memory-ingest.log.
+_media_maybe_ingest() {
+    local path="$1" engine_json="$2"
+
+    # Skip if opted out
+    (( MEDIA_NO_INGEST )) && return 0
+    [[ "${FSUITE_MEMORY_INGEST:-1}" == "0" ]] && return 0
+
+    # Skip if no ingest_payload in output
+    local has_payload
+    has_payload="$(printf '%s' "$engine_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if 'ingest_payload' in d else 'no')" 2>/dev/null || echo "no")"
+    [[ "$has_payload" == "yes" ]] || return 0
+
+    # Ensure log dir exists
+    mkdir -p "$HOME/.cache/fsuite" 2>/dev/null || return 0
+
+    local ingest_helper=""
+    local _candidates=(
+        "${_FSUITE_SCRIPT_DIR}/mcp/memory-ingest.js"
+        "${FSUITE_SHARE_DIR:-/nonexistent}/mcp/memory-ingest.js"
+        "/usr/local/share/fsuite/mcp/memory-ingest.js"
+        "/usr/share/fsuite/mcp/memory-ingest.js"
+        "${FSUITE_SHARE_DIR:-/nonexistent}/memory-ingest.js"
+        "/usr/local/share/fsuite/memory-ingest.js"
+        "/usr/share/fsuite/memory-ingest.js"
+    )
+for _c in "${_candidates[@]}"; do
+  [[ -f "$_c" ]] && { ingest_helper="$_c"; break; }
+done
+local payload_file
+payload_file="$(mktemp 2>/dev/null)" || return 0
+
+# Write ingest_payload to temp file
+# NOTE: Python code below must remain consistent with its own indentation —
+# Python parses the string content; the bash indentation of printf/python3
+# wrapping lines is independent.
+printf '%s' "$engine_json" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+ip = d.get('ingest_payload')
+if ip is not None:
+    print(json.dumps(ip))
+" > "$payload_file" 2>/dev/null || { rm -f "$payload_file"; return 0; }
+
+if [[ -z "$ingest_helper" ]]; then
+echo "$(date -Iseconds) [memory-ingest] helper not found (checked dev-tree, FSUITE_SHARE_DIR, /usr/local/share/fsuite, /usr/share/fsuite)" >> "$HOME/.cache/fsuite/memory-ingest.log" 2>/dev/null || true
+rm -f "$payload_file"
+return 0
+fi
+
+    # Spawn detached — never blocks fread exit. If setsid is unavailable,
+    # still launch the helper so the child can clean up the payload file.
+    if command -v setsid >/dev/null 2>&1; then
+        setsid bash -c 'node "$0" < "$1" >>"$HOME/.cache/fsuite/memory-ingest.log" 2>&1; status=$?; if (( status != 0 )); then echo "$(date -Iseconds) [memory-ingest] helper exit code $status" >>"$HOME/.cache/fsuite/memory-ingest.log"; fi; rm -f "$1"' \
+            "$ingest_helper" "$payload_file" </dev/null >/dev/null 2>&1 &
+    else
+        echo "$(date -Iseconds) [memory-ingest] setsid not found; launching helper without new session" >> "$HOME/.cache/fsuite/memory-ingest.log" 2>/dev/null || true
+        bash -c 'node "$0" < "$1" >>"$HOME/.cache/fsuite/memory-ingest.log" 2>&1; status=$?; if (( status != 0 )); then echo "$(date -Iseconds) [memory-ingest] helper exit code $status" >>"$HOME/.cache/fsuite/memory-ingest.log"; fi; rm -f "$1"' \
+            "$ingest_helper" "$payload_file" </dev/null >/dev/null 2>&1 &
+    fi
+
+    return 0
+}
+
 process_single_file() {
   local file="$1"
   local start="${2:-1}"
@@ -724,12 +1056,17 @@ process_single_file() {
   size_bytes="${size_bytes//[[:space:]]/}"
   [[ "$size_bytes" =~ ^[0-9]+$ ]] || size_bytes=0
 
-  if (( FORCE_TEXT == 0 )) && is_binary_file "$abs_path"; then
+if (( FORCE_TEXT == 0 )) && is_binary_file "$abs_path"; then
+    # Try media dispatch first (image/pdf engine)
+    if media_dispatch "$abs_path"; then
+        return 0  # media path handled it
+    fi
+    # Fall through to binary skip
     binary_state="true"
     upsert_file_summary "$abs_path" "$lang" "$binary_state" "$size_bytes" "" "skipped_binary"
     add_warning "binary file skipped: $abs_path"
     return 0
-  fi
+fi
   binary_state="false"
 
   if [[ -n "$total_lines_hint" ]] && [[ "$total_lines_hint" =~ ^[0-9]+$ ]]; then
@@ -941,6 +1278,8 @@ compute_next_hint() {
       NEXT_HINT="git diff | fread --from-stdin --stdin-format=unified-diff -B $BEFORE -A $AFTER"
       ;;
   esac
+
+  return 0
 }
 
 render_pretty() {
@@ -1015,6 +1354,22 @@ render_json() {
     echo -n "\"next_hint\":null,"
   fi
 
+    # Top-level media_payload — verbatim engine JSON for Phase 3 MCP integration.
+    # Singular field: kept for single-file backward compat.
+    # Plural field: full array, one element per media file in multi-file batches.
+    if [[ -n "$MEDIA_PAYLOAD_JSON" ]]; then
+        echo -n "\"media_payload\":${MEDIA_PAYLOAD_JSON},"
+    fi
+    if (( ${#MEDIA_PAYLOADS_JSON[@]} > 0 )); then
+        echo -n "\"media_payloads\":["
+        local _first=1 _p
+        for _p in "${MEDIA_PAYLOADS_JSON[@]}"; do
+            (( _first )) || echo -n ","
+            _first=0
+            echo -n "$_p"
+        done
+        echo -n "],"
+    fi
   echo -n "\"chunks\":["
   for (( i=0; i<CHUNK_COUNT; i++ )); do
     (( i > 0 )) && echo -n ","
@@ -1121,9 +1476,38 @@ self_check() {
   done
   if (( ok == 1 )); then
     echo "All dependencies satisfied."
+  else
+    echo "Some dependencies missing. Run: fread --install-hints"
+  fi
+
+  echo
+  echo "fread media support (optional):"
+  if has python3; then
+    echo "  python3: $(command -v python3)"
+    if python3 -c 'import PIL' 2>/dev/null; then
+      echo "  PIL (Pillow): present  (image support)"
+    else
+      echo "  PIL (Pillow): NOT FOUND  (images will use stdlib fallback — no resize)"
+    fi
+    if python3 -c 'import fitz' 2>/dev/null; then
+      echo "  fitz (PyMuPDF): present  (primary PDF backend)"
+    else
+      echo "  fitz (PyMuPDF): NOT FOUND  (will fall back to Poppler)"
+    fi
+  else
+    echo "  python3: NOT FOUND  (media reading disabled)"
+  fi
+  for cmd in pdftotext pdftoppm; do
+    if has "$cmd"; then
+      echo "  $cmd: $(command -v "$cmd")  (Poppler fallback)"
+    else
+      echo "  $cmd: NOT FOUND  (Poppler fallback unavailable)"
+    fi
+  done
+
+  if (( ok == 1 )); then
     exit 0
   fi
-  echo "Some dependencies missing. Run: fread --install-hints"
   exit 1
 }
 
@@ -1139,6 +1523,20 @@ Fedora/RHEL:
 
 macOS (Homebrew):
   brew install coreutils perl
+
+OPTIONAL: Media support (image + PDF reading)
+
+Debian/Ubuntu:
+  sudo apt install -y python3-pil poppler-utils
+  pip install --user pymupdf
+
+Fedora/RHEL:
+  sudo dnf install -y python3-pillow poppler-utils
+  pip install --user pymupdf
+
+macOS (Homebrew):
+  brew install pillow poppler
+  pip install --user pymupdf
 EOF
   exit 0
 }
@@ -1159,6 +1557,11 @@ USAGE
   fread --paths "~/.codex/auth.json,~/.config/codex/auth.json"   Try paths in order
   ... | fread --from-stdin --stdin-format=paths
   git diff | fread --from-stdin --stdin-format=unified-diff -B 3 -A 10
+
+  fread <image>                                  Read image with auto-resize (PNG/JPEG/GIF/WEBP)
+  fread <pdf>                                    Extract PDF text (default mode)
+  fread <pdf> --render --pages 1:5               Rasterize PDF pages to images
+  fread <pdf> --meta-only                        PDF metadata only
 
 OPTIONS
   --paths P1,P2,...           Comma-separated file paths to try in order (first existing wins)
@@ -1186,6 +1589,15 @@ OPTIONS
   --install-hints             Print install commands
   --version                   Print version
   -h, --help                  Show help
+
+MEDIA OPTIONS (image + PDF reading)
+  --render                    PDF: render pages as images instead of extracting text
+  --pages START:END           PDF: page range (1-based, inclusive)
+  --meta-only                 Return metadata only (no body / base64)
+  --no-resize                 Image: emit raw base64 without auto-resize
+  --max-pages N               PDF render: raise 10-page cap
+  --max-tokens N              Image: resize-loop token budget (default 6000)
+  --no-ingest                 Skip ShieldCortex memory ingest for this read
 
 NOTES
   Budget precedence: token_budget > max_bytes > max_lines
@@ -1360,6 +1772,7 @@ while [[ $# -gt 0 ]]; do
       [[ -n "${2:-}" ]] || die "Missing value for --token-budget"
       [[ "$2" =~ ^[0-9]+$ ]] || die "--token-budget must be an integer"
       TOKEN_BUDGET="$2"
+      TOKEN_BUDGET_EXPLICIT=1
       _TELEM_FLAGS+=" --token-budget $2"
       shift 2
       ;;
@@ -1417,10 +1830,51 @@ while [[ $# -gt 0 ]]; do
       _TELEM_FLAGS+=" --paths"
       shift 2
       ;;
-    --self-check) self_check ;;
-    --install-hints) install_hints ;;
-    --version) echo "fread $VERSION"; exit 0 ;;
-    -h|--help) usage; exit 0 ;;
+--self-check) self_check ;;
+--install-hints) install_hints ;;
+--version) echo "fread $VERSION"; exit 0 ;;
+-h|--help) usage; exit 0 ;;
+# ── Media flags ───────────────────────────────────────────────
+--meta-only)
+    MEDIA_META_ONLY=1
+    _TELEM_FLAGS+=" --meta-only"
+    shift
+    ;;
+--render)
+    MEDIA_RENDER=1
+    _TELEM_FLAGS+=" --render"
+    shift
+    ;;
+--pages)
+    [[ -n "${2:-}" ]] || die "Missing value for --pages"
+    MEDIA_PAGES="$2"
+    _TELEM_FLAGS+=" --pages $2"
+    shift 2
+    ;;
+--no-resize)
+    MEDIA_NO_RESIZE=1
+    _TELEM_FLAGS+=" --no-resize"
+    shift
+    ;;
+--max-pages)
+    [[ -n "${2:-}" ]] || die "Missing value for --max-pages"
+    [[ "$2" =~ ^[0-9]+$ ]] || die "--max-pages must be an integer"
+    MEDIA_MAX_PAGES="$2"
+    _TELEM_FLAGS+=" --max-pages $2"
+    shift 2
+    ;;
+--max-tokens)
+    [[ -n "${2:-}" ]] || die "Missing value for --max-tokens"
+    [[ "$2" =~ ^[0-9]+$ ]] || die "--max-tokens must be an integer"
+    MEDIA_MAX_TOKENS="$2"
+    _TELEM_FLAGS+=" --max-tokens $2"
+    shift 2
+    ;;
+--no-ingest)
+    MEDIA_NO_INGEST=1
+    _TELEM_FLAGS+=" --no-ingest"
+    shift
+    ;;
     --) shift; break ;;
     -*) die "Unknown option: $1 (try --help)" ;;
     *) POSITIONAL+=("$1"); shift ;;
