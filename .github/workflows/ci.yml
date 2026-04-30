@@ -29,7 +29,12 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tree ripgrep fd-find sqlite3
+          sudo apt-get install -y tree ripgrep fd-find sqlite3 \
+            poppler-utils python3-pil
+          # Optional but recommended PDF backend (Phase 5+ media tests prefer it)
+          # Use sudo + --break-system-packages so the user that runs the test
+          # suite can `import fitz` from system Python without --user path quirks.
+          sudo python3 -m pip install --quiet --break-system-packages pymupdf || true
 
       - name: Install MCP test dependencies
         run: npm ci --prefix mcp

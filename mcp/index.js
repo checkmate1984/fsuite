@@ -14,6 +14,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { writeFile as fsWriteFile, mkdtemp, unlink, rmdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import hljs from "highlight.js";
 import { buildFcontentArgs } from "./fcontent-args.js";
@@ -1340,7 +1341,319 @@ function slimStructuredContent(obj) {
 }
 
 
+// ─── Helper: translate fread media_payload → MCP content blocks ──
+// Phase 3: Engine emits snake_case mime_type; MCP spec uses camelCase mimeType.
+// MIME string itself is identical (image/png, image/jpeg, application/pdf).
+// Only the JSON field NAME differs — we translate via field name when emitting.
+function mediaMimeType(rawMime) {
+  return typeof rawMime === "string" && rawMime ? rawMime : "application/octet-stream";
+}
+
+function imageMetaSummary(payload) {
+  const f = payload?.file || {};
+  const dims = f.dimensions || {};
+  const fmt = (f.format || "").toUpperCase();
+  const w = dims.width ?? "?";
+  const h = dims.height ?? "?";
+  const size = f.original_size ?? "?";
+  const tokens = f.tokens_estimate;
+  const tokensPart = tokens !== undefined ? ` (~${tokens} tokens)` : "";
+  let line = `Image: ${fmt} ${w}×${h}, ${size} bytes${tokensPart}`;
+  if (f.resized) line += " [resized]";
+  if (f.budget_exceeded) line += " [budget exceeded — quality degraded]";
+  return line;
+}
+
+function pdfTextHeader(payload) {
+  const f = payload?.file || {};
+  const total = f.page_count ?? "?";
+  const returned = Array.isArray(f.pages_returned) ? f.pages_returned.length : (f.pages_returned ?? "?");
+  const tokens = f.tokens_estimate ?? "?";
+  let header = `PDF: ${returned}/${total} pages, ${tokens} tokens`;
+  if (f.truncated) header += " [truncated]";
+  if (payload?.backend) header += ` (backend: ${payload.backend})`;
+  return header + "\n\n";
+}
+
+function pdfPagesSummary(payload) {
+  const f = payload?.file || {};
+  const count = f.count ?? (Array.isArray(f.pages) ? f.pages.length : "?");
+  const total = f.page_count ?? "?";
+  const size = f.original_size ?? "?";
+  const backend = payload?.backend ?? "?";
+  return `PDF rendered ${count}/${total} pages, ${size} bytes (backend: ${backend})`;
+}
+
+function pdfMetaSummary(payload) {
+  const f = payload?.file || {};
+  const ps = f.page_size || {};
+  const psStr = (ps.width !== undefined && ps.height !== undefined) ? `${ps.width}×${ps.height}` : "unknown";
+  const fmtVal = (v) => v === null || v === undefined ? "unknown" : String(v);
+  return [
+    "PDF metadata:",
+    `  pages: ${fmtVal(f.page_count)}`,
+    `  page_size: ${psStr}`,
+    `  encrypted: ${fmtVal(f.encrypted)}`,
+    `  has_text: ${fmtVal(f.has_text)}`,
+    `  embedded_images: ${fmtVal(f.embedded_image_count)}`,
+    `  backend: ${fmtVal(payload?.backend)}`,
+  ].join("\n");
+}
+
+function mediaByteBudget(maxBytes) {
+  return {
+    maxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : 0,
+    usedBytes: 0,
+  };
+}
+
+function utf8Bytes(value) {
+  return Buffer.byteLength(String(value ?? ""), "utf8");
+}
+
+function truncateUtf8(value, maxBytes) {
+  const text = String(value ?? "");
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) return text;
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  let out = "";
+  let usedBytes = 0;
+  for (const ch of text) {
+    const bytes = Buffer.byteLength(ch, "utf8");
+    if (usedBytes + bytes > maxBytes) break;
+    out += ch;
+    usedBytes += bytes;
+  }
+  return out;
+}
+
+function appendBudgetedText(blocks, budget, text) {
+  if (!text) return;
+  if (!budget?.maxBytes) {
+    blocks.push({ type: "text", text });
+    return;
+  }
+  const remaining = budget.maxBytes - budget.usedBytes;
+  if (remaining <= 0) return;
+  const out = truncateUtf8(text, remaining);
+  if (!out) return;
+  budget.usedBytes += utf8Bytes(out);
+  blocks.push({ type: "text", text: out });
+}
+
+function appendBudgetedImage(blocks, budget, data, mimeType) {
+  if (typeof data !== "string" || !data) return false;
+  const bytes = utf8Bytes(data);
+  if (budget?.maxBytes && budget.usedBytes + bytes > budget.maxBytes) {
+    return false;
+  }
+  if (budget?.maxBytes) budget.usedBytes += bytes;
+  blocks.push({ type: "image", data, mimeType });
+  return true;
+}
+
+function buildMediaContent(payload, opts) {
+  if (!payload || typeof payload !== "object") return null;
+  const full = Boolean(opts?.full);
+  const maxLines = !full && opts && Number.isFinite(opts.maxLines) && opts.maxLines > 0 ? opts.maxLines : 0;
+  const budget = opts?.budget || mediaByteBudget(full ? 0 : opts?.maxBytes);
+  switch (payload.type) {
+    case "image": {
+      const f = payload.file || {};
+      const blocks = [];
+      let imageIncluded = false;
+      const hasImagePayload = typeof f.base64 === "string" && f.base64;
+      if (hasImagePayload) {
+        imageIncluded = appendBudgetedImage(blocks, budget, f.base64, mediaMimeType(f.mime_type));
+      }
+      const omitted = hasImagePayload && !imageIncluded ? "[media omitted: max_bytes cap blocked image payload]\n" : "";
+      appendBudgetedText(blocks, budget, omitted + imageMetaSummary(payload));
+      return { content: blocks };
+    }
+    case "image-meta":
+      {
+        const blocks = [];
+        appendBudgetedText(blocks, budget, imageMetaSummary(payload));
+        return { content: blocks.length ? blocks : [{ type: "text", text: "" }] };
+      }
+    case "pdf-text": {
+      const f = payload.file || {};
+      let text = f.text || "";
+      let truncationNote = "";
+      if (maxLines && text) {
+        const lines = text.split("\n");
+        if (lines.length > maxLines) {
+          text = lines.slice(0, maxLines).join("\n");
+          truncationNote = `\n... [truncated: ${lines.length - maxLines} more lines; raise max_lines to see all]\n`;
+        }
+      }
+      const blocks = [];
+      appendBudgetedText(blocks, budget, pdfTextHeader(payload) + text + truncationNote);
+      return { content: blocks.length ? blocks : [{ type: "text", text: "" }] };
+    }
+    case "pdf-pages": {
+      const f = payload.file || {};
+      const pages = Array.isArray(f.pages) ? f.pages : [];
+      const blocks = [];
+      let omittedPages = 0;
+      for (const page of pages) {
+        if (!page || typeof page.base64 !== "string" || !page.base64) continue;
+        if (!appendBudgetedImage(blocks, budget, page.base64, mediaMimeType(page.mime_type))) {
+          omittedPages += 1;
+        }
+      }
+      const omitted = omittedPages ? `[media omitted: max_bytes cap blocked ${omittedPages} rendered page(s)]\n` : "";
+      appendBudgetedText(blocks, budget, omitted + pdfPagesSummary(payload));
+      return { content: blocks };
+    }
+    case "pdf-meta":
+      {
+        const blocks = [];
+        appendBudgetedText(blocks, budget, pdfMetaSummary(payload));
+        return { content: blocks.length ? blocks : [{ type: "text", text: "" }] };
+      }
+    default:
+      return null;
+  }
+}
+
+function isMediaPayloadObject(value) {
+  return Boolean(value && typeof value === "object" && [
+    "image",
+    "image-meta",
+    "pdf-text",
+    "pdf-pages",
+    "pdf-meta",
+  ].includes(value.type));
+}
+
+function isMediaJsonChunk(chunk) {
+  const content = Array.isArray(chunk?.content) ? chunk.content : [];
+  if (content.length !== 1 || typeof content[0] !== "string") return false;
+  return isMediaPayloadObject(maybeParseJson(content[0]));
+}
+
+function textOnlyFreadPayload(parsed) {
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.chunks)) return null;
+  const mediaPaths = new Set();
+  const chunks = [];
+  for (const chunk of parsed.chunks) {
+    if (isMediaJsonChunk(chunk)) {
+      if (chunk.path) mediaPaths.add(chunk.path);
+      continue;
+    }
+    chunks.push(chunk);
+  }
+  if (chunks.length === 0) return null;
+
+  const files = Array.isArray(parsed.files)
+    ? parsed.files.filter((file) => !mediaPaths.has(file.path))
+    : parsed.files;
+  const lines = chunks.reduce((total, chunk) => total + (Array.isArray(chunk.content) ? chunk.content.length : 0), 0);
+  return {
+    ...parsed,
+    chunks,
+    files,
+    lines_emitted: lines,
+  };
+}
+
+function renderFreadTextResult(raw, parsed, opts = {}) {
+  const slim = slimStructuredContent(normalizeStructuredContent(parsed));
+  const renderer = RENDERERS["fread"];
+  if (renderer) {
+    const pretty = renderer(raw, { maxLines: opts.maxLines, full: opts.full });
+    if (pretty) return { content: [{ type: "text", text: pretty }] };
+    const result = { content: [{ type: "text", text: "(fread: renderer yielded no output)\n" }] };
+    if (slim !== undefined) result.structuredContent = slim;
+    return result;
+  }
+  const noRendererResult = { content: [{ type: "text", text: raw }] };
+  if (slim !== undefined) noRendererResult.structuredContent = slim;
+  return noRendererResult;
+}
+
+function buildFreadMcpContent(raw, parsed, opts = {}) {
+  const mediaBudget = opts.full ? mediaByteBudget(0) : (opts.budget || mediaByteBudget(opts.maxBytes));
+  const mediaPayloads = parsed && Array.isArray(parsed.media_payloads) && parsed.media_payloads.length > 0
+    ? parsed.media_payloads
+    : (parsed && parsed.media_payload ? [parsed.media_payload] : []);
+  if (mediaPayloads.length === 0) {
+    return renderFreadTextResult(raw, parsed, opts);
+  }
+
+  const merged = [];
+  for (const payload of mediaPayloads) {
+    const built = buildMediaContent(payload, { ...opts, budget: mediaBudget });
+    if (built && Array.isArray(built.content)) merged.push(...built.content);
+  }
+
+  const textPayload = textOnlyFreadPayload(parsed);
+  if (textPayload) {
+    const renderedText = renderFreadTextResult(JSON.stringify(textPayload), textPayload, opts);
+    if (renderedText && Array.isArray(renderedText.content)) merged.push(...renderedText.content);
+  }
+
+  const result = { content: merged.length ? merged : [{ type: "text", text: "" }] };
+
+  // Preserve diagnostic/meta fields from the original parsed result
+  if (parsed) {
+    if (parsed.warnings) result.warnings = parsed.warnings;
+    if (parsed.errors) result.errors = parsed.errors;
+    if (parsed.next_hint) result.next_hint = parsed.next_hint;
+    if (parsed.files) result.files = parsed.files;
+  }
+
+  return result;
+}
+
 // ─── Helper: run CLI tool, pretty-render if possible ─────────────
+function formatExecError(err, tool, renderAs, renderContext) {
+  // Try to parse JSON from stdout first, then stderr, then fall back to plain text
+  let errorText = err.message;
+  let parsed = undefined;
+  const parsedErrorText = (value) => {
+    if (!value || typeof value !== "object") return "";
+    if (value.errors?.length) {
+      return value.errors.map((e) => e.error_detail || e.error || e).join("; ");
+    }
+    if (value.error_detail) return value.error_detail;
+    if (value.error) return value.error;
+    if (typeof value.stderr === "string" && value.stderr.trim()) return value.stderr;
+    if (typeof value.stdout === "string" && value.stdout.trim()) return value.stdout;
+    return "";
+  };
+
+  if (err.stdout) {
+    try {
+      parsed = JSON.parse(err.stdout);
+      // fbash: non-zero exit is normal (command failed, not tool failed)
+      // Return as success with the structured JSON so renderers can display it
+      if (parsed && typeof parsed.exit_code === "number" && tool === "fbash") {
+        const raw = err.stdout;
+        const pretty = RENDERERS[renderAs || tool]?.(raw, renderContext);
+        if (pretty) return { content: [{ type: "text", text: pretty }] };
+        return { content: [{ type: "text", text: raw }] };
+      }
+      const message = parsedErrorText(parsed);
+      if (message) errorText = message;
+    } catch { /* not JSON in stdout, try stderr */ }
+  }
+  if ((errorText === err.message || !parsed) && err.stderr) {
+    try {
+      const stderrParsed = JSON.parse(err.stderr);
+      if (!parsed) parsed = stderrParsed;
+      const message = parsedErrorText(stderrParsed);
+      if (message) errorText = message;
+    } catch { /* not JSON in stderr, use plain text */ }
+  }
+
+  if (errorText === err.message) {
+    errorText = err.stderr || err.stdout || err.message;
+  }
+
+  return { content: [{ type: "text", text: `Error running ${tool}: ${errorText}` }], isError: true };
+}
+
 async function cli(tool, args, renderAs, renderContext) {
   try {
     const opts = execOptsFor(tool);
@@ -1374,50 +1687,7 @@ async function cli(tool, args, renderAs, renderContext) {
       if (parsed !== undefined) noRendererResult.structuredContent = parsed;
       return noRendererResult;
   } catch (err) {
-    // Try to parse JSON from stdout first, then stderr, then fall back to plain text
-    let errorText = err.message;
-    let parsed = undefined;
-    const parsedErrorText = (value) => {
-      if (!value || typeof value !== "object") return "";
-      if (value.errors?.length) {
-        return value.errors.map((e) => e.error_detail || e.error || e).join("; ");
-      }
-      if (value.error_detail) return value.error_detail;
-      if (value.error) return value.error;
-      if (typeof value.stderr === "string" && value.stderr.trim()) return value.stderr;
-      if (typeof value.stdout === "string" && value.stdout.trim()) return value.stdout;
-      return "";
-    };
-
-    if (err.stdout) {
-      try {
-        parsed = JSON.parse(err.stdout);
-        // fbash: non-zero exit is normal (command failed, not tool failed)
-        // Return as success with the structured JSON so renderers can display it
-        if (parsed && typeof parsed.exit_code === "number" && tool === "fbash") {
-          const raw = err.stdout;
-          const pretty = RENDERERS[renderAs || tool]?.(raw, renderContext);
-          if (pretty) return { content: [{ type: "text", text: pretty }] };
-          return { content: [{ type: "text", text: raw }] };
-        }
-        const message = parsedErrorText(parsed);
-        if (message) errorText = message;
-      } catch { /* not JSON in stdout, try stderr */ }
-    }
-    if ((errorText === err.message || !parsed) && err.stderr) {
-      try {
-        const stderrParsed = JSON.parse(err.stderr);
-        if (!parsed) parsed = stderrParsed;
-        const message = parsedErrorText(stderrParsed);
-        if (message) errorText = message;
-      } catch { /* not JSON in stderr, use plain text */ }
-    }
-
-    if (errorText === err.message) {
-      errorText = err.stderr || err.stdout || err.message;
-    }
-
-    return { content: [{ type: "text", text: `Error running ${tool}: ${errorText}` }], isError: true };
+    return formatExecError(err, tool, renderAs, renderContext);
   }
 }
 
@@ -1482,14 +1752,21 @@ server.registerTool(
       after: z.number().optional().describe("Lines of context after match (default 10)"),
       head: z.number().optional().describe("Read first N lines"),
       tail: z.number().optional().describe("Read last N lines"),
-        max_lines: z.number().int().nonnegative().optional().describe("Cap total lines emitted (0/default = uncapped)"),
-        max_bytes: z.number().int().nonnegative().optional().describe("Cap total bytes emitted (0/default = uncapped)"),
-        token_budget: z.number().int().nonnegative().optional().describe("Cap by estimated tokens"),
-        full: z.boolean().optional().describe("Disable fread budgets and MCP preview truncation"),
-        no_truncate: z.boolean().optional().describe("Alias for full; disable fread budgets and MCP preview truncation"),
+      max_lines: z.number().int().nonnegative().optional().describe("Cap total lines emitted (0/default = uncapped)"),
+      no_truncate: z.boolean().optional().describe("Alias for full; disable fread budgets and MCP preview truncation"),
+      meta_only: z.boolean().optional().describe("Media: skip body, return metadata only (image dimensions / PDF page count + encryption + page size)"),
+      render: z.boolean().optional().describe("Media: PDF — render pages to images instead of extracting text. Capped at 10 pages without max_pages."),
+      pages: z.string().optional().describe("Media: PDF page range, e.g. '1:5'. With render, picks which pages to rasterize; with text mode, restricts extraction."),
+      no_resize: z.boolean().optional().describe("Media: image — return raw base64 without auto-resize. Refused if estimated tokens exceed budget."),
+      max_pages: z.number().int().positive().optional().describe("Media: PDF — raise the 10-page render cap."),
+      max_tokens: z.number().int().nonnegative().optional().describe("Media: image — token budget for the resize loop (default 6000; 0 disables the cap)."),
+      no_ingest: z.boolean().optional().describe("Media: skip the ShieldCortex memory-ingest spawn for this read."),
+      max_bytes: z.number().int().nonnegative().optional().describe("Cap total bytes emitted (0/default = uncapped)"),
+      token_budget: z.number().int().nonnegative().optional().describe("Cap by estimated tokens"),
+      full: z.boolean().optional().describe("Disable fread budgets and MCP preview truncation"),
       }),
     },
-    async ({ path, paths, symbol, lines, around, around_line, before, after, head, tail, max_lines, max_bytes, token_budget, full, no_truncate }) => {
+    async ({ path, paths, symbol, lines, around, around_line, before, after, head, tail, max_lines, max_bytes, token_budget, full, no_truncate, meta_only, render, pages, no_resize, max_pages, max_tokens, no_ingest }) => {
       const args = [];
     if (paths && paths.length > 0) {
       args.push("--paths", paths.map((p) => p.replace(/,/g, "\\,")).join(","));
@@ -1509,10 +1786,36 @@ server.registerTool(
       if (max_lines !== undefined) args.push("--max-lines", String(max_lines));
       if (max_bytes !== undefined) args.push("--max-bytes", String(max_bytes));
       if (token_budget !== undefined) args.push("--token-budget", String(token_budget));
+      if (meta_only) args.push("--meta-only");
+      if (render) args.push("--render");
+      if (pages) args.push("--pages", pages);
+      if (no_resize) args.push("--no-resize");
+      if (max_pages !== undefined) args.push("--max-pages", String(max_pages));
+      if (max_tokens !== undefined) args.push("--max-tokens", String(max_tokens));
+      if (no_ingest) args.push("--no-ingest");
       const wantsFull = Boolean(full || no_truncate);
       if (wantsFull) args.push("--no-truncate");
       args.push("-o", "json");
-      return cli("fread", args, undefined, { maxLines: max_lines, full: wantsFull });
+
+      // Phase 3: Media-aware short-circuit. Engine emits media_payload(s) for
+      // images/PDFs — translate directly to MCP image/text content blocks
+      // and bypass cli()'s text-only renderer. Any failure falls through to
+      // the normal text path so we never crash the MCP server.
+      try {
+        const opts = execOptsFor("fread");
+        const { stdout, stderr } = await run(resolveTool("fread"), args, opts);
+        const raw = stdout || stderr || "(no output)";
+        const parsed = maybeParseJson(raw);
+        // Media and text chunks can coexist in stdin/multi-file batches. Build
+        // media blocks first, then append rendered non-media chunks if present.
+        return buildFreadMcpContent(raw, parsed, {
+          maxLines: max_lines,
+          maxBytes: max_bytes,
+          full: wantsFull,
+        });
+      } catch (err) {
+        return formatExecError(err, "fread", undefined, { maxLines: max_lines, full: wantsFull });
+      }
     }
   );
 
@@ -2121,6 +2424,15 @@ server.registerTool(
   }
 );
 
+export const __test__ = {
+  buildMediaContent,
+  buildFreadMcpContent,
+  mediaByteBudget,
+  truncateUtf8,
+};
+
 // ─── Start ───────────────────────────────────────────────────────
-const transport = new StdioServerTransport();
-await server.connect(transport);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

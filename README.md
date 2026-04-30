@@ -32,7 +32,7 @@
 | **`fsearch`** | Find files by name, extension, or glob pattern |
 | **`fcontent`** | Search _inside_ files for text (powered by ripgrep) |
 | **`fmap`** | Extract structural skeleton from code (code cartography) |
-| **`fread`** | Read files with budgets, ranges, context windows, and diff-aware input |
+| **`fread`** | Read files with budgets, ranges, context windows, diff-aware input, and image/PDF media |
 | **`fcase`** | Preserve investigation state, evidence, and handoffs once the seam is known |
 | **`fedit`** | Apply surgical text patches with dry-run diffs, preconditions, and symbol scoping |
 | **`fwrite`** | Write or overwrite files from agent output — MCP-native, safe atomic writes (MCP adapter only) |
@@ -811,6 +811,43 @@ git diff | fread --from-stdin --stdin-format=unified-diff -B 3 -A 10
 # Pipe file paths from fsearch and cap how many get read
 fsearch -o paths '*.py' /project | fread --from-stdin --stdin-format=paths --max-files 5 -o json
 ```
+
+**Media reading (images + PDFs):**
+
+`fread` auto-detects image (PNG/JPEG/GIF/WEBP) and PDF inputs and routes them through a Python media engine instead of skipping as binary. Output is token-budgeted; the MCP adapter emits proper image content blocks per the 2025-11-25 MCP spec.
+
+| Mode | Trigger | Output |
+|------|---------|--------|
+| Image (default) | `fread <image>` | Auto-resized base64 image block (default 6000 token budget) + metadata |
+| Image meta-only | `--meta-only` | Dimensions, format, file size — no base64 |
+| Image raw | `--no-resize` | Original base64 (refused if estimated tokens exceed budget) |
+| PDF text (default) | `fread <pdf>` | Plain text with `--- page N ---` separators |
+| PDF render | `--render --pages 1:5` | Per-page rasterized images (capped at 10 pages without `--max-pages`) |
+| PDF meta-only | `--meta-only` | Page count, page size, encryption flag, embedded image count |
+
+Backends auto-probe at import time:
+- **Pillow** primary, stdlib fallback (no resize) for images
+- **PyMuPDF** primary, **Poppler** (`pdftotext`/`pdftoppm`) fallback for PDFs
+
+```bash
+# Image with auto-resize (PNG/JPEG/GIF/WEBP)
+fread screenshot.png
+
+# PDF text extraction (default)
+fread invoice.pdf
+
+# PDF page render — first 3 pages as images
+fread paper.pdf --render --pages 1:3
+
+# PDF metadata only
+fread big.pdf --meta-only
+
+# Suppress ShieldCortex memory ingest for this read
+fread sensitive.pdf --no-ingest
+```
+
+Successful media reads emit a structured `ingest_payload` field that's auto-written to a ShieldCortex memory entry via a detached, best-effort spawn (3-second timeout, never blocks `fread`). Opt out with `FSUITE_MEMORY_INGEST=0` or `--no-ingest`.
+
 
 ### `fcase` &mdash; continuity / handoff ledger
 
@@ -2300,7 +2337,12 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `fread /project/src/auth.py --token-budget 2000 -o json` | Cap by estimated token cost |
 | `fsearch -o paths '*.py' /project \| fread --from-stdin --stdin-format=paths --max-files 5` | Read first 5 files from a pipeline |
 | `git diff \| fread --from-stdin --stdin-format=unified-diff -B 3 -A 10` | Read context around changed hunks |
-| `fread --self-check` | Verify dependencies (`sed`, `awk`, `grep`, `wc`, `od`, `perl`) |
+| `fread screenshot.png` | Read image with auto-resize (PNG/JPEG/GIF/WEBP) |
+| `fread invoice.pdf` | Extract PDF text (default mode) |
+| `fread paper.pdf --render --pages 1:5` | Rasterize PDF pages 1–5 to images |
+| `fread big.pdf --meta-only` | PDF metadata only (page count, size, encryption) |
+| `fread sensitive.pdf --no-ingest` | Skip ShieldCortex memory ingest for this read |
+| `fread --self-check` | Verify dependencies (`sed`, `awk`, `grep`, `wc`, `od`, `perl`) + optional media probe (Pillow, PyMuPDF, Poppler) |
 
 ### `fcase` — Preserve Investigation Continuity
 
@@ -2568,7 +2610,10 @@ Copy-paste ready. Every command runs headless (no prompts, no TTY needed) unless
 | `rg` (ripgrep) | **Required** by `fcontent` | `sudo apt install ripgrep` |
 | `perl` | **Required** by `fread` for JSON escaping and portable timing fallback | `sudo apt install perl` |
 | `sqlite3` | Required by `fcase` case storage and `fmetrics import/stats/history/clean` | `sudo apt install sqlite3` |
-| `python3` | Required by `fmetrics predict`, `fprobe` engine, and `fs` engine | `sudo apt install python3` |
+| `python3` | Required by `fmetrics predict`, `fprobe` engine, `fs` engine, and `fread` media | `sudo apt install python3` |
+| `python3-pil` (Pillow) | **Optional** — image read/resize in `fread`. Falls back to stdlib (no resize) if absent | `sudo apt install python3-pil` |
+| `pymupdf` (fitz) | **Optional** — primary PDF backend in `fread` (text + render). Faster than Poppler | `pip install --user pymupdf` |
+| `poppler-utils` | **Optional** — PDF fallback for `fread` (`pdftotext`, `pdftoppm`). Used when PyMuPDF absent | `sudo apt install poppler-utils` |
 
 All tools include built-in guidance:
 
@@ -2581,8 +2626,8 @@ ftree --self-check         # Verify tree + gitignore support
 ftree --install-hints      # Print install command for tree
 fmap --self-check          # Verify grep is available
 fmap --install-hints       # Print install command for grep
-fread --self-check         # Verify sed/awk/grep/wc/od/perl
-fread --install-hints      # Print install commands for core deps
+fread --self-check         # Verify sed/awk/grep/wc/od/perl + optional media probe
+fread --install-hints      # Print install commands for core + media deps
 fcase --help               # Show case ledger subcommands
 fprobe --self-check        # Verify file/strings/xxd/od availability
 fedit --self-check         # Verify perl, diff, mktemp, and SHA tooling
@@ -2810,7 +2855,8 @@ The full test harness lives in `tests/`. Run via the master runner:
 | `fcontent` | `test_fcontent.sh` | 30 | rg passthrough, pipeline, caps |
 | `ftree` | `test_ftree.sh` | 48 | Recon, snapshot, JSON schema, depth |
 | `fmap` | `test_fmap.sh` | 80 | 18 languages, dedup, imports, Markdown |
-| `fread` | `test_fread.sh` | 42 | Range, head/tail, around, symbol, stdin modes |
+| `fread` | `test_fread.sh` | 84 | Range, head/tail, around, symbol, stdin modes, image/PDF media, budget skip, error contract |
+| `memory-ingest` | `test_memory_ingest.sh` | 4 | ShieldCortex helper: empty/malformed payload, missing config, timeout |
 | `fcase` | `test_fcase.sh` | 25 | Lifecycle, SQLite, import, handoff, busy-timeout |
 | `fedit` | `test_fedit.sh` | 38 | Dry-run, apply, symbol scope, batch, line-range |
 | `fmetrics` | `test_fmetrics.sh` | 20 | Import, stats, predict, clean |
@@ -2821,13 +2867,47 @@ The full test harness lives in `tests/`. Run via the master runner:
 | `mcp_rendering` | `test_mcp_rendering.sh` | 16 | Pixel-perfect MCP display, dev mode, ANSI |
 | `install` | `test_install.sh` | 12 | Installer, PATH, self-check, version |
 
-**Total: ~425 tests across 14 suites.** All suites must pass green before any release.
+**Total: ~470 tests across 15 suites.** All suites must pass green before any release.
 
 Exit codes: `0` = all pass, `1` = failures (count printed), `2` = suite not found.
 
 ---
 
 ## Changelog
+
+### v2.4.0 (2026-04-29)
+
+`fread` ships first-class image and PDF reading. Auto-detects PNG/JPEG/GIF/WEBP and PDF inputs, routes through a Python media engine, emits proper MCP image content blocks per the 2025-11-25 spec.
+
+**New media capabilities:**
+- **Images**: PNG/JPEG/GIF/WEBP with auto-resize loop targeting a token budget. Pillow primary, stdlib fallback (no resize).
+- **PDFs**: Text extraction (default) with `--- page N ---` separators. Page render mode (`--render --pages 1:5`) for rasterized images, capped at 10 pages without `--max-pages`. Metadata mode (`--meta-only`) for page count, encryption flag, embedded image count.
+- **Backends**: PyMuPDF primary, Poppler (`pdftotext`/`pdftoppm`) fallback. Engine probes both at import time and reports the active backend.
+- **Memory ingest**: Successful media reads emit a structured `ingest_payload` field auto-written to ShieldCortex via a detached, best-effort spawn (3-second timeout, never blocks `fread`). Opt out with `FSUITE_MEMORY_INGEST=0` or `--no-ingest`.
+
+**New flags:**
+- `--render`, `--pages START:END`, `--meta-only`, `--no-resize`, `--max-pages N`, `--max-tokens N`, `--no-ingest`
+
+**MCP adapter:**
+- New `formatExecError` helper extracted from `cli()` — error paths no longer respawn `fread` on failure.
+- `fread` MCP schema exposes all 7 media flags so agents can drive image/PDF reading directly.
+- Media files emit MCP `{type:"image", data, mimeType}` content blocks (top-level, not nested in text).
+
+**Status contract fixes:**
+- Budget-blocked media (over `--max-bytes`/`--max-lines`) now records `files[].status="budget_skipped"` and skips memory ingest.
+- Engine errors (`BACKEND_MISSING`, `INVALID_PAGE_RANGE`, `PDF_ENCRYPTED`) now record `files[].status="media_error"` alongside `errors[]`.
+
+**Optional dependencies:**
+- `python3-pil` (Pillow) — image read/resize
+- `pymupdf` — primary PDF backend
+- `poppler-utils` — PDF fallback
+
+**Tests:**
+- `test_fread.sh` expanded to 84 (16 new media tests + budget skip + error contract regression test)
+- `test_memory_ingest.sh` (4 tests) added for ShieldCortex helper
+- MCP structured-parity expanded to 45 tests (+ schema media flags + formatExecError envelope)
+
+---
 
 ### v2.3.0 (2026-03-29)
 

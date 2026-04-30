@@ -29,6 +29,11 @@ USAGE
   ... | fread --from-stdin --stdin-format=paths
   git diff | fread --from-stdin --stdin-format=unified-diff -B 3 -A 10
 
+  fread <image>                                  Read image with auto-resize (PNG/JPEG/GIF/WEBP)
+  fread <pdf>                                    Extract PDF text (default mode)
+  fread <pdf> --render --pages 1:5               Rasterize PDF pages to images
+  fread <pdf> --meta-only                        PDF metadata only
+
 OPTIONS
   --paths P1,P2,...           Comma-separated file paths to try in order (first existing wins)
   -r, --lines START:END       Line range (1-based, inclusive)
@@ -55,6 +60,15 @@ OPTIONS
   --install-hints             Print install commands
   --version                   Print version
   -h, --help                  Show help
+
+MEDIA OPTIONS (image + PDF reading)
+  --render                    PDF: render pages as images instead of extracting text
+  --pages START:END           PDF: page range (1-based, inclusive)
+  --meta-only                 Return metadata only (no body / base64)
+  --no-resize                 Image: emit raw base64 without auto-resize
+  --max-pages N               PDF render: raise 10-page cap
+  --max-tokens N              Image: resize-loop token budget (default 6000)
+  --no-ingest                 Skip ShieldCortex memory ingest for this read
 
 NOTES
   Budget precedence: token_budget > max_bytes > max_lines
